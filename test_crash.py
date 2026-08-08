@@ -1,55 +1,87 @@
-"""test_crash.py — la domanda era: cosa succede se il container muore a meta'
-scrittura? Qui si ammazza il processo con SIGKILL (che e' quello che fa Docker)
-DENTRO una transazione aperta, e si riapre il database.
+#!/usr/bin/env python3
+"""
+test_crash.py — what happens if the container dies mid-write?
 
-Atteso: la scrittura a meta' non c'e', il database e' integro, lo storico non ha
-versioni fantasma. Nessun intervento manuale."""
-import os, signal, sqlite3, subprocess, sys, tempfile, textwrap
+A child process opens a transaction, writes inside it, does NOT commit, and then
+kills itself with SIGKILL — which is exactly what Docker does when it stops a
+container the hard way. Then the database is reopened here.
 
-qui = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, qui)
-from rules import Registro, TUTTI
+Expected, with no manual intervention: the half-written change is not there, the
+database is whole, and history has no ghost version. That last one is the point:
+history is written by triggers, so a rolled-back write must leave no trace in
+rule_versions either — otherwise the story would record something that never
+happened.
 
-d = tempfile.mkdtemp()
-db = os.path.join(d, "regole.db")
+Run it with `python3 test_crash.py`. Exit code 0 means green.
+"""
+from __future__ import annotations
 
-R = Registro(db)
-CODICE = "Tst1Prova99"
-R.crea_progetto(CODICE, "Prova", ["architect"], {"VA": "vault e file"})
-R.crea(CODICE, "VA-02", "R", "Prima regola", "Corpo originale.", [TUTTI], motivo="setup")
-R.cx.close()
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import textwrap
 
-# processo figlio: apre, scrive, NON committa, e si fa ammazzare
-figlio = textwrap.dedent(f"""
-    import os, sys, signal
-    sys.path.insert(0, {qui!r})
-    from rules import Registro
-    R = Registro({db!r})
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+from rules import ALL, Registry
+
+D = tempfile.mkdtemp(prefix="crash-")
+DB = os.path.join(D, "rules.db")
+
+R = Registry(DB)
+CODE = "Tst1Trial999"
+R.create_project(CODE, "Trial", [("architect", "chat")], {"VA": "vault and files"})
+R.import_rules(CODE, [{"id": "VA-02", "type": "R", "title": "First rule",
+                       "body": "Original body.", "scopes": [ALL]}], reason="setup")
+BASE_VERSIONS = R.history(CODE, "VA-02")["count"]
+R.close()
+
+CHILD = textwrap.dedent(f"""
+    import os, signal, sys
+    sys.path.insert(0, {HERE!r})
+    from rules import Registry
+    R = Registry({DB!r})
     R.cx.execute("BEGIN IMMEDIATE")
-    R.cx.execute("UPDATE rules SET corpo='CORPO MAI COMMITTATO', motivo='crash', "
-                 "updated_at='2026-01-01T00:00:00Z' WHERE progetto='Prova' AND id='VA-02'")
-    R.cx.execute("INSERT INTO rules (progetto,id,domain,seq,tipo,titolo,corpo,stato,motivo,updated_at) "
-                 "VALUES ('Prova','VA-99','VA',99,'R','fantasma','mai nato','attiva','crash','2026-01-01T00:00:00Z')")
-    sys.stdout.write("scritto, non committato\\n"); sys.stdout.flush()
+    R.cx.execute("UPDATE rules SET body='BODY NEVER COMMITTED', reason='crash', "
+                 "updated_at='2026-01-01T00:00:00Z' "
+                 "WHERE project='Trial' AND id='VA-02'")
+    R.cx.execute("INSERT INTO rules (project,id,domain,seq,type,title,body,status,"
+                 "reason,updated_at) VALUES ('Trial','VA-99','VA',99,'R','ghost',"
+                 "'never born','active','crash','2026-01-01T00:00:00Z')")
+    sys.stdout.write("written, not committed\\n"); sys.stdout.flush()
     os.kill(os.getpid(), signal.SIGKILL)
 """)
-p = subprocess.run([sys.executable, "-c", figlio], capture_output=True, text=True)
-print(f"  figlio: {p.stdout.strip()!r} — segnale: {-p.returncode} (9 = SIGKILL)")
+
+p = subprocess.run([sys.executable, "-c", CHILD], capture_output=True, text=True)
+print(f"  child said {p.stdout.strip()!r} — signal {-p.returncode} (9 = SIGKILL)")
 assert p.returncode == -signal.SIGKILL, p
 
-R2 = Registro(db)
-corpo = R2.cx.execute("SELECT corpo FROM rules WHERE id='VA-02'").fetchone()[0]
-fantasma = R2.cx.execute("SELECT COUNT(*) FROM rules WHERE id='VA-99'").fetchone()[0]
-integ = R2.cx.execute("PRAGMA integrity_check").fetchone()[0]
-versioni = R2.storico(CODICE, "VA-02")["versioni"]
+R2 = Registry(DB)
+body = R2.cx.execute("SELECT body FROM rules WHERE id='VA-02'").fetchone()[0]
+ghosts = R2.cx.execute("SELECT COUNT(*) FROM rules WHERE id='VA-99'").fetchone()[0]
+integrity = R2.cx.execute("PRAGMA integrity_check").fetchone()[0]
+journal = R2.cx.execute("PRAGMA journal_mode").fetchone()[0]
+versions = R2.history(CODE, "VA-02")["count"]
+ghost_versions = R2.cx.execute(
+    "SELECT COUNT(*) FROM rule_versions WHERE rule_id='VA-99'").fetchone()[0]
 
-print(f"  corpo dopo il crash : {corpo!r}")
-print(f"  righe fantasma      : {fantasma}")
-print(f"  integrity_check     : {integ}")
-print(f"  versioni in storico : {versioni}")
+print(f"  body after the crash : {body!r}")
+print(f"  ghost rule rows      : {ghosts}")
+print(f"  ghost version rows   : {ghost_versions}")
+print(f"  integrity_check      : {integrity}")
+print(f"  journal_mode         : {journal}")
+print(f"  versions in history  : {versions} (was {BASE_VERSIONS})")
 
-assert corpo == "Corpo originale.", "la scrittura non committata e' sopravvissuta!"
-assert fantasma == 0, "riga fantasma sopravvissuta!"
-assert integ == "ok"
-assert versioni == 1, "versione fantasma nello storico!"
-print("\nOK — rollback automatico, database integro, storico pulito.")
+assert body == "Original body.", "the uncommitted write survived"
+assert ghosts == 0, "a ghost row survived"
+assert ghost_versions == 0, "a ghost row left a version behind"
+assert integrity == "ok"
+assert journal == "wal"
+assert versions == BASE_VERSIONS, "a rolled-back write left a version in history"
+assert R2.repaired == [], f"the reopen had to repair something: {R2.repaired}"
+R2.close()
+
+print("\nOK — rolled back on its own, database whole, history clean.")
