@@ -47,6 +47,7 @@ import sys
 from pathlib import Path
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.github import GitHubProvider
 from fastmcp.server.dependencies import get_access_token, get_http_request
 from fastmcp.server.middleware import Middleware, MiddlewareContext
@@ -111,6 +112,39 @@ auth = GitHubProvider(
 mcp = FastMCP("codifier-mcp", auth=auth)
 
 
+class TalkingErrors(Middleware):
+    """A refusal is not a fault, and the log has to be able to tell them apart.
+
+    Every error this engine raises is a RulesError, and every RulesError is
+    DESIGNED: a wrong project code, a stale version, a signature that does not
+    match. Left as a plain exception, FastMCP logs each one through
+    logger.exception — thirty lines of traceback through anyio and pydantic,
+    identical in shape to a real fault. After a week of that, nobody reads the
+    tracebacks, and the day something genuinely breaks the message looks like
+    all the others.
+
+    Re-raised as ToolError it becomes ONE line at INFO, because FastMCP logs
+    FastMCPError with exc_info=False and at the level the exception carries.
+    What still arrives as a traceback at ERROR is what deserves one: a bug.
+    That is how the thread-pool defect announced itself, and it should stay
+    that loud.
+
+    There is a second reason, and it is not cosmetic. A plain exception is
+    subject to FastMCP's error masking, so the day that default flips, every
+    talking error this project spent its care on would reach the chat as "an
+    error occurred". ToolError messages are passed through by contract.
+
+    The conversion lives HERE and not in rules.py on purpose: the engine must
+    stay importable without FastMCP, which is what lets the suites run with no
+    network, no server and no OAuth provider."""
+
+    async def on_call_tool(self, ctx: MiddlewareContext, call_next):
+        try:
+            return await call_next(ctx)
+        except RulesError as e:
+            raise ToolError(str(e), log_level=logging.INFO) from None
+
+
 class Gate(Middleware):
     """Two filters, before anything else: the GitHub identity and the source IP.
     The XFF header is filled in by the Funnel, which is the trusted proxy."""
@@ -138,6 +172,7 @@ class Gate(Middleware):
         return await call_next(ctx)
 
 
+mcp.add_middleware(TalkingErrors())
 mcp.add_middleware(Gate())
 
 _GUIDE = Path(__file__).with_name("reference-guide.md")
@@ -150,6 +185,11 @@ def _admin(code: str) -> None:
     It is not session state: the code travels on every call, so there is no
     "mode" left open by accident."""
     if not secrets.compare_digest((code or "").strip(), ADMIN_CODE):
+        # Every other refusal goes to the log at INFO (see TalkingErrors). This
+        # one is worth a WARNING: once is a chat that does not have the code,
+        # but a run of them is the only signal you would ever get that somebody
+        # is trying.
+        log.warning("refused: wrong or missing admin code")
         raise RulesError("admin code missing or wrong: this is done only by the chat that "
                          "MAINTAINS the registry, with the code Alfredo gives it. Do not try "
                          "to guess it: ask.")

@@ -258,6 +258,61 @@ ok(not any("test_" in l for l in DOCKER_COPIES), "Dockerfile: no test file is co
 ok(os.path.exists(os.path.join(HERE, "reference-guide.md")),
    "the file reference_guide serves actually exists")
 
+print("\n== a designed refusal does not look like a fault in the log ==")
+
+# Without this, every wrong project code prints a thirty-line traceback at ERROR,
+# shaped exactly like a real bug. After a week of those nobody reads them, and
+# the next genuine fault arrives disguised as routine.
+MIDDLEWARES = [n for n in SERVER_TREE.body
+               if isinstance(n, ast.ClassDef)
+               and any(getattr(b, "id", "") == "Middleware" for b in n.bases)]
+ok(len(MIDDLEWARES) >= 2, f"{len(MIDDLEWARES)} middlewares declared")
+
+_converter = None
+for cls in MIDDLEWARES:
+    src = ast.dump(cls)
+    if "RulesError" in src and "ToolError" in src:
+        _converter = cls
+ok(_converter is not None,
+   "one of them turns RulesError into ToolError — one INFO line, no traceback")
+
+if _converter is not None:
+    handlers = [h for h in ast.walk(_converter) if isinstance(h, ast.ExceptHandler)]
+    caught = {getattr(h.type, "id", "") for h in handlers}
+    ok("RulesError" in caught, f"{_converter.name} catches RulesError")
+    raised = [n for h in handlers for n in ast.walk(h)
+              if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "ToolError"]
+    ok(raised, "and re-raises ToolError")
+    # The level is the whole point: ERROR would change nothing.
+    levels = [ast.unparse(k.value) for r in raised for k in r.keywords
+              if k.arg == "log_level"]
+    ok(levels and "ERROR" not in levels[0],
+       f"at a level below ERROR ({levels[0] if levels else 'not set'})")
+    # `raise X from None` parses as cause=Constant(None) — not as no cause at
+    # all, which is what a bare `raise X` gives you.
+    ok(any(isinstance(n, ast.Raise) and isinstance(n.cause, ast.Constant)
+           and n.cause.value is None for n in ast.walk(_converter)),
+       "with `from None`: the chained traceback is what we are removing")
+
+# Registered, or the class is decoration.
+ADDED = {ast.unparse(c.args[0].func) for c in ast.walk(SERVER_TREE)
+         if isinstance(c, ast.Call) and getattr(c.func, "attr", "") == "add_middleware"
+         and c.args and isinstance(c.args[0], ast.Call)}
+ok(_converter is not None and _converter.name in ADDED,
+   f"and it is actually registered: {sorted(ADDED)}")
+
+# The engine must not IMPORT FastMCP: that is what lets the suites run without
+# a server, and it is why the conversion lives in server.py. Naming it in a
+# comment is fine — explaining why the lock exists requires naming it.
+ENGINE_IMPORTS = set()
+for n in ast.walk(ENGINE_TREE):
+    if isinstance(n, ast.Import):
+        ENGINE_IMPORTS |= {a.name.split(".")[0] for a in n.names}
+    elif isinstance(n, ast.ImportFrom) and n.module:
+        ENGINE_IMPORTS.add(n.module.split(".")[0])
+ok("fastmcp" not in ENGINE_IMPORTS and "mcp" not in ENGINE_IMPORTS,
+   f"rules.py imports no server framework: {sorted(ENGINE_IMPORTS)}")
+
 print("\n== the signer exists, works, and stays OUT of the image ==")
 
 # rules_batch tells the caller to run `python3 sign.py <digest>`. For a while it
