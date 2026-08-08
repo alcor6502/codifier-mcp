@@ -41,13 +41,15 @@ from __future__ import annotations
 
 import base64
 import difflib
+import functools
 import hashlib
 import os
 import re
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 TYPES = ("R", "M", "F")                 # R binding · M method · F technical fact
 ALL = "_ALL_"                           # reaches every consumer, present and future
@@ -433,6 +435,44 @@ TRIGGERS = ("trg_rules_ins", "trg_rules_upd", "trg_rules_del",
 # Registry
 # =====================================================================
 
+def _serialised(cls):
+    """Wrap every public method so that only one runs against the connection at
+    a time.
+
+    This is not an optimisation, it is a correctness fix, and it was found in
+    production on the very first call that touched the database. The server
+    runs sync tools in a THREAD POOL — FastMCP hands them to
+    anyio.to_thread.run_sync — so the connection is opened on the import thread
+    and used from a worker. sqlite3 refuses that outright unless
+    check_same_thread is off.
+
+    Turning that check off alone would not be enough: this engine writes multi
+    statement transactions with an explicit BEGIN, and two of those interleaving
+    on one connection would produce a COMMIT that closes somebody else's
+    transaction. So the check goes off AND the calls are serialised.
+
+    The lock is re-entrant because public methods call each other: status()
+    calls list_rules(), import_rules() calls check().
+
+    Serialising costs nothing here — one user, a few calls a minute — and it
+    buys the property that matters: whatever the pool does, the database sees
+    one caller."""
+    for name, fn in list(vars(cls).items()):
+        if name.startswith("_") or not callable(fn) or isinstance(fn, staticmethod):
+            continue
+
+        def wrap(f):
+            @functools.wraps(f)
+            def guarded(self, *a, **kw):
+                with self._lock:
+                    return f(self, *a, **kw)
+            return guarded
+
+        setattr(cls, name, wrap(fn))
+    return cls
+
+
+@_serialised
 class Registry:
     def __init__(self, db_path: str, *, public_key: str = "",
                  grace_until: str = "", provisional_days: int = DEFAULT_PROVISIONAL_DAYS) -> None:
@@ -440,9 +480,15 @@ class Registry:
         self.public_key = (public_key or "").strip()
         self.grace_until = (grace_until or "").strip()
         self.provisional_days = int(provisional_days or DEFAULT_PROVISIONAL_DAYS)
+        # Re-entrant, and it must exist before anything else: every public
+        # method acquires it (see _serialised).
+        self._lock = threading.RLock()
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         fresh = not os.path.exists(db_path)
-        self.cx = sqlite3.connect(db_path, timeout=10, isolation_level=None)
+        # check_same_thread=False because the server calls tools from a thread
+        # pool. It is safe ONLY together with the lock above.
+        self.cx = sqlite3.connect(db_path, timeout=10, isolation_level=None,
+                                  check_same_thread=False)
         self.cx.row_factory = sqlite3.Row
         self.cx.execute("PRAGMA journal_mode=WAL")
         self.cx.execute("PRAGMA synchronous=FULL")

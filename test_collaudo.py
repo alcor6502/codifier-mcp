@@ -1053,6 +1053,103 @@ def reopen_finds_everything_where_it_was():
 case("reopen: WAL, whole, three projects, history and lists intact",
      reopen_finds_everything_where_it_was)
 
+# =====================================================================
+head("the engine is used from a THREAD POOL, not from here")
+# =====================================================================
+
+# The hole this suite had. Everything above runs on one thread; the server does
+# not. FastMCP hands sync tools to anyio.to_thread.run_sync, so the connection
+# is opened on the import thread and used from a worker — and sqlite3 refuses
+# that outright. The first call that touched the database in production died
+# with "SQLite objects created in a thread can only be used in that same
+# thread", and no test here could have seen it. Now one can.
+
+R = Registry(DB, public_key=PUB, provisional_days=90)    # the reopen test closed the last one
+
+
+def a_worker_thread_can_use_the_engine():
+    import threading
+    errors: list[Exception] = []
+
+    def read():
+        try:
+            R.list_rules(FP, "tax")
+            R.project_info(FP)
+            R.status(FP)
+        except Exception as e:                                  # noqa: BLE001
+            errors.append(e)
+
+    t = threading.Thread(target=read)
+    t.start()
+    t.join(30)
+    assert not t.is_alive(), "the worker hung"
+    assert not errors, f"a worker thread cannot read: {errors[0]}"
+
+
+case("a thread that did not open the connection can still read",
+     a_worker_thread_can_use_the_engine)
+
+
+def many_threads_reading_and_writing():
+    """Writes too, and from several threads at once: the transactions in here
+    are multi-statement with an explicit BEGIN, so two of them interleaving on
+    one connection would COMMIT somebody else's work."""
+    import threading
+    errors: list[Exception] = []
+    done: list[str] = []
+    lock = threading.Lock()
+
+    def worker(n: int):
+        try:
+            rid = f"ST-{40 + n}"
+            R.propose(FP, rid, "F", f"Concurrent {n}", f"Body {n}.",
+                      ["market-news"], "thread safety")
+            R.list_rules(FP, "market-news")
+            R.check(FP)
+            R.history(FP, rid)
+            with lock:
+                done.append(rid)
+        except Exception as e:                                  # noqa: BLE001
+            with lock:
+                errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert not any(t.is_alive() for t in threads), "a worker hung: a deadlock?"
+    assert not errors, f"{len(errors)} failures, first: {errors[0]}"
+    assert len(done) == 8, done
+    # And the writes are all there, none lost and none half-written.
+    waiting = {r["id"] for r in R.pending(FP)["waiting"]}
+    assert {f"ST-{40 + n}" for n in range(8)} <= waiting, sorted(waiting)
+    assert R.status(FP)["database"]["integrity"] == "ok"
+
+
+case("eight threads proposing and reading at once: nothing lost, nothing torn",
+     many_threads_reading_and_writing)
+
+
+def the_lock_is_reentrant():
+    """status() calls list_rules(), import_rules() calls check(). With a plain
+    Lock instead of an RLock this deadlocks instead of failing, which is the
+    worse way to break: the container would hang, not crash."""
+    import threading
+    ok_flag = []
+
+    def call():
+        R.status(FP)
+        ok_flag.append(True)
+
+    t = threading.Thread(target=call)
+    t.start()
+    t.join(15)
+    assert ok_flag, "status() hung — the lock is not re-entrant"
+
+
+case("a public method calling another does not deadlock", the_lock_is_reentrant)
+
 print(f"\n{OK} passed, {FAIL} failed")
 if FAILURES:
     print("failed: " + "; ".join(FAILURES))

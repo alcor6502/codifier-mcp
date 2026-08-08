@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-1.0.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-30%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-1.0.1-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-30%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -157,7 +157,7 @@ and warns is a service whose warnings nobody reads.
 Three suites. No network, no FastMCP, no Docker.
 
 ```
-python3 test_collaudo.py    # 158 cases — the engine, refusals included
+python3 test_collaudo.py    # 161 cases — the engine, refusals included
 python3 test_surface.py     # 185 cases — the seam, the image, the template, the signer
 python3 test_crash.py       # SIGKILL mid-transaction, as Docker does
 ```
