@@ -224,6 +224,81 @@ for tool in TOOLS:
     doc = ast.get_docstring(tool) or ""
     ok(len(doc.strip()) >= 40, f"{tool.name} has a docstring worth reading", f"{len(doc)} chars")
 
+print("\n== the Dockerfile carries the cures that live in the environment ==")
+
+# These four settings are read when fastmcp is IMPORTED, so they cannot live in
+# server.py: anything set after the import arrives too late. That makes them a
+# cure with no home in the code, and a cure with no home is one that goes
+# missing quietly. This is its home.
+DOCKERFILE = open(os.path.join(HERE, "Dockerfile"), encoding="utf-8").read()
+
+for var, value, why in [
+    ("FASTMCP_SHOW_SERVER_BANNER", "false", "the banner"),
+    ("FASTMCP_ENABLE_RICH_LOGGING", "false", "the boxed log lines"),
+    ("FASTMCP_CHECK_FOR_UPDATES", "off", "an OUTBOUND call at every boot"),
+    ("FASTMCP_LOG_LEVEL", "WARNING", "fastmcp's own logger"),
+    ("PYTHONUNBUFFERED", "1", "log lines arriving when they happen"),
+    ("FASTMCP_HOME", "/data/fastmcp", "tokens on a persistent volume"),
+]:
+    ok(re.search(rf"^ENV {var}={re.escape(value)}\s*$", DOCKERFILE, re.MULTILINE) is not None,
+       f"Dockerfile: ENV {var}={value} — {why}")
+
+DOCKER_COPIES = [l for l in DOCKERFILE.splitlines() if l.startswith("COPY ")]
+ok(not any("*" in l for l in DOCKER_COPIES),
+   "Dockerfile: no wildcard COPY — the test files do not belong in the image",
+   [l for l in DOCKER_COPIES if "*" in l])
+for f in ("rules.py", "server.py", "preflight.py", "entrypoint.sh", "reference-guide.md"):
+    ok(any(re.search(rf"\b{re.escape(f)}\b", l) for l in DOCKER_COPIES),
+       f"Dockerfile: {f} is copied in")
+ok(not any("test_" in l for l in DOCKER_COPIES), "Dockerfile: no test file is copied in")
+
+# reference_guide is a tool that reads a file. Without the file it would answer
+# with an error, and the failure would surface in a chat rather than here.
+ok(os.path.exists(os.path.join(HERE, "reference-guide.md")),
+   "the file reference_guide serves actually exists")
+
+print("\n== the template is publishable ==")
+
+TEMPLATE_PATH = os.path.join(HERE, "codifier-mcp.template.xml")
+ok(os.path.exists(TEMPLATE_PATH), "the template is named after the repository")
+TEMPLATE = open(TEMPLATE_PATH, encoding="utf-8").read()
+
+# The template published in the repository IS the configuration, so it must
+# carry no trace of the machine it was written on.
+for residue in ("marlin-kelvin", "svc-a2", "/mnt/cache/Claude", "160.79.104.0/21 #  "):
+    ok(residue not in TEMPLATE, f"no personal residue: {residue!r}")
+
+ok("<Repository>ghcr.io/" in TEMPLATE,
+   "the template points at ghcr, not at a local image")
+ok("<Icon>" in TEMPLATE and os.path.exists(os.path.join(HERE, "codifier-icon.png")),
+   "the icon the template links to is IN the repository — a raw URL that 404s "
+   "is the twin's oldest open item")
+ok("<WebUI/>" in TEMPLATE,
+   "no WebUI: the service listens on 127.0.0.1 and has no web interface")
+
+# Unraid does not propagate new variables to containers already installed, so a
+# variable introduced later means editing every existing install by hand. These
+# go in now, inert or not.
+for var in ("APPROVAL_PUBKEY", "APPROVAL_GRACE_UNTIL", "PROVISIONAL_DAYS", "WEB_PORT",
+            "LOG_LEVEL", "ALLOWED_CIDRS", "DB_PATH", "BACKUP_DIR", "ADMIN_ACCESS_CODE"):
+    ok(f'Target="{var}"' in TEMPLATE, f"template declares {var}")
+
+# Every variable the service reads through env() without a default is one the
+# service cannot start without.
+for var in ("BASE_URL", "ALLOWED_GITHUB_LOGIN", "ADMIN_ACCESS_CODE",
+            "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "JWT_SIGNING_KEY"):
+    ok(f'Target="{var}"' in TEMPLATE, f"template declares the mandatory {var}")
+
+ok('Target="VAULT_UID"' not in TEMPLATE and 'Target="VAULT_GID"' not in TEMPLATE,
+   "no VAULT_UID/VAULT_GID: those belong to the twin, which drops privileges")
+
+import xml.etree.ElementTree as ET                              # noqa: E402
+try:
+    root = ET.parse(TEMPLATE_PATH).getroot()
+    ok(root.tag == "Container", f"the template parses as XML ({len(root.findall('Config'))} fields)")
+except ET.ParseError as e:
+    ok(False, "the template parses as XML", str(e))
+
 print("\n== the preflight helpers ==")
 
 # preflight imports rules only inside a check, so this costs nothing.
