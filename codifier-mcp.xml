@@ -25,7 +25,7 @@
   <Overview>Self-hosted MCP server that keeps a project's rules in a SQLite registry instead of scattered Markdown files, and answers the question a chat cannot answer today: which rules am I under, right now. Rules are addressed to CONSUMERS (chats and skills) through named SCOPES, and the reading order is the breadth of the scope, so it stays correct on its own as consumers are added. History is written by database triggers, not by tool code, so a change made by hand is recorded too; nothing is ever deleted. A new rule reaches nobody until its batch is approved with an ed25519 signature — the registry holds only the public key — and an approved rule is provisional and expires unless renewed. One database, many projects, each addressed by an opaque code. Access via OAuth 2.1 with GitHub login restricted to a single user, published by Tailscale Funnel.</Overview>
   <Category>Productivity: Tools:Utilities</Category>
   <WebUI/>
-  <TemplateURL>https://raw.githubusercontent.com/alcor6502/codifier-mcp/main/codifier-mcp.template.xml</TemplateURL>
+  <TemplateURL>https://raw.githubusercontent.com/alcor6502/codifier-mcp/main/codifier-mcp.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/alcor6502/codifier-mcp/main/codifier-icon.png</Icon>
   <ExtraParams>--restart=unless-stopped</ExtraParams>
   <PostArgs>entrypoint.sh</PostArgs>

@@ -327,7 +327,7 @@ except subprocess.TimeoutExpired:
 
 print("\n== the template is publishable ==")
 
-TEMPLATE_PATH = os.path.join(HERE, "codifier-mcp.template.xml")
+TEMPLATE_PATH = os.path.join(HERE, "codifier-mcp.xml")
 ok(os.path.exists(TEMPLATE_PATH), "the template is named after the repository")
 TEMPLATE = open(TEMPLATE_PATH, encoding="utf-8").read()
 
