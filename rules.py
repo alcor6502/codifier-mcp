@@ -1,806 +1,1463 @@
 """
-rules.py — registro delle regole su SQLite. UN database, N progetti.
+rules.py — a rules registry on SQLite. ONE database, N projects.
 
-v2.0 — le tre differenze rispetto alla v1.0:
-1. MULTI-PROGETTO. Il progetto e' una colonna, non una tabella: stesso schema,
-   una query sola, e la chiave e' (progetto, id) — cosi' VA-02 di Financial
-   Portfolio e VA-02 di Health Tracking convivono senza collidere.
-2. RUOLI E DOMINI SONO DATI, non costanti del codice: ogni progetto dichiara i
-   suoi. Un progetto nuovo non richiede una riga di Python.
-   Il progetto NON si indirizza col nome ma con un CODICE alfanumerico opaco
-   che sta in testa alle istruzioni del progetto: chi non ce l'ha non arriva al
-   registro sbagliato per distrazione. ⚠ E' una protezione contro l'ERRORE, non
-   contro la volonta': una chat a cui si dia il codice di un altro progetto ci
-   scrive. Il confine vero e' il gate OAuth, che sta a monte.
-   Corollario NON negoziabile: nessun errore elenca i progetti esistenti. Un
-   messaggio che dicesse "progetti: A, B, C" regalerebbe cio' che il codice
-   protegge — e per la stessa ragione non si dice mai che un ID esiste altrove.
-3. IL DATABASE E' DI ROOT. Il processo gira come root e i file nascono 644:
-   chi monta la share via SMB lo LEGGE e non lo tocca. Qui, al contrario del
-   vault, la scrittura a mano non e' una comodita' — e' il modo di rompere lo
-   storico senza accorgersene.
+The model
+---------
+- A project is a COLUMN, not a table: the key is (project, id), so VA-02 of one
+  project and VA-02 of another coexist with separate histories.
+- A project is addressed by an opaque CODE, never by its name. No read tool
+  lists projects and no error names one: whoever lacks the code cannot find the
+  door. It is a guard against MISTAKE, not against will — the real boundary is
+  the OAuth gate upstream.
+- CONSUMERS are whoever downloads rules: chats and skills. A person is not a
+  consumer: a rule that binds a person says so in its body.
+- SCOPES are named sets of consumers. There is no separate notion of "group":
+  a single consumer is a set with one element, and its singleton scope is
+  created by a TRIGGER when the consumer is born. One kind of pointer only.
+- The reading order falls out of the model: a rule reaches a consumer through
+  one or more scopes, and the widest of them decides where it sits in the
+  block. Breadth is a COUNT, not a convention to maintain.
 
-Principi invariati: l'ID e' un puntatore e non si riusa MAI; lo storico lo
-scrivono i TRIGGER (non il codice, quindi non e' aggirabile per distrazione);
-cancellare non esiste, si ritira; ogni operazione restituisce un VERDETTO.
+Invariants
+----------
+- an ID is a pointer and is NEVER reused, not even by a retired rule;
+- history is written by TRIGGERS, not by tool code, so a change made by hand
+  with sqlite3 is recorded too;
+- deletion does not exist: a rule is retired;
+- whole versions are kept, not diffs: a chain of diffs rots, and 177 rules of
+  text weigh nothing;
+- every operation returns a VERDICT, not a dump;
+- a new rule reaches nobody until it is approved. Approval is signed, covers a
+  BATCH, and the signature is verified against a PUBLIC key: the private half
+  never enters a conversation.
+- an approved rule is PROVISIONAL and expires. Staying costs a decision, going
+  is free — which is the asymmetry that stops rules from piling up.
+
+The database is owned by root and its files are 0644: whoever mounts the share
+READS it and does not touch it. Writing by hand would bypass the triggers and
+break history in silence.
 """
 from __future__ import annotations
 
+import base64
 import difflib
 import hashlib
 import os
 import re
-import secrets
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-TIPI = ("R", "M", "F")
-TUTTI = "_ALL_"                  # perimetro speciale: la regola vale per chiunque.
-                                 # Token esplicito e non ambiguo: "*" si legge come
-                                 # un glob e in un elenco di ruoli sembra un errore.
-ALIAS_TUTTI = {"_all_", "*", "tutti", "chiunque"}   # tollerati in ingresso
+VERSION = "1.0.0"
+
+TYPES = ("R", "M", "F")                 # R binding · M method · F technical fact
+ALL = "_ALL_"                           # reaches every consumer, present and future
+ALL_ALIASES = {"_all_", "*", "all", "tutti", "chiunque"}
+KINDS = ("chat", "skill")
+STATUSES = ("proposed", "active", "retired", "denied")
+PERMANENCE = ("provisional", "permanent")
+
 RE_ID = re.compile(r"^([A-Z]{2})-(\d{2,3})$")
-RE_SIGLA = re.compile(r"\b([A-Z]{2})-(\d{2,3})\b")
-MODO_FILE = 0o644                # root scrive, tutti gli altri leggono e basta
-MODO_DIR = 0o755
-RE_CODICE = re.compile(r"^[A-Za-z0-9]{8,32}$")
-ERR_PROGETTO = ("progetto non specificato: serve il CODICE del progetto, quello in testa "
-                "alle sue istruzioni. Senza, il registro non risponde — e non esiste un "
-                "modo di elencarli: o ce l'hai, o lo chiedi ad Alfredo.")
+RE_REF = re.compile(r"\b([A-Z]{2})-(\d{2,3})\b")
+RE_CODE = re.compile(r"^[A-Za-z0-9]{8,32}$")
+RE_NAME = re.compile(r"^[a-z0-9][a-z0-9 _-]{0,40}$")
+
+FILE_MODE = 0o644                       # root writes, everyone else reads
+DIR_MODE = 0o755
+DEFAULT_PROVISIONAL_DAYS = 90
+MAX_BODY_BYTES = 64_000
+MAX_IMPORT = 500
+MAX_GET_IDS = 50
+
+# Identical answer for a missing code and a wrong one: a message that told them
+# apart would be an oracle.
+ERR_PROJECT = ("project not specified: this needs the project CODE, the one at the top "
+               "of its instructions. Without it the registry does not answer — and there "
+               "is no way to list projects: either you have it, or you ask for it.")
 
 
 class RulesError(Exception):
-    """Errore parlante: dice cosa e' successo E cosa fare."""
+    """A talking error: says what happened AND what to do about it."""
 
 
-def _ora() -> str:
+def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _proprietario(path: str) -> str:
-    st = os.stat(path)
-    return f"{st.st_uid}:{st.st_gid}" + (" (root)" if st.st_uid == 0 else "")
+def _today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _plus_days(days: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _norm_id(rid: str) -> str:
     s = (rid or "").strip().upper()
-    if s.count("-") == 2:        # 'VA-02-R': la citazione va NUDA, ma non litighiamo
+    if s.count("-") == 2:               # 'VA-02-R': cite it bare, but do not argue
         s = s.rsplit("-", 1)[0]
     if not RE_ID.match(s):
-        raise RulesError(f"ID {rid!r} malformato: serve DOMINIO-NN, es. VA-02")
+        raise RulesError(f"malformed ID {rid!r}: it must be DOMAIN-NN, e.g. VA-02")
     return s
 
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS projects (
-  nome        TEXT PRIMARY KEY,
-  codice      TEXT NOT NULL UNIQUE,   -- handle opaco: l'unico modo di indirizzarlo
-  descrizione TEXT,
-  creato      TEXT NOT NULL
-);
+def _norm_name(name: str, what: str) -> str:
+    s = (name or "").strip().lower()
+    if not RE_NAME.match(s):
+        raise RulesError(
+            f"invalid {what} name {name!r}: lowercase letters, digits, space, '-' and '_', "
+            "max 41 characters, and it cannot start with a separator")
+    return s
 
-CREATE TABLE IF NOT EXISTS project_roles (
-  progetto TEXT NOT NULL REFERENCES projects(nome) ON DELETE CASCADE,
-  ruolo    TEXT NOT NULL,
-  PRIMARY KEY (progetto, ruolo)
+
+def _norm_scope_list(scopes) -> list[str]:
+    if isinstance(scopes, str):
+        scopes = [scopes]
+    out: list[str] = []
+    for s in scopes or []:
+        t = (s or "").strip()
+        if t.lower() in ALL_ALIASES:
+            t = ALL
+        elif t != ALL:
+            t = _norm_name(t, "scope")
+        if t not in out:
+            out.append(t)
+    return out
+
+
+# =====================================================================
+# Signature — ed25519, and the database holds only the PUBLIC half
+# =====================================================================
+
+def verify_signature(public_key_b64: str, message: str, signature_b64: str) -> None:
+    """Raise RulesError unless signature_b64 is a valid ed25519 signature of
+    `message` under public_key_b64. Both are raw base64, 32 and 64 bytes.
+
+    Deliberately not the SSH signature format: this way there is no archaeology
+    on either side, and the signer is twenty lines the user can read."""
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except ImportError as e:                                    # pragma: no cover
+        raise RulesError(f"signature verification unavailable: {e}")
+    try:
+        raw = base64.b64decode(public_key_b64.strip(), validate=True)
+        sig = base64.b64decode(signature_b64.strip(), validate=True)
+    except Exception:
+        raise RulesError("public key or signature is not valid base64")
+    if len(raw) != 32:
+        raise RulesError(f"public key is {len(raw)} bytes, expected 32 (raw ed25519)")
+    if len(sig) != 64:
+        raise RulesError(f"signature is {len(sig)} bytes, expected 64 (raw ed25519)")
+    try:
+        Ed25519PublicKey.from_public_bytes(raw).verify(sig, message.encode("utf-8"))
+    except InvalidSignature:
+        raise RulesError(
+            "signature does not match this digest. Either it was produced for a different "
+            "batch — someone proposed a rule in the meantime — or it was signed with "
+            "another key. Ask for the digest again and re-sign it.")
+
+
+# =====================================================================
+# Schema
+# =====================================================================
+
+# The perimeter of a rule, in two shapes, both written into history.
+#   scopes    what was DECLARED  (e.g. 'deliberativi')
+#   consumers who was REACHED    (resolved and expanded)
+# A version is a photograph: if only the scope name were stored, changing the
+# membership of that scope tomorrow would rewrite what was true yesterday.
+_SCOPES_OF = """(SELECT IFNULL(GROUP_CONCAT(scope, ','), '') FROM
+    (SELECT scope FROM rule_scopes
+      WHERE project = {R}.project AND rule_id = {R}.id ORDER BY scope))"""
+
+_CONSUMERS_OF = """(SELECT IFNULL(GROUP_CONCAT(c, ','), '') FROM
+    (SELECT DISTINCT m.consumer AS c
+       FROM rule_scopes s
+       JOIN scope_members m ON m.project = s.project AND m.scope = s.scope
+      WHERE s.project = {R}.project AND s.rule_id = {R}.id
+      UNION
+     SELECT k.name FROM consumers k
+      WHERE k.project = {R}.project
+        AND EXISTS (SELECT 1 FROM rule_scopes z
+                     WHERE z.project = {R}.project AND z.rule_id = {R}.id
+                       AND z.scope = '_ALL_')
+      ORDER BY 1))"""
+
+_NEXT_VERSION = """(SELECT IFNULL(MAX(version), 0) + 1 FROM rule_versions
+    WHERE project = {R}.project AND rule_id = {R}.id)"""
+
+_VCOLS = ("project, rule_id, version, type, title, body, status, permanence, "
+          "expires_at, superseded_by, changelog, scopes, consumers, ts, action, reason")
+
+
+def _f(sql: str, row: str) -> str:
+    return sql.format(R=row)
+
+
+SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS projects (
+  name        TEXT PRIMARY KEY,
+  code        TEXT NOT NULL UNIQUE,      -- opaque handle: the only way in
+  description TEXT,
+  created     TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS project_domains (
-  progetto    TEXT NOT NULL REFERENCES projects(nome) ON DELETE CASCADE,
-  dominio     TEXT NOT NULL,
-  descrizione TEXT,
-  PRIMARY KEY (progetto, dominio)
+  project     TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+  domain      TEXT NOT NULL,
+  description TEXT,
+  PRIMARY KEY (project, domain)
+);
+
+-- Whoever downloads rules. A skill is not a chat, but it acts, and what acts
+-- is under rules: calling list_rules is the only requirement.
+CREATE TABLE IF NOT EXISTS consumers (
+  project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+  name    TEXT NOT NULL,
+  kind    TEXT NOT NULL CHECK (kind IN ('chat','skill')),
+  created TEXT NOT NULL,
+  PRIMARY KEY (project, name)
+);
+
+-- Named sets of consumers. managed=1 means the row was generated (a consumer's
+-- singleton, or _ALL_) and must keep telling the truth about its own name.
+CREATE TABLE IF NOT EXISTS scopes (
+  project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+  name    TEXT NOT NULL,
+  managed INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (project, name)
+);
+
+CREATE TABLE IF NOT EXISTS scope_members (
+  project  TEXT NOT NULL,
+  scope    TEXT NOT NULL,
+  consumer TEXT NOT NULL,
+  PRIMARY KEY (project, scope, consumer),
+  FOREIGN KEY (project, scope)    REFERENCES scopes(project, name)    ON DELETE CASCADE,
+  FOREIGN KEY (project, consumer) REFERENCES consumers(project, name) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS rules (
-  progetto      TEXT NOT NULL REFERENCES projects(nome) ON DELETE CASCADE,
+  project       TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
   id            TEXT NOT NULL,
   domain        TEXT NOT NULL,
   seq           INTEGER NOT NULL,
-  tipo          TEXT NOT NULL CHECK (tipo IN ('R','M','F')),
-  titolo        TEXT NOT NULL,
-  corpo         TEXT NOT NULL,          -- MARKDOWN libero, scritto a mano e reso
-                                        -- verbatim: l'unica cosa che ne viene
-                                        -- estratta sono le sigle citate (rule_refs)
-  stato         TEXT NOT NULL DEFAULT 'attiva' CHECK (stato IN ('attiva','ritirata')),
+  type          TEXT NOT NULL CHECK (type IN ('R','M','F')),
+  title         TEXT NOT NULL,
+  body          TEXT NOT NULL,          -- free Markdown, rendered verbatim
+  status        TEXT NOT NULL DEFAULT 'proposed'
+                CHECK (status IN ('proposed','active','retired','denied')),
+  permanence    TEXT NOT NULL DEFAULT 'provisional'
+                CHECK (permanence IN ('provisional','permanent')),
+  expires_at    TEXT,                   -- NULL for permanent rules
   superseded_by TEXT,
+  denied_reason TEXT,
   changelog     TEXT,
-  fonte         TEXT,
-  motivo        TEXT NOT NULL DEFAULT 'creazione',
+  source        TEXT,                   -- where it came from: the renewal criterion
+  reason        TEXT NOT NULL DEFAULT 'created',
+  proposed_by   TEXT,
   updated_at    TEXT NOT NULL,
-  PRIMARY KEY (progetto, id),
-  UNIQUE (progetto, domain, seq)
+  PRIMARY KEY (project, id),
+  UNIQUE (project, domain, seq)
 );
 
-CREATE TABLE IF NOT EXISTS rule_roles (
-  progetto TEXT NOT NULL,
-  rule_id  TEXT NOT NULL,
-  ruolo    TEXT NOT NULL,
-  PRIMARY KEY (progetto, rule_id, ruolo),
-  FOREIGN KEY (progetto, rule_id) REFERENCES rules(progetto, id) ON DELETE CASCADE
+-- A rule points to a SET of scopes: widening it is one more row, and the group
+-- it already belonged to is not touched.
+-- The foreign key is DEFERRED on purpose: the engine writes the perimeter
+-- BEFORE the rule, inside one transaction, so the AFTER INSERT trigger on
+-- rules already sees a complete perimeter to photograph.
+CREATE TABLE IF NOT EXISTS rule_scopes (
+  project TEXT NOT NULL,
+  rule_id TEXT NOT NULL,
+  scope   TEXT NOT NULL,
+  PRIMARY KEY (project, rule_id, scope),
+  FOREIGN KEY (project, rule_id) REFERENCES rules(project, id)
+      ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+  FOREIGN KEY (project, scope) REFERENCES scopes(project, name)
+      DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE TABLE IF NOT EXISTS rule_refs (
-  progetto TEXT NOT NULL,
-  src      TEXT NOT NULL,
-  dst      TEXT NOT NULL,
-  PRIMARY KEY (progetto, src, dst),
-  FOREIGN KEY (progetto, src) REFERENCES rules(progetto, id) ON DELETE CASCADE
+  project TEXT NOT NULL,
+  src     TEXT NOT NULL,
+  dst     TEXT NOT NULL,
+  PRIMARY KEY (project, src, dst),
+  FOREIGN KEY (project, src) REFERENCES rules(project, id)
+      ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE TABLE IF NOT EXISTS rule_versions (
-  progetto      TEXT NOT NULL,
+  project       TEXT NOT NULL,
   rule_id       TEXT NOT NULL,
-  versione      INTEGER NOT NULL,
-  tipo          TEXT,
-  titolo        TEXT,
-  corpo         TEXT,
-  stato         TEXT,
+  version       INTEGER NOT NULL,
+  type          TEXT,
+  title         TEXT,
+  body          TEXT,
+  status        TEXT,
+  permanence    TEXT,
+  expires_at    TEXT,
   superseded_by TEXT,
   changelog     TEXT,
-  ruoli         TEXT,
+  scopes        TEXT,                   -- declared
+  consumers     TEXT,                   -- reached, resolved
   ts            TEXT NOT NULL,
-  azione        TEXT NOT NULL,
-  motivo        TEXT,
-  PRIMARY KEY (progetto, rule_id, versione)
+  action        TEXT NOT NULL,
+  reason        TEXT,
+  PRIMARY KEY (project, rule_id, version)
 );
 
-CREATE INDEX IF NOT EXISTS ix_roles_ruolo ON rule_roles(progetto, ruolo);
-CREATE INDEX IF NOT EXISTS ix_refs_dst    ON rule_refs(progetto, dst);
+CREATE TABLE IF NOT EXISTS approvals (
+  project     TEXT NOT NULL,
+  digest      TEXT NOT NULL,
+  signature   TEXT,
+  n_rules     INTEGER NOT NULL,
+  rule_ids    TEXT NOT NULL,
+  approved_at TEXT NOT NULL,
+  signed      INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (project, digest, approved_at)
+);
 
--- Lo storico lo scrive il MOTORE, non il codice del tool.
+CREATE INDEX IF NOT EXISTS ix_scope_members ON scope_members(project, consumer);
+CREATE INDEX IF NOT EXISTS ix_rule_scopes   ON rule_scopes(project, scope);
+CREATE INDEX IF NOT EXISTS ix_refs_dst      ON rule_refs(project, dst);
+CREATE INDEX IF NOT EXISTS ix_rules_status  ON rules(project, status);
+
+-- History is written by the ENGINE, not by tool code.
 CREATE TRIGGER IF NOT EXISTS trg_rules_ins AFTER INSERT ON rules BEGIN
-  INSERT INTO rule_versions (progetto, rule_id, versione, tipo, titolo, corpo, stato,
-                             superseded_by, changelog, ruoli, ts, azione, motivo)
-  VALUES (NEW.progetto, NEW.id,
-          (SELECT IFNULL(MAX(versione),0)+1 FROM rule_versions
-             WHERE progetto=NEW.progetto AND rule_id=NEW.id),
-          NEW.tipo, NEW.titolo, NEW.corpo, NEW.stato, NEW.superseded_by, NEW.changelog,
-          (SELECT IFNULL(GROUP_CONCAT(ruolo,','),'') FROM rule_roles
-             WHERE progetto=NEW.progetto AND rule_id=NEW.id),
-          NEW.updated_at, 'creata', NEW.motivo);
+  INSERT INTO rule_versions ({_VCOLS})
+  VALUES (NEW.project, NEW.id, {_f(_NEXT_VERSION, 'NEW')},
+          NEW.type, NEW.title, NEW.body, NEW.status, NEW.permanence, NEW.expires_at,
+          NEW.superseded_by, NEW.changelog,
+          {_f(_SCOPES_OF, 'NEW')}, {_f(_CONSUMERS_OF, 'NEW')},
+          NEW.updated_at, 'created', NEW.reason);
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_rules_upd AFTER UPDATE ON rules BEGIN
-  INSERT INTO rule_versions (progetto, rule_id, versione, tipo, titolo, corpo, stato,
-                             superseded_by, changelog, ruoli, ts, azione, motivo)
-  VALUES (NEW.progetto, NEW.id,
-          (SELECT IFNULL(MAX(versione),0)+1 FROM rule_versions
-             WHERE progetto=NEW.progetto AND rule_id=NEW.id),
-          NEW.tipo, NEW.titolo, NEW.corpo, NEW.stato, NEW.superseded_by, NEW.changelog,
-          (SELECT IFNULL(GROUP_CONCAT(ruolo,','),'') FROM rule_roles
-             WHERE progetto=NEW.progetto AND rule_id=NEW.id),
-          NEW.updated_at, 'modificata', NEW.motivo);
+  INSERT INTO rule_versions ({_VCOLS})
+  VALUES (NEW.project, NEW.id, {_f(_NEXT_VERSION, 'NEW')},
+          NEW.type, NEW.title, NEW.body, NEW.status, NEW.permanence, NEW.expires_at,
+          NEW.superseded_by, NEW.changelog,
+          {_f(_SCOPES_OF, 'NEW')}, {_f(_CONSUMERS_OF, 'NEW')},
+          NEW.updated_at, 'amended', NEW.reason);
 END;
 
--- Rete di sicurezza: se qualcuno cancella a mano, resta la traccia.
+-- Safety net: if someone deletes by hand, the trace stays.
 CREATE TRIGGER IF NOT EXISTS trg_rules_del AFTER DELETE ON rules BEGIN
-  INSERT INTO rule_versions (progetto, rule_id, versione, tipo, titolo, corpo, stato,
-                             superseded_by, changelog, ruoli, ts, azione, motivo)
-  VALUES (OLD.progetto, OLD.id,
-          (SELECT IFNULL(MAX(versione),0)+1 FROM rule_versions
-             WHERE progetto=OLD.progetto AND rule_id=OLD.id),
-          OLD.tipo, OLD.titolo, OLD.corpo, OLD.stato, OLD.superseded_by, OLD.changelog,
-          '', strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'CANCELLATA', 'DELETE fuori dai tool');
+  INSERT INTO rule_versions ({_VCOLS})
+  VALUES (OLD.project, OLD.id, {_f(_NEXT_VERSION, 'OLD')},
+          OLD.type, OLD.title, OLD.body, OLD.status, OLD.permanence, OLD.expires_at,
+          OLD.superseded_by, OLD.changelog, '', '',
+          strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'DELETED', 'DELETE outside the tools');
+END;
+
+-- Changing a rule's perimeter is a change worth a version. The guard keeps the
+-- trigger quiet while the rule itself does not exist yet (creation) or no
+-- longer exists (cascade).
+CREATE TRIGGER IF NOT EXISTS trg_scope_link_ins AFTER INSERT ON rule_scopes
+WHEN EXISTS (SELECT 1 FROM rules WHERE project = NEW.project AND id = NEW.rule_id)
+BEGIN
+  INSERT INTO rule_versions ({_VCOLS})
+  SELECT r.project, r.id, {_f(_NEXT_VERSION, 'r')},
+         r.type, r.title, r.body, r.status, r.permanence, r.expires_at,
+         r.superseded_by, r.changelog,
+         {_f(_SCOPES_OF, 'r')}, {_f(_CONSUMERS_OF, 'r')},
+         strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'scope added', 'perimeter widened'
+    FROM rules r WHERE r.project = NEW.project AND r.id = NEW.rule_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_scope_link_del AFTER DELETE ON rule_scopes
+WHEN EXISTS (SELECT 1 FROM rules WHERE project = OLD.project AND id = OLD.rule_id)
+BEGIN
+  INSERT INTO rule_versions ({_VCOLS})
+  SELECT r.project, r.id, {_f(_NEXT_VERSION, 'r')},
+         r.type, r.title, r.body, r.status, r.permanence, r.expires_at,
+         r.superseded_by, r.changelog,
+         {_f(_SCOPES_OF, 'r')}, {_f(_CONSUMERS_OF, 'r')},
+         strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'scope removed', 'perimeter narrowed'
+    FROM rules r WHERE r.project = OLD.project AND r.id = OLD.rule_id;
+END;
+
+-- Every consumer needs a scope holding itself alone, or no rule could be
+-- addressed to it. The database makes it, so it exists even for a consumer
+-- inserted by hand.
+CREATE TRIGGER IF NOT EXISTS trg_consumer_scope AFTER INSERT ON consumers BEGIN
+  INSERT INTO scopes (project, name, managed) VALUES (NEW.project, NEW.name, 1);
+  INSERT INTO scope_members (project, scope, consumer)
+       VALUES (NEW.project, NEW.name, NEW.name);
+END;
+
+-- A managed scope must keep telling the truth about its own name.
+CREATE TRIGGER IF NOT EXISTS trg_managed_no_extra_member
+BEFORE INSERT ON scope_members
+WHEN (SELECT managed FROM scopes
+       WHERE project = NEW.project AND name = NEW.scope) = 1
+ AND NEW.consumer <> NEW.scope
+BEGIN
+  SELECT RAISE(ABORT, 'managed scope: it is a consumer singleton and takes no other member');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_managed_no_member_update
+BEFORE UPDATE ON scope_members
+WHEN (SELECT managed FROM scopes
+       WHERE project = OLD.project AND name = OLD.scope) = 1
+BEGIN
+  SELECT RAISE(ABORT, 'managed scope: its membership is not editable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_managed_no_rename
+BEFORE UPDATE OF name ON scopes
+WHEN OLD.managed = 1 AND NEW.name <> OLD.name
+BEGIN
+  SELECT RAISE(ABORT, 'managed scope: its name is its consumer''s and is not renamed here');
+END;
+
+-- A renamed consumer is a different consumer: the rules that reached it must be
+-- reviewed, not dragged along behind a name. Same reasoning as rule IDs.
+CREATE TRIGGER IF NOT EXISTS trg_consumer_no_rename
+BEFORE UPDATE OF name ON consumers
+WHEN NEW.name <> OLD.name
+BEGIN
+  SELECT RAISE(ABORT, 'a consumer is not renamed: create the new one and retire the old');
 END;
 """
 
+TABLES = ("projects", "project_domains", "consumers", "scopes", "scope_members",
+          "rules", "rule_scopes", "rule_refs", "rule_versions", "approvals")
+TRIGGERS = ("trg_rules_ins", "trg_rules_upd", "trg_rules_del",
+            "trg_scope_link_ins", "trg_scope_link_del", "trg_consumer_scope",
+            "trg_managed_no_extra_member", "trg_managed_no_member_update",
+            "trg_managed_no_rename", "trg_consumer_no_rename")
 
-class Registro:
-    def __init__(self, db_path: str) -> None:
+
+# =====================================================================
+# Registry
+# =====================================================================
+
+class Registry:
+    def __init__(self, db_path: str, *, public_key: str = "",
+                 grace_until: str = "", provisional_days: int = DEFAULT_PROVISIONAL_DAYS) -> None:
         self.path = db_path
+        self.public_key = (public_key or "").strip()
+        self.grace_until = (grace_until or "").strip()
+        self.provisional_days = int(provisional_days or DEFAULT_PROVISIONAL_DAYS)
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
-        nuovo = not os.path.exists(db_path)
+        fresh = not os.path.exists(db_path)
         self.cx = sqlite3.connect(db_path, timeout=10, isolation_level=None)
         self.cx.row_factory = sqlite3.Row
         self.cx.execute("PRAGMA journal_mode=WAL")
         self.cx.execute("PRAGMA synchronous=FULL")
         self.cx.execute("PRAGMA foreign_keys=ON")
         self.cx.execute("PRAGMA busy_timeout=10000")
-        # Lo schema si riapplica a ogni apertura: se un oggetto manca — tipicamente
-        # un TRIGGER droppato a mano — viene rifatto. Ma la riparazione si DICHIARA:
-        # un trigger che sparisce non da' errori, smette solo di scrivere lo storico.
-        prima = {r[0] for r in self.cx.execute("SELECT name FROM sqlite_master")}
+        # The schema is re-applied at every open: a missing object — typically a
+        # trigger dropped by hand — is rebuilt. But the repair is DECLARED: a
+        # trigger that vanishes raises no error, it just stops writing history.
+        before = {r[0] for r in self.cx.execute("SELECT name FROM sqlite_master")}
         self.cx.executescript(SCHEMA)
-        dopo = {r[0] for r in self.cx.execute("SELECT name FROM sqlite_master")}
-        self.riparato = [] if nuovo else sorted(dopo - prima)
-        self._modi()
+        after = {r[0] for r in self.cx.execute("SELECT name FROM sqlite_master")}
+        self.repaired = [] if fresh else sorted(after - before)
+        self._fix_modes()
 
-    def _modi(self) -> None:
-        """644 e' VOLUTO: chi monta la share legge e non tocca."""
+    # ---------- housekeeping ----------
+
+    def _fix_modes(self) -> None:
+        """0644 is DELIBERATE: whoever mounts the share reads and does not touch."""
         for f in (self.path, self.path + "-wal", self.path + "-shm"):
             if os.path.exists(f):
                 try:
-                    os.chmod(f, MODO_FILE)
+                    os.chmod(f, FILE_MODE)
                 except OSError:
                     pass
 
-    # ---------- progetti ----------
+    def close(self) -> None:
+        self.cx.close()
 
-    def _progetto(self, progetto: str) -> str:
-        """Dal CODICE al nome interno. Mai dal nome: il nome non e' una chiave
-        d'accesso. Errore identico per codice mancante e codice sbagliato — un
-        messaggio che distinguesse i due casi sarebbe un oracolo."""
-        p = (progetto or "").strip()
-        if not p:
-            raise RulesError(ERR_PROGETTO)
-        row = self.cx.execute("SELECT nome FROM projects WHERE codice=?", (p,)).fetchone()
+    def in_grace(self) -> bool:
+        """True while signatures are not yet required. A lock you must remember
+        to switch on is a lock that stays off, so this one is a DATE and closes
+        by itself."""
+        return bool(self.grace_until) and _today() <= self.grace_until
+
+    def _require_signature(self, project: str, message: str, signature: str,
+                           n: int, ids: list[str]) -> bool:
+        """Returns True if the batch was signed, False if it passed under grace.
+        Records the approval either way — including that it was unsigned."""
+        signed = True
+        if self.in_grace() and not signature:
+            signed = False
+        elif not self.public_key:
+            raise RulesError(
+                "no approval public key is configured (APPROVAL_PUBKEY) and the grace "
+                "window is closed: nothing can be approved. Set the key, or reopen grace.")
+        else:
+            verify_signature(self.public_key, message, signature)
+        self.cx.execute(
+            "INSERT INTO approvals (project, digest, signature, n_rules, rule_ids, "
+            "approved_at, signed) VALUES (?,?,?,?,?,?,?)",
+            (project, message, signature or None, n, ",".join(ids), _now(), 1 if signed else 0))
+        return signed
+
+    # ---------- projects ----------
+
+    def _project(self, code: str) -> str:
+        """From the CODE to the internal name. Never from the name: the name is
+        not an access key. Identical error for a missing and a wrong code."""
+        c = (code or "").strip()
+        if not c:
+            raise RulesError(ERR_PROJECT)
+        row = self.cx.execute("SELECT name FROM projects WHERE code=?", (c,)).fetchone()
         if row is None:
-            raise RulesError(ERR_PROGETTO)
+            raise RulesError(ERR_PROJECT)
         return row[0]
 
-    def _ruolo(self, progetto: str, ruolo: str) -> str:
-        r = (ruolo or "").strip().lower()
-        ammessi = [x[0] for x in self.cx.execute(
-            "SELECT ruolo FROM project_roles WHERE progetto=? ORDER BY ruolo", (progetto,))]
-        if not r:
-            raise RulesError(f"ruolo mancante: dichiara chi sei. Ruoli di {progetto}: "
-                             + ", ".join(ammessi))
-        if r not in ammessi:
-            raise RulesError(f"ruolo {ruolo!r} non esiste in {progetto}. Ruoli: " + ", ".join(ammessi))
-        return r
-
-    def _domini(self, progetto: str) -> list[str]:
-        return [r[0] for r in self.cx.execute(
-            "SELECT dominio FROM project_domains WHERE progetto=? ORDER BY dominio", (progetto,))]
-
-    def progetti(self) -> dict:
-        """Elenco COMPLETO, codici inclusi. Il server lo espone solo dietro il
-        codice di scrittura: e' l'unica porta da cui i codici possono uscire."""
-        out = []
-        for p in self.cx.execute("SELECT * FROM projects ORDER BY nome"):
-            out.append({
-                "progetto": p["nome"], "codice": p["codice"], "descrizione": p["descrizione"],
-                "regole_attive": self.cx.execute(
-                    "SELECT COUNT(*) FROM rules WHERE progetto=? AND stato='attiva'",
-                    (p["nome"],)).fetchone()[0],
-                "ruoli": [r[0] for r in self.cx.execute(
-                    "SELECT ruolo FROM project_roles WHERE progetto=? ORDER BY ruolo", (p["nome"],))],
-                "domini": self._domini(p["nome"])})
-        return {"progetti": out, "conteggio": len(out)}
-
-    def info_progetto(self, progetto: str) -> dict:
-        """Cosa c'e' DENTRO il progetto di cui hai il codice: ruoli e domini.
-        Non nomina nessun altro progetto e non ripete il codice."""
-        p = self._progetto(progetto)
-        return {"progetto": p,
-                "ruoli": [r[0] for r in self.cx.execute(
-                    "SELECT ruolo FROM project_roles WHERE progetto=? ORDER BY ruolo", (p,))],
-                "domini": {r["dominio"]: r["descrizione"] for r in self.cx.execute(
-                    "SELECT dominio, descrizione FROM project_domains WHERE progetto=? "
-                    "ORDER BY dominio", (p,))},
-                "perimetro_speciale": TUTTI,
-                "nota": "usa uno di questi ruoli in rules_list. Le regole con perimetro "
-                        f"{TUTTI} arrivano a chiunque, sempre."}
-
-    def crea_progetto(self, codice: str, nome: str, ruoli: list[str], domini,
-                      descrizione: str = "") -> dict:
-        n = (nome or "").strip()
-        cod = (codice or "").strip()
+    def _consumer(self, project: str, name: str) -> str:
+        n = (name or "").strip().lower()
+        allowed = [r[0] for r in self.cx.execute(
+            "SELECT name FROM consumers WHERE project=? ORDER BY name", (project,))]
         if not n:
-            raise RulesError("nome del progetto mancante")
-        if not RE_CODICE.match(cod):
-            raise RulesError("codice del progetto: 8-32 caratteri alfanumerici, senza spazi "
-                             "ne' simboli. Lo generi tu e lo metti in testa alle istruzioni "
-                             "del progetto.")
-        if self.cx.execute("SELECT 1 FROM projects WHERE codice=?", (cod,)).fetchone():
-            raise RulesError("codice gia' in uso: generane un altro")
-        if self.cx.execute("SELECT 1 FROM projects WHERE nome=? COLLATE NOCASE", (n,)).fetchone():
-            raise RulesError(f"progetto {n!r} esiste gia'")
-        rl = sorted({str(x).strip().lower() for x in (ruoli or []) if str(x).strip()})
-        if not rl:
-            raise RulesError("un progetto senza ruoli non lo puo' leggere nessuno")
-        if any(x in ALIAS_TUTTI for x in rl):
-            raise RulesError(f"{TUTTI} non e' un ruolo: e' il perimetro che li comprende "
-                             "tutti, e si usa nel campo `ruoli` di una regola")
-        dom = domini if isinstance(domini, dict) else {str(d).strip().upper(): "" for d in (domini or [])}
-        dom = {k.strip().upper(): v for k, v in dom.items() if str(k).strip()}
-        if not dom:
-            raise RulesError("servono i domini delle sigle, es. {'VA': 'vault e file'}")
-        for k in dom:
-            if not re.match(r"^[A-Z]{2}$", k):
-                raise RulesError(f"dominio {k!r}: due lettere maiuscole (es. VA)")
-        try:
-            self.cx.execute("BEGIN IMMEDIATE")
-            self.cx.execute("INSERT INTO projects (nome, codice, descrizione, creato) "
-                            "VALUES (?,?,?,?)", (n, cod, descrizione.strip() or None, _ora()))
-            for r in rl:
-                self.cx.execute("INSERT INTO project_roles (progetto, ruolo) VALUES (?,?)", (n, r))
-            for k, v in sorted(dom.items()):
-                self.cx.execute("INSERT INTO project_domains (progetto, dominio, descrizione) "
-                                "VALUES (?,?,?)", (n, k, (v or None)))
-            self.cx.execute("COMMIT")
-        except Exception:
-            self.cx.execute("ROLLBACK")
-            raise
-        return {"esito": "progetto creato", "progetto": n, "codice": cod,
-                "ruoli": rl, "domini": sorted(dom),
-                "nota": "metti il codice in testa alle istruzioni del progetto: e' "
-                        "l'unico modo di arrivare a queste regole"}
+            raise RulesError(f"consumer not specified. This project has: {', '.join(allowed)}")
+        if n not in allowed:
+            raise RulesError(
+                f"unknown consumer {name!r}. This project has: {', '.join(allowed) or '(none)'}")
+        return n
 
-    def cambia_codice(self, progetto: str, codice_nuovo: str) -> dict:
-        """Rotazione dell'handle. Le regole non si toccano: dentro il registro il
-        progetto e' indirizzato per nome, il codice e' solo la porta."""
-        p = self._progetto(progetto)
-        cod = (codice_nuovo or "").strip()
-        if not RE_CODICE.match(cod):
-            raise RulesError("codice nuovo: 8-32 caratteri alfanumerici")
-        if self.cx.execute("SELECT 1 FROM projects WHERE codice=?", (cod,)).fetchone():
-            raise RulesError("codice gia' in uso: generane un altro")
-        self.cx.execute("UPDATE projects SET codice=? WHERE nome=?", (cod, p))
-        return {"esito": "codice cambiato", "progetto": p, "codice": cod,
-                "nota": "aggiorna le istruzioni del progetto PRIMA di chiudere questa chat: "
-                        "col vecchio codice non ci si arriva piu'"}
-
-    def aggiorna_progetto(self, progetto: str, ruoli: list[str] | None = None,
-                          domini: dict | None = None) -> dict:
-        p = self._progetto(progetto)
-        agg = {}
-        try:
-            self.cx.execute("BEGIN IMMEDIATE")
-            if ruoli:
-                nuovi = sorted({str(x).strip().lower() for x in ruoli if str(x).strip()})
-                for r in nuovi:
-                    self.cx.execute("INSERT OR IGNORE INTO project_roles (progetto, ruolo) "
-                                    "VALUES (?,?)", (p, r))
-                agg["ruoli_aggiunti"] = nuovi
-            if domini:
-                for k, v in domini.items():
-                    self.cx.execute("INSERT OR IGNORE INTO project_domains "
-                                    "(progetto, dominio, descrizione) VALUES (?,?,?)",
-                                    (p, str(k).strip().upper(), v or None))
-                agg["domini_aggiunti"] = sorted(str(k).strip().upper() for k in domini)
-            self.cx.execute("COMMIT")
-        except Exception:
-            self.cx.execute("ROLLBACK")
-            raise
-        if not agg:
-            raise RulesError("niente da aggiungere: passa ruoli o domini")
-        agg.update({"esito": "progetto aggiornato", "progetto": p,
-                    "nota": "ruoli e domini si AGGIUNGONO e basta: toglierli orfanerebbe "
-                            "le regole che li usano"})
-        return agg
-
-    # ---------- lettura ----------
-
-    def _riga(self, p: str, rid: str):
-        return self.cx.execute("SELECT * FROM rules WHERE progetto=? AND id=?", (p, rid)).fetchone()
-
-    def _ruoli(self, p: str, rid: str) -> list[str]:
+    def _domains(self, project: str) -> list[str]:
         return [r[0] for r in self.cx.execute(
-            "SELECT ruolo FROM rule_roles WHERE progetto=? AND rule_id=? ORDER BY ruolo", (p, rid))]
+            "SELECT domain FROM project_domains WHERE project=? ORDER BY domain", (project,))]
 
-    def _versione(self, p: str, rid: str) -> int:
-        return int(self.cx.execute(
-            "SELECT IFNULL(MAX(versione),0) FROM rule_versions WHERE progetto=? AND rule_id=?",
-            (p, rid)).fetchone()[0])
+    def projects(self) -> dict:
+        rows = self.cx.execute("SELECT name, code, description, created FROM projects "
+                               "ORDER BY name").fetchall()
+        out = []
+        for r in rows:
+            n = self.cx.execute("SELECT COUNT(*) FROM rules WHERE project=? AND status='active'",
+                                (r["name"],)).fetchone()[0]
+            out.append({"name": r["name"], "code": r["code"], "description": r["description"],
+                        "created": r["created"], "active_rules": n})
+        return {"projects": out, "count": len(out)}
 
-    def _dict(self, row) -> dict:
-        d = {k: row[k] for k in row.keys() if k not in ("motivo", "fonte")}
-        d["ruoli"] = self._ruoli(row["progetto"], row["id"])
-        d["versione"] = self._versione(row["progetto"], row["id"])
-        return d
-
-    def regole(self, progetto: str, ruolo: str) -> dict:
-        """Solo regole ATTIVE. Le ritirate non si mostrano a chi applica le regole:
-        una regola morta in elenco e' un invito a seguirla. Restano raggiungibili
-        per ID (le citazioni devono risolvere) e nell'export di manutenzione."""
-        p = self._progetto(progetto)
-        r = self._ruolo(p, ruolo)
-        righe = self.cx.execute(
-            "SELECT * FROM rules WHERE progetto=? AND stato='attiva' AND EXISTS "
-            "(SELECT 1 FROM rule_roles rr WHERE rr.progetto=rules.progetto AND rr.rule_id=rules.id "
-            " AND rr.ruolo IN (?,?)) ORDER BY domain, seq",
-            (p, TUTTI, r)).fetchall()
-        tot = self.cx.execute("SELECT COUNT(*) FROM rules WHERE progetto=? AND stato='attiva'",
-                              (p,)).fetchone()[0]
-        fuori = tot - len(righe)
-        domini_fuori = [d[0] for d in self.cx.execute(
-            "SELECT DISTINCT domain FROM rules WHERE progetto=? AND stato='attiva' AND NOT EXISTS "
-            "(SELECT 1 FROM rule_roles rr WHERE rr.progetto=rules.progetto AND rr.rule_id=rules.id "
-            " AND rr.ruolo IN (?,?)) ORDER BY domain", (p, TUTTI, r))]
+    def project_info(self, code: str) -> dict:
+        p = self._project(code)
+        cons = self.cx.execute("SELECT name, kind FROM consumers WHERE project=? ORDER BY kind, name",
+                               (p,)).fetchall()
+        scopes = []
+        for s in self.cx.execute("SELECT name, managed FROM scopes WHERE project=? ORDER BY name",
+                                 (p,)).fetchall():
+            scopes.append({"name": s["name"], "managed": bool(s["managed"]),
+                           "breadth": self._breadth(p, s["name"]),
+                           "members": self._members(p, s["name"])})
+        doms = self.cx.execute("SELECT domain, description FROM project_domains "
+                               "WHERE project=? ORDER BY domain", (p,)).fetchall()
         return {
-            "progetto": p, "ruolo": r,
-            "regole": [self._dict(x) for x in righe],
-            "conteggio": len(righe),
-            "fuori_perimetro": fuori,
-            "domini_con_regole_altrui": domini_fuori,
-            "nota": (f"{fuori} regole attive di {p} esistono ma non sono di questo ruolo. "
-                     "Un ID che non trovi qui non e' inesistente: e' di qualcun altro. "
-                     "Chiedilo con rules_get e ti dira' di chi e'." if fuori else
-                     "questo ruolo vede tutte le regole attive del progetto"),
+            "project": p,
+            "consumers": [{"name": c["name"], "kind": c["kind"]} for c in cons],
+            "scopes": scopes,
+            "domains": {d["domain"]: d["description"] for d in doms},
+            "registry_version": VERSION,
+            "approval": {"required": not self.in_grace(),
+                         "grace_until": self.grace_until or None,
+                         "provisional_days": self.provisional_days},
         }
 
-    def regola(self, progetto: str, rid: str, ruolo: str) -> dict:
-        p = self._progetto(progetto)
-        i = _norm_id(rid)
-        r = self._ruolo(p, ruolo)
-        row = self._riga(p, i)
+    def create_project(self, code: str, name: str, consumers, domains,
+                       description: str = "") -> dict:
+        code = (code or "").strip()
+        if not RE_CODE.match(code):
+            raise RulesError("project code: 8 to 32 alphanumeric characters, nothing else")
+        name = (name or "").strip()
+        if not name:
+            raise RulesError("the project needs a name")
+        if self.cx.execute("SELECT 1 FROM projects WHERE name=?", (name,)).fetchone():
+            raise RulesError(f"a project named {name!r} already exists")
+        if self.cx.execute("SELECT 1 FROM projects WHERE code=?", (code,)).fetchone():
+            raise RulesError("that code is already in use")
+        if isinstance(domains, (list, tuple)):
+            domains = {d: "" for d in domains}
+        if not domains:
+            raise RulesError("declare at least one domain, e.g. {'VA': 'vault and files'}")
+        for d in domains:
+            if not re.match(r"^[A-Z]{2}$", d):
+                raise RulesError(f"domain {d!r}: exactly two uppercase letters")
+        cons = self._normalise_consumers(consumers)
+        if not cons:
+            raise RulesError("declare at least one consumer, e.g. [['architect','chat']]")
+        try:
+            self.cx.execute("BEGIN")
+            self.cx.execute("INSERT INTO projects (name, code, description, created) "
+                            "VALUES (?,?,?,?)", (name, code, description or None, _now()))
+            for d, desc in domains.items():
+                self.cx.execute("INSERT INTO project_domains (project, domain, description) "
+                                "VALUES (?,?,?)", (name, d, desc or None))
+            self.cx.execute("INSERT INTO scopes (project, name, managed) VALUES (?,?,1)",
+                            (name, ALL))
+            for cname, kind in cons:
+                self.cx.execute("INSERT INTO consumers (project, name, kind, created) "
+                                "VALUES (?,?,?,?)", (name, cname, kind, _now()))
+            self.cx.execute("COMMIT")
+        except Exception:
+            self.cx.execute("ROLLBACK")
+            raise
+        return {"created": name, "code": code, "consumers": [c for c, _ in cons],
+                "domains": sorted(domains), "note": "put the code at the top of the "
+                "project instructions: it is the only way to reach this registry"}
+
+    @staticmethod
+    def _normalise_consumers(consumers) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        for item in consumers or []:
+            if isinstance(item, str):
+                cname, kind = item, "chat"
+            elif isinstance(item, dict):
+                cname, kind = item.get("name", ""), item.get("kind", "chat")
+            else:
+                cname, kind = (list(item) + ["chat"])[:2]
+            cname = _norm_name(cname, "consumer")
+            kind = (kind or "chat").strip().lower()
+            if kind not in KINDS:
+                raise RulesError(f"kind {kind!r}: it must be one of {', '.join(KINDS)}")
+            if cname == ALL.lower() or cname == ALL:
+                raise RulesError(f"{ALL} is reserved and is not a consumer name")
+            if cname not in [c for c, _ in out]:
+                out.append((cname, kind))
+        return out
+
+    def rekey_project(self, code: str, new_code: str) -> dict:
+        p = self._project(code)
+        new_code = (new_code or "").strip()
+        if not RE_CODE.match(new_code):
+            raise RulesError("new code: 8 to 32 alphanumeric characters")
+        if self.cx.execute("SELECT 1 FROM projects WHERE code=?", (new_code,)).fetchone():
+            raise RulesError("that code is already in use")
+        self.cx.execute("UPDATE projects SET code=? WHERE name=?", (new_code, p))
+        return {"project": p, "rekeyed": True,
+                "note": "update the project instructions BEFORE closing this chat: "
+                        "the old code no longer reaches anything"}
+
+    def add_consumers(self, code: str, consumers) -> dict:
+        """Only adds. Removing a consumer would orphan the rules aimed at it."""
+        p = self._project(code)
+        cons = self._normalise_consumers(consumers)
+        added = []
+        for cname, kind in cons:
+            if self.cx.execute("SELECT 1 FROM consumers WHERE project=? AND name=?",
+                               (p, cname)).fetchone():
+                continue
+            if self.cx.execute("SELECT 1 FROM scopes WHERE project=? AND name=?",
+                               (p, cname)).fetchone():
+                raise RulesError(
+                    f"a scope named {cname!r} already exists: a consumer and a scope share "
+                    "one namespace, because every consumer gets a scope with its own name")
+            self.cx.execute("INSERT INTO consumers (project, name, kind, created) VALUES (?,?,?,?)",
+                            (p, cname, kind, _now()))
+            added.append(cname)
+        return {"project": p, "added": added,
+                "note": "each one also got a scope of its own, made by the database"}
+
+    def add_domains(self, code: str, domains) -> dict:
+        p = self._project(code)
+        if isinstance(domains, (list, tuple)):
+            domains = {d: "" for d in domains}
+        added = []
+        for d, desc in (domains or {}).items():
+            if not re.match(r"^[A-Z]{2}$", d):
+                raise RulesError(f"domain {d!r}: exactly two uppercase letters")
+            if self.cx.execute("SELECT 1 FROM project_domains WHERE project=? AND domain=?",
+                               (p, d)).fetchone():
+                continue
+            self.cx.execute("INSERT INTO project_domains (project, domain, description) "
+                            "VALUES (?,?,?)", (p, d, desc or None))
+            added.append(d)
+        return {"project": p, "added": added}
+
+    # ---------- scopes ----------
+
+    def _breadth(self, project: str, scope: str) -> int:
+        """How many consumers a scope reaches. _ALL_ is not a listed set: it must
+        reach consumers that do not exist yet, so its breadth is computed."""
+        if scope == ALL:
+            return self.cx.execute("SELECT COUNT(*) FROM consumers WHERE project=?",
+                                   (project,)).fetchone()[0]
+        return self.cx.execute("SELECT COUNT(*) FROM scope_members WHERE project=? AND scope=?",
+                               (project, scope)).fetchone()[0]
+
+    def _members(self, project: str, scope: str) -> list[str]:
+        if scope == ALL:
+            return [r[0] for r in self.cx.execute(
+                "SELECT name FROM consumers WHERE project=? ORDER BY name", (project,))]
+        return [r[0] for r in self.cx.execute(
+            "SELECT consumer FROM scope_members WHERE project=? AND scope=? ORDER BY consumer",
+            (project, scope))]
+
+    def create_scope(self, code: str, name: str, members) -> dict:
+        p = self._project(code)
+        name = _norm_name(name, "scope")
+        if self.cx.execute("SELECT 1 FROM scopes WHERE project=? AND name=?",
+                           (p, name)).fetchone():
+            raise RulesError(f"a scope named {name!r} already exists")
+        if self.cx.execute("SELECT 1 FROM consumers WHERE project=? AND name=?",
+                           (p, name)).fetchone():
+            raise RulesError(f"{name!r} is a consumer: its singleton scope already exists")
+        members = [self._consumer(p, m) for m in (members or [])]
+        if len(members) < 2:
+            raise RulesError(
+                "a scope with fewer than two members adds nothing: every consumer already "
+                "has its own singleton, made by the database")
+        self.cx.execute("BEGIN")
+        try:
+            self.cx.execute("INSERT INTO scopes (project, name, managed) VALUES (?,?,0)",
+                            (p, name))
+            for m in members:
+                self.cx.execute("INSERT INTO scope_members (project, scope, consumer) "
+                                "VALUES (?,?,?)", (p, name, m))
+            self.cx.execute("COMMIT")
+        except Exception:
+            self.cx.execute("ROLLBACK")
+            raise
+        return {"project": p, "scope": name, "members": members, "breadth": len(members)}
+
+    def edit_scope(self, code: str, name: str, add=None, remove=None) -> dict:
+        """Careful: this changes the perimeter of EVERY rule pointing at this
+        scope. To widen a single rule use widen_rule instead."""
+        p = self._project(code)
+        name = _norm_name(name, "scope")
+        row = self.cx.execute("SELECT managed FROM scopes WHERE project=? AND name=?",
+                              (p, name)).fetchone()
         if row is None:
-            # NON si dice se quell'ID esiste in un altro progetto: sarebbe un
-            # oracolo sull'esistenza di registri di cui non hai il codice.
-            raise RulesError(f"{i}: ID mai definito in {p}. Non e' 'non tuo': non esiste. "
-                             "Se lo hai letto in una citazione, la citazione e' rotta: segnalala. "
-                             "Se invece ti aspettavi di trovarlo, controlla di aver usato il "
-                             "codice del progetto giusto.")
-        ruoli = self._ruoli(p, i)
-        if TUTTI not in ruoli and r not in ruoli:
-            raise RulesError(f"{i} ESISTE in {p} ma non e' di tua competenza "
-                             f"(e' di: {', '.join(ruoli)}). Non e' un errore del registro: "
-                             "e' il perimetro. Non insistere, chiedilo a chi tiene le regole.")
-        d = self._dict(row)
-        if row["stato"] == "ritirata":
-            d["avviso"] = ("regola RITIRATA: non e' piu' in vigore" +
-                           (f", superata da {row['superseded_by']}" if row["superseded_by"] else ""))
+            raise RulesError(f"no scope named {name!r} in this project")
+        if row["managed"]:
+            raise RulesError(f"{name!r} is a managed scope (a consumer singleton, or {ALL}): "
+                             "its membership is fixed by construction")
+        for m in (add or []):
+            c = self._consumer(p, m)
+            self.cx.execute("INSERT OR IGNORE INTO scope_members (project, scope, consumer) "
+                            "VALUES (?,?,?)", (p, name, c))
+        for m in (remove or []):
+            self.cx.execute("DELETE FROM scope_members WHERE project=? AND scope=? AND consumer=?",
+                            (p, name, (m or '').strip().lower()))
+        n = self.cx.execute("SELECT COUNT(*) FROM rule_scopes WHERE project=? AND scope=?",
+                            (p, name)).fetchone()[0]
+        return {"project": p, "scope": name, "members": self._members(p, name),
+                "rules_affected": n}
+
+    # ---------- reading rules ----------
+
+    def _row(self, p: str, rid: str):
+        return self.cx.execute("SELECT * FROM rules WHERE project=? AND id=?", (p, rid)).fetchone()
+
+    def _scopes_of(self, p: str, rid: str) -> list[str]:
+        return [r[0] for r in self.cx.execute(
+            "SELECT scope FROM rule_scopes WHERE project=? AND rule_id=? ORDER BY scope", (p, rid))]
+
+    def _version(self, p: str, rid: str) -> int:
+        r = self.cx.execute("SELECT IFNULL(MAX(version),0) FROM rule_versions "
+                            "WHERE project=? AND rule_id=?", (p, rid)).fetchone()
+        return r[0]
+
+    def _dict(self, row, p: str) -> dict:
+        d = {"id": row["id"], "type": row["type"], "title": row["title"], "body": row["body"],
+             "status": row["status"], "permanence": row["permanence"],
+             "expires_at": row["expires_at"], "scopes": self._scopes_of(p, row["id"]),
+             "version": self._version(p, row["id"]), "changelog": row["changelog"],
+             "source": row["source"], "updated_at": row["updated_at"]}
+        if row["superseded_by"]:
+            d["superseded_by"] = row["superseded_by"]
+        if row["denied_reason"]:
+            d["denied_reason"] = row["denied_reason"]
         return d
 
-    def cerca(self, progetto: str, q: str, ruolo: str) -> dict:
-        p = self._progetto(progetto)
-        r = self._ruolo(p, ruolo)
-        if not (q or "").strip():
-            raise RulesError("cerca: stringa vuota")
-        like = f"%{q.strip()}%"
-        righe = self.cx.execute(
-            "SELECT * FROM rules WHERE progetto=? AND stato='attiva' AND (titolo LIKE ? OR corpo LIKE ?) "
-            "AND EXISTS (SELECT 1 FROM rule_roles rr WHERE rr.progetto=rules.progetto "
-            " AND rr.rule_id=rules.id AND rr.ruolo IN (?,?)) ORDER BY domain, seq",
-            (p, like, like, TUTTI, r)).fetchall()
-        nascosti = self.cx.execute(
-            "SELECT COUNT(*) FROM rules WHERE progetto=? AND stato='attiva' "
-            "AND (titolo LIKE ? OR corpo LIKE ?) AND NOT EXISTS "
-            "(SELECT 1 FROM rule_roles rr WHERE rr.progetto=rules.progetto AND rr.rule_id=rules.id "
-            " AND rr.ruolo IN (?,?))", (p, like, like, TUTTI, r)).fetchone()[0]
-        return {"progetto": p, "ruolo": r, "cercato": q, "trovate": len(righe),
-                "fuori_perimetro": nascosti, "regole": [self._dict(x) for x in righe]}
+    _IN_FORCE = ("status = 'active' AND (permanence = 'permanent' "
+                 "OR expires_at IS NULL OR expires_at > :now)")
 
-    def stato(self, progetto: str = "") -> dict:
-        c = self.cx.execute
-        base = {"db": self.path,
-                "integrity_check": c("PRAGMA integrity_check").fetchone()[0],
-                "journal_mode": c("PRAGMA journal_mode").fetchone()[0],
-                "proprietario_file": _proprietario(self.path),
-                "modo_file": oct(os.stat(self.path).st_mode & 0o777)}
-        if not (progetto or "").strip():
-            base.update({
-                "progetti": [dict(r) for r in c(
-                    "SELECT p.nome AS progetto, "
-                    "(SELECT COUNT(*) FROM rules WHERE progetto=p.nome AND stato='attiva') AS attive, "
-                    "(SELECT COUNT(*) FROM rules WHERE progetto=p.nome AND stato='ritirata') AS ritirate "
-                    "FROM projects p ORDER BY p.nome")],
-                "versioni_storico": c("SELECT COUNT(*) FROM rule_versions").fetchone()[0]})
-            return base
-        p = self._progetto(progetto)
-        ultima = c("SELECT rule_id, ts, azione, motivo FROM rule_versions WHERE progetto=? "
-                   "ORDER BY ts DESC, rowid DESC LIMIT 1", (p,)).fetchone()
-        base.update({
-            "progetto": p,
-            "attive": c("SELECT COUNT(*) FROM rules WHERE progetto=? AND stato='attiva'", (p,)).fetchone()[0],
-            "ritirate": c("SELECT COUNT(*) FROM rules WHERE progetto=? AND stato='ritirata'", (p,)).fetchone()[0],
-            "versioni_storico": c("SELECT COUNT(*) FROM rule_versions WHERE progetto=?", (p,)).fetchone()[0],
-            "per_dominio": {r["domain"]: r["n"] for r in c(
-                "SELECT domain, COUNT(*) n FROM rules WHERE progetto=? AND stato='attiva' "
-                "GROUP BY domain ORDER BY domain", (p,))},
-            "per_ruolo": {r["ruolo"]: r["n"] for r in c(
-                "SELECT rr.ruolo, COUNT(*) n FROM rule_roles rr JOIN rules r "
-                "ON r.progetto=rr.progetto AND r.id=rr.rule_id "
-                "WHERE rr.progetto=? AND r.stato='attiva' GROUP BY rr.ruolo ORDER BY rr.ruolo", (p,))},
-            "ultima_modifica": dict(ultima) if ultima else None})
-        return base
+    def _reaching(self, p: str, consumer: str) -> dict[str, tuple[int, list[str]]]:
+        """rule_id -> (breadth of the widest scope it arrives through, scopes)."""
+        rows = self.cx.execute(
+            "SELECT s.rule_id, s.scope FROM rule_scopes s "
+            " WHERE s.project = :p AND (s.scope = :all OR EXISTS ("
+            "   SELECT 1 FROM scope_members m WHERE m.project = :p "
+            "     AND m.scope = s.scope AND m.consumer = :c))",
+            {"p": p, "c": consumer, "all": ALL}).fetchall()
+        out: dict[str, tuple[int, list[str]]] = {}
+        cache: dict[str, int] = {}
+        for r in rows:
+            sc = r["scope"]
+            if sc not in cache:
+                cache[sc] = self._breadth(p, sc)
+            b, lst = out.get(r["rule_id"], (0, []))
+            out[r["rule_id"]] = (max(b, cache[sc]), sorted(lst + [sc]))
+        return out
 
-    def verifica(self, progetto: str) -> dict:
-        p = self._progetto(progetto)
-        c = self.cx.execute
-        rotti = [dict(r) for r in c(
-            "SELECT src, dst FROM rule_refs WHERE progetto=? AND dst NOT IN "
-            "(SELECT id FROM rules WHERE progetto=?) ORDER BY src, dst", (p, p))]
-        verso_ritirate = [dict(r) for r in c(
-            "SELECT src, dst FROM rule_refs WHERE progetto=? AND dst IN "
-            "(SELECT id FROM rules WHERE progetto=? AND stato='ritirata') AND src IN "
-            "(SELECT id FROM rules WHERE progetto=? AND stato='attiva') ORDER BY src, dst", (p, p, p))]
-        senza_ruolo = [r[0] for r in c(
-            "SELECT id FROM rules WHERE progetto=? AND stato='attiva' AND id NOT IN "
-            "(SELECT rule_id FROM rule_roles WHERE progetto=?) ORDER BY id", (p, p))]
-        superseded_rotti = [r[0] for r in c(
-            "SELECT id FROM rules WHERE progetto=? AND superseded_by IS NOT NULL AND superseded_by "
-            "NOT IN (SELECT id FROM rules WHERE progetto=?)", (p, p))]
-        buchi = []
-        for d in self._domini(p):
-            seqs = sorted(r[0] for r in c("SELECT seq FROM rules WHERE progetto=? AND domain=?", (p, d)))
-            if seqs:
-                mancanti = [n for n in range(1, max(seqs) + 1) if n not in seqs]
-                if mancanti:
-                    buchi.append({"dominio": d, "seq_mai_usate": mancanti})
-        n = len(rotti) + len(verso_ritirate) + len(senza_ruolo) + len(superseded_rotti)
-        return {"progetto": p, "anomalie": n, "puntatori_rotti": rotti,
-                "citazioni_verso_ritirate": verso_ritirate,
-                "regole_senza_perimetro": senza_ruolo,
-                "superseded_by_rotti": superseded_rotti,
-                "buchi_di_numerazione": buchi,
-                "verdetto": "coerente" if n == 0 else f"{n} anomalie da sanare"}
-
-    # ---------- storico ----------
-
-    def storico(self, progetto: str, rid: str) -> dict:
-        p = self._progetto(progetto)
-        i = _norm_id(rid)
-        righe = self.cx.execute(
-            "SELECT versione, ts, azione, motivo, stato, tipo, titolo, LENGTH(corpo) AS byte "
-            "FROM rule_versions WHERE progetto=? AND rule_id=? ORDER BY versione", (p, i)).fetchall()
-        if not righe:
-            raise RulesError(f"{i}: nessuna versione in archivio per {p} (ID mai definito)")
-        return {"progetto": p, "id": i, "versioni": len(righe), "storia": [dict(r) for r in righe]}
-
-    def confronta(self, progetto: str, rid: str, v_a: int, v_b: int) -> dict:
-        p = self._progetto(progetto)
-        i = _norm_id(rid)
-
-        def prendi(v):
-            r = self.cx.execute("SELECT * FROM rule_versions WHERE progetto=? AND rule_id=? "
-                                "AND versione=?", (p, i, v)).fetchone()
-            if r is None:
-                disp = [x[0] for x in self.cx.execute(
-                    "SELECT versione FROM rule_versions WHERE progetto=? AND rule_id=? "
-                    "ORDER BY versione", (p, i))]
-                raise RulesError(f"{i}: versione {v} inesistente. Disponibili: {disp}")
-            return r
-
-        a, b = prendi(int(v_a)), prendi(int(v_b))
-
-        def testo(r):
-            return (f"tipo: {r['tipo']}\nstato: {r['stato']}\nruoli: {r['ruoli']}\n"
-                    f"superseded_by: {r['superseded_by']}\nchangelog: {r['changelog']}\n"
-                    f"titolo: {r['titolo']}\n\n{r['corpo']}\n").splitlines(keepends=True)
-
-        d = "".join(difflib.unified_diff(testo(a), testo(b),
-                                         fromfile=f"{i} v{v_a} ({a['ts']})",
-                                         tofile=f"{i} v{v_b} ({b['ts']})", n=2))
-        return {"progetto": p, "id": i, "da": int(v_a), "a": int(v_b),
-                "motivo_di_arrivo": b["motivo"], "azione": b["azione"],
-                "diff": d or "(nessuna differenza)"}
-
-    # ---------- scrittura ----------
-
-    def _refs(self, p: str, rid: str, corpo: str) -> int:
-        self.cx.execute("DELETE FROM rule_refs WHERE progetto=? AND src=?", (p, rid))
-        dom = set(self._domini(p))     # solo le sigle dei domini DICHIARATI sono riferimenti
-        citate = {f"{m.group(1)}-{m.group(2)}" for m in RE_SIGLA.finditer(corpo)
-                  if m.group(1) in dom} - {rid}
-        for dst in sorted(citate):
-            self.cx.execute("INSERT OR IGNORE INTO rule_refs (progetto, src, dst) VALUES (?,?,?)",
-                            (p, rid, dst))
-        return len(citate)
-
-    def _set_ruoli(self, p: str, rid: str, ruoli: list[str]) -> list[str]:
-        ammessi = [x[0] for x in self.cx.execute(
-            "SELECT ruolo FROM project_roles WHERE progetto=?", (p,))]
-        norm = []
-        for x in ruoli or []:
-            s = str(x).strip().lower()
-            if s in ALIAS_TUTTI:
-                norm = [TUTTI]
-                break
-            if s not in ammessi:
-                raise RulesError(f"ruolo {x!r} non esiste in {p}. Ammessi: "
-                                 f"{', '.join(sorted(ammessi))} oppure '*' (chiunque)")
-            norm.append(s)
-        if not norm:
-            raise RulesError("perimetro vuoto: una regola senza ruoli non la leggerebbe nessuno. "
-                             "Usa ['*'] se vale per chiunque tocchi un file.")
-        self.cx.execute("DELETE FROM rule_roles WHERE progetto=? AND rule_id=?", (p, rid))
-        for r in sorted(set(norm)):
-            self.cx.execute("INSERT INTO rule_roles (progetto, rule_id, ruolo) VALUES (?,?,?)",
-                            (p, rid, r))
-        return sorted(set(norm))
-
-    def crea(self, progetto: str, rid: str, tipo: str, titolo: str, corpo: str,
-             ruoli: list[str], motivo: str, changelog: str | None = None,
-             fonte: str | None = None) -> dict:
-        p = self._progetto(progetto)
-        i = _norm_id(rid)
-        dom, seq = i.split("-")[0], int(i.split("-")[1])
-        if dom not in self._domini(p):
-            raise RulesError(f"dominio {dom} non dichiarato in {p}. Domini: "
-                             f"{', '.join(self._domini(p))}. Uno nuovo si aggiunge con "
-                             "rules_project_update.")
-        t = (tipo or "").strip().upper()
-        if t not in TIPI:
-            raise RulesError(f"tipo {tipo!r}: ammessi R (vincolante), M (metodo), F (fatto tecnico). "
-                             "Il ritiro NON e' un tipo: e' uno stato, si fa con rules_retire.")
-        if not (titolo or "").strip() or not (corpo or "").strip():
-            raise RulesError("titolo e corpo sono obbligatori")
-        if not (motivo or "").strip():
-            raise RulesError("motivo obbligatorio: senza il perche' la regola non si difende "
-                             "e viene riaperta")
-        vecchia = self._riga(p, i)
-        if vecchia is not None:
-            raise RulesError(f"{i} esiste gia' in {p} (stato: {vecchia['stato']}). "
-                             "Gli ID non si riusano MAI: prendi il prossimo libero del dominio.")
-        try:
-            self.cx.execute("BEGIN IMMEDIATE")
-            self.cx.execute(
-                "INSERT INTO rules (progetto,id,domain,seq,tipo,titolo,corpo,stato,changelog,"
-                "fonte,motivo,updated_at) VALUES (?,?,?,?,?,?,?,'attiva',?,?,?,?)",
-                (p, i, dom, seq, t, titolo.strip(), corpo.strip(), changelog, fonte,
-                 motivo.strip(), _ora()))
-            r = self._set_ruoli(p, i, ruoli)
-            n = self._refs(p, i, corpo)
-            # Il trigger di INSERT e' scattato PRIMA che i ruoli esistessero (la FK
-            # vuole la riga della regola per prima): la v1 nascerebbe con perimetro
-            # vuoto e lo storico direbbe il falso al primo diff. Si completa qui,
-            # dentro la stessa transazione.
-            self.cx.execute("UPDATE rule_versions SET ruoli=? WHERE progetto=? AND rule_id=? "
-                            "AND versione=(SELECT MAX(versione) FROM rule_versions "
-                            "WHERE progetto=? AND rule_id=?)", (",".join(r), p, i, p, i))
-            self.cx.execute("COMMIT")
-        except Exception:
-            self.cx.execute("ROLLBACK")
-            raise
-        return {"esito": "creata", "progetto": p, "id": i, "tipo": t, "ruoli": r,
-                "versione": self._versione(p, i), "sigle_citate": n}
-
-    def correggi(self, progetto: str, rid: str, versione_attesa: int, motivo: str,
-                 titolo: str | None = None, corpo: str | None = None, tipo: str | None = None,
-                 ruoli: list[str] | None = None, changelog: str | None = None) -> dict:
-        """DIFETTO corretto sul posto: stesso ID, nuova versione. Per una DECISIONE
-        superata si usa crea() + ritira(), non questa."""
-        p = self._progetto(progetto)
-        i = _norm_id(rid)
-        if not (motivo or "").strip():
-            raise RulesError("motivo obbligatorio")
-        row = self._riga(p, i)
-        if row is None:
-            raise RulesError(f"{i}: ID mai definito in {p}")
-        v = self._versione(p, i)
-        if int(versione_attesa) != v:
-            raise RulesError(f"CONFLITTO su {p}/{i}: hai letto la versione {versione_attesa}, "
-                             f"quella corrente e' la {v}. Qualcuno ha scritto dopo la tua lettura: "
-                             "rileggi con rules_get e riprova.")
-        t = (tipo or row["tipo"]).strip().upper()
-        if t not in TIPI:
-            raise RulesError(f"tipo {tipo!r}: ammessi {', '.join(TIPI)}")
-        nuovo_corpo = row["corpo"] if corpo is None else corpo.strip()
-        try:
-            self.cx.execute("BEGIN IMMEDIATE")
-            if ruoli is not None:
-                self._set_ruoli(p, i, ruoli)
-            self.cx.execute(
-                "UPDATE rules SET tipo=?, titolo=?, corpo=?, changelog=?, motivo=?, updated_at=? "
-                "WHERE progetto=? AND id=?",
-                (t, (titolo or row["titolo"]).strip(), nuovo_corpo,
-                 changelog if changelog is not None else row["changelog"],
-                 motivo.strip(), _ora(), p, i))
-            self._refs(p, i, nuovo_corpo)
-            self.cx.execute("COMMIT")
-        except Exception:
-            self.cx.execute("ROLLBACK")
-            raise
-        return {"esito": "corretta", "progetto": p, "id": i, "versione": self._versione(p, i),
-                "ruoli": self._ruoli(p, i),
-                "nota": "difetto corretto sul posto: la regola resta in vigore con lo stesso ID"}
-
-    def ritira(self, progetto: str, rid: str, motivo: str, superseded_by: str | None = None,
-               changelog: str | None = None) -> dict:
-        p = self._progetto(progetto)
-        i = _norm_id(rid)
-        if not (motivo or "").strip():
-            raise RulesError("motivo obbligatorio: un ritiro senza perche' viene riaperto")
-        row = self._riga(p, i)
-        if row is None:
-            raise RulesError(f"{i}: ID mai definito in {p}")
-        if row["stato"] == "ritirata":
-            raise RulesError(f"{i} e' gia' ritirata (dal {row['updated_at']})")
-        sb = _norm_id(superseded_by) if superseded_by else None
-        if sb and self._riga(p, sb) is None:
-            raise RulesError(f"superseded_by {sb}: non esiste in {p}. Crea prima la regola "
-                             "nuova, poi ritira la vecchia puntando a lei.")
-        try:
-            self.cx.execute("BEGIN IMMEDIATE")
-            self.cx.execute(
-                "UPDATE rules SET stato='ritirata', superseded_by=?, changelog=?, motivo=?, "
-                "updated_at=? WHERE progetto=? AND id=?",
-                (sb, changelog if changelog is not None else row["changelog"],
-                 motivo.strip(), _ora(), p, i))
-            self.cx.execute("COMMIT")
-        except Exception:
-            self.cx.execute("ROLLBACK")
-            raise
-        orfane = [r[0] for r in self.cx.execute(
-            "SELECT src FROM rule_refs WHERE progetto=? AND dst=? AND src IN "
-            "(SELECT id FROM rules WHERE progetto=? AND stato='attiva')", (p, i, p))]
-        return {"esito": "ritirata", "progetto": p, "id": i, "superata_da": sb,
-                "versione": self._versione(p, i), "la_citano_ancora": orfane,
-                "nota": ("la riga RESTA: l'ID non si riusa mai e le citazioni restano risolvibili" +
-                         (f" — ATTENZIONE: {len(orfane)} regole attive la citano ancora" if orfane else ""))}
-
-    def importa(self, progetto: str, regole: list[dict], motivo: str) -> dict:
-        """Import in blocco (migrazione dai MD). Rifiuta se il PROGETTO ha gia'
-        regole: una migrazione si fa una volta sola, su tavolo pulito. Gli altri
-        progetti dello stesso database non c'entrano."""
-        p = self._progetto(progetto)
-        # ATTENZIONE: le chiamate interne ripassano `progetto` (il CODICE), non `p`
-        # (il nome): i metodi pubblici risolvono sempre dal codice, mai dal nome.
-        n = self.cx.execute("SELECT COUNT(*) FROM rules WHERE progetto=?", (p,)).fetchone()[0]
-        if n:
-            raise RulesError(f"{p} ha gia' {n} regole: l'import in blocco si fa solo su "
-                             "progetto vuoto. Per aggiungerne una: rules_create.")
-        if not regole:
-            raise RulesError("nessuna regola da importare")
-        fatte, errori = [], []
-        for r in regole:
-            try:
-                self.crea(progetto, r["id"], r.get("tipo", "R"), r["titolo"], r["corpo"],
-                          r.get("ruoli") or [TUTTI], motivo, r.get("changelog"), r.get("fonte"))
-                fatte.append(r["id"])
-            except Exception as e:
-                errori.append({"id": r.get("id"), "errore": str(e)})
-        return {"progetto": p, "importate": len(fatte), "rifiutate": len(errori),
-                "errori": errori, "verifica": self.verifica(progetto)}
-
-    # ---------- servizio ----------
-
-    def esporta(self, progetto: str, ruolo: str = "") -> dict:
-        """Snapshot MD. Con `ruolo`: solo il perimetro di quel ruolo (regole ATTIVE),
-        pronto da incollare nella memoria di quella chat. Senza: il progetto
-        INTERO, ritirate comprese — e' il documento di manutenzione.
-        Ordine: domini in ordine alfabetico, cosi' arrivano a blocchi, e dentro
-        ogni blocco per progressivo numerico (VA-09 prima di VA-10).
-        E' un DERIVATO: la verita' resta il database."""
-        p = self._progetto(progetto)
-        r = self._ruolo(p, ruolo) if (ruolo or "").strip() else ""
-        if r:
-            filtro = ("AND stato='attiva' AND EXISTS (SELECT 1 FROM rule_roles rr "
-                      "WHERE rr.progetto=rules.progetto AND rr.rule_id=rules.id "
-                      "AND rr.ruolo IN (?,?))")
-            extra = (TUTTI, r)
-            testa = [f"# {p} — Regole di: {r}", "",
-                     f"> Perimetro `{r}` + le regole valide per chiunque. Solo regole in",
-                     "> vigore. Generato dal registro: non si modifica a mano."]
-        else:
-            filtro, extra = "", ()
-            testa = [f"# {p} — Registro Regole (completo)", "",
-                     "> Tutti i perimetri, ritirate comprese. Documento di manutenzione."]
-        out = [f"<!-- GENERATO da rules-mcp il {_ora()} — progetto: {p}"
-               + (f" — ruolo: {r}" if r else " — completo") + ".",
-               "     NON si modifica a mano: la verita' e' il database.",
-               "     Modifiche via tool, poi si rigenera. -->", ""] + testa + [""]
-        n = 0
-        for d in self._domini(p):
-            righe = self.cx.execute(
-                f"SELECT * FROM rules WHERE progetto=? AND domain=? {filtro} ORDER BY seq",
-                (p, d) + extra).fetchall()
-            if not righe:
+    def list_rules(self, code: str, consumer: str) -> dict:
+        """Every rule in force for one consumer, in ONE call, ordered from the
+        most widespread to the most specific. The order IS the breadth of the
+        scope: it stays right on its own when a consumer is added."""
+        p = self._project(code)
+        c = self._consumer(p, consumer)
+        reaching = self._reaching(p, c)
+        now = _now()
+        rules = []
+        for rid, (breadth, scopes) in reaching.items():
+            row = self._row(p, rid)
+            if row is None:
                 continue
-            n += len(righe)
-            desc = self.cx.execute("SELECT descrizione FROM project_domains WHERE progetto=? "
-                                   "AND dominio=?", (p, d)).fetchone()[0]
-            out += [f"## {d}" + (f" — {desc}" if desc else ""), ""]
-            for r in righe:
-                marca = "" if r["stato"] == "attiva" else " — **RITIRATA**" + (
-                    f", superata da {r['superseded_by']}" if r["superseded_by"] else "")
-                out += [f"**{r['id']}-{r['tipo']}** · {r['titolo']}{marca}",
-                        f"*perimetro: {', '.join(self._ruoli(p, r['id']))} · "
-                        f"v{self._versione(p, r['id'])} · {r['updated_at']}*", "",
-                        r["corpo"], ""]
-        testo = "\n".join(out)
-        return {"progetto": p, "ruolo": r or "(tutti i perimetri)", "regole": n,
-                "markdown": testo, "byte": len(testo.encode()),
-                "sha256": hashlib.sha256(testo.encode()).hexdigest(),
-                "nota": "scrivilo nel vault con write_file (e' un derivato, si rigenera)"}
+            if row["status"] != "active":
+                continue
+            if row["permanence"] != "permanent" and row["expires_at"] and row["expires_at"] <= now:
+                continue
+            d = self._dict(row, p)
+            d["via"] = scopes
+            d["breadth"] = breadth
+            rules.append(d)
+        rules.sort(key=lambda d: (-d["breadth"], d["id"][:2], int(d["id"].split("-")[1])))
+        total = self.cx.execute(
+            "SELECT COUNT(*) FROM rules WHERE project=:p AND " + self._IN_FORCE,
+            {"p": p, "now": now}).fetchone()[0]
+        return {"project": p, "consumer": c, "rules": rules, "count": len(rules),
+                "outside_your_scope": total - len(rules),
+                "note": "ordered by breadth: what comes first binds everyone. If an ID you "
+                        "need is missing it is not undefined — it belongs to someone else"}
+
+    def get_rules(self, code: str, ids, consumer: str) -> dict:
+        """One or MANY rules by ID. Three different answers, kept apart per ID:
+        the rule · it exists but is not yours · never defined, which means a
+        broken citation and must be reported."""
+        p = self._project(code)
+        c = self._consumer(p, consumer)
+        if isinstance(ids, str):
+            ids = [ids]
+        ids = [_norm_id(i) for i in (ids or [])]
+        if not ids:
+            raise RulesError("no ID asked for")
+        if len(ids) > MAX_GET_IDS:
+            raise RulesError(f"{len(ids)} IDs at once: the ceiling is {MAX_GET_IDS}")
+        reaching = self._reaching(p, c)
+        found, not_yours, never = [], [], []
+        for rid in ids:
+            row = self._row(p, rid)
+            if row is None:
+                never.append(rid)
+            elif rid in reaching:
+                d = self._dict(row, p)
+                d["via"] = reaching[rid][1]
+                found.append(d)
+            else:
+                not_yours.append({"id": rid, "held_by": self._holders(p, rid)})
+        out = {"project": p, "consumer": c, "found": found,
+               "not_yours": not_yours, "never_defined": never}
+        if never:
+            out["warning"] = ("never_defined means a BROKEN CITATION: those IDs were never "
+                              "defined in this project. Report them to the Architect — or you "
+                              "are using another project's code.")
+        return out
+
+    def _holders(self, p: str, rid: str) -> list[str]:
+        rows = self.cx.execute(
+            "SELECT DISTINCT m.consumer FROM rule_scopes s "
+            "  JOIN scope_members m ON m.project=s.project AND m.scope=s.scope "
+            " WHERE s.project=? AND s.rule_id=? ORDER BY m.consumer", (p, rid)).fetchall()
+        return [r[0] for r in rows]
+
+    def search(self, code: str, text: str, consumer: str) -> dict:
+        p = self._project(code)
+        c = self._consumer(p, consumer)
+        q = (text or "").strip().lower()
+        if len(q) < 2:
+            raise RulesError("search text: at least two characters")
+        reaching = self._reaching(p, c)
+        now = _now()
+        hits, outside = [], 0
+        rows = self.cx.execute("SELECT * FROM rules WHERE project=:p AND " + self._IN_FORCE,
+                               {"p": p, "now": now}).fetchall()
+        for row in rows:
+            if q not in (row["title"] or "").lower() and q not in (row["body"] or "").lower():
+                continue
+            if row["id"] in reaching:
+                d = self._dict(row, p)
+                d["via"] = reaching[row["id"]][1]
+                hits.append(d)
+            else:
+                outside += 1
+        hits.sort(key=lambda d: (d["id"][:2], int(d["id"].split("-")[1])))
+        return {"project": p, "consumer": c, "hits": hits, "count": len(hits),
+                "outside_your_scope": outside}
+
+    def pending(self, code: str, consumer: str = "") -> dict:
+        """The consumer's noticeboard: my proposals waiting, my denied ones with
+        the reason, my provisional rules about to expire. This replaces the
+        notes a chat used to keep in its own memory."""
+        p = self._project(code)
+        c = self._consumer(p, consumer) if consumer else ""
+        where = "project=:p" + (" AND proposed_by=:c" if c else "")
+        args = {"p": p, "c": c} if c else {"p": p}
+        waiting = [self._dict(r, p) for r in self.cx.execute(
+            f"SELECT * FROM rules WHERE {where} AND status='proposed' ORDER BY id",
+            args).fetchall()]
+        denied = [self._dict(r, p) for r in self.cx.execute(
+            f"SELECT * FROM rules WHERE {where} AND status='denied' ORDER BY updated_at DESC",
+            args).fetchall()]
+        soon = _plus_days(30)
+        now = _now()
+        expiring = []
+        if c:
+            for rid in self._reaching(p, c):
+                row = self._row(p, rid)
+                if row is None or row["status"] != "active":
+                    continue
+                if row["permanence"] == "permanent" or not row["expires_at"]:
+                    continue
+                if now < row["expires_at"] <= soon:
+                    expiring.append(self._dict(row, p))
+        return {"project": p, "consumer": c or "(all)",
+                "waiting": waiting, "denied": denied, "expiring_within_30_days": expiring,
+                "approval_required": not self.in_grace(),
+                "note": "a denied proposal is kept on purpose: the same idea cannot come "
+                        "back through another chat in three weeks"}
+
+    # ---------- verdicts ----------
+
+    def status(self, code: str) -> dict:
+        p = self._project(code)
+        now = _now()
+        q = lambda sql, **kw: self.cx.execute(sql, {"p": p, "now": now, **kw}).fetchone()[0]
+        by_domain = {r[0]: r[1] for r in self.cx.execute(
+            "SELECT domain, COUNT(*) FROM rules WHERE project=:p AND " + self._IN_FORCE +
+            " GROUP BY domain ORDER BY domain", {"p": p, "now": now})}
+        by_consumer = {}
+        for c in [r[0] for r in self.cx.execute(
+                "SELECT name FROM consumers WHERE project=? ORDER BY name", (p,))]:
+            by_consumer[c] = len(self.list_rules(code, c)["rules"])
+        return {
+            "project": p,
+            "database": {"path": self.path,
+                         "integrity": self.cx.execute("PRAGMA integrity_check").fetchone()[0],
+                         "journal_mode": self.cx.execute("PRAGMA journal_mode").fetchone()[0],
+                         "mode": oct(os.stat(self.path).st_mode & 0o777),
+                         "owner_uid": os.stat(self.path).st_uid},
+            "rules": {
+                "in_force": q("SELECT COUNT(*) FROM rules WHERE project=:p AND " + self._IN_FORCE),
+                "proposed": q("SELECT COUNT(*) FROM rules WHERE project=:p AND status='proposed'"),
+                "denied": q("SELECT COUNT(*) FROM rules WHERE project=:p AND status='denied'"),
+                "retired": q("SELECT COUNT(*) FROM rules WHERE project=:p AND status='retired'"),
+                "expired_not_retired": q(
+                    "SELECT COUNT(*) FROM rules WHERE project=:p AND status='active' "
+                    "AND permanence='provisional' AND expires_at IS NOT NULL "
+                    "AND expires_at <= :now"),
+                "permanent": q("SELECT COUNT(*) FROM rules WHERE project=:p "
+                               "AND status='active' AND permanence='permanent'"),
+            },
+            "by_domain": by_domain,
+            "by_consumer": by_consumer,
+            "approval": {"required": not self.in_grace(),
+                         "grace_until": self.grace_until or None,
+                         "public_key_configured": bool(self.public_key),
+                         "batches_approved": q(
+                             "SELECT COUNT(*) FROM approvals WHERE project=:p")},
+            "registry_version": VERSION,
+            "repaired_at_open": self.repaired,
+        }
+
+    def check(self, code: str) -> dict:
+        """Audit: broken pointers, citations of retired rules, rules with no
+        perimeter, numbering gaps, redundancy candidates."""
+        p = self._project(code)
+        now = _now()
+        known = {r[0] for r in self.cx.execute("SELECT id FROM rules WHERE project=?", (p,))}
+        retired = {r[0] for r in self.cx.execute(
+            "SELECT id FROM rules WHERE project=? AND status='retired'", (p,))}
+        broken, to_retired = [], []
+        for r in self.cx.execute("SELECT src, dst FROM rule_refs WHERE project=?", (p,)):
+            if r[1] not in known:
+                broken.append({"from": r[0], "cites": r[1]})
+            elif r[1] in retired:
+                to_retired.append({"from": r[0], "cites": r[1]})
+        no_scope = [r[0] for r in self.cx.execute(
+            "SELECT id FROM rules r WHERE r.project=? AND r.status='active' AND NOT EXISTS "
+            "(SELECT 1 FROM rule_scopes s WHERE s.project=r.project AND s.rule_id=r.id)", (p,))]
+        gaps = []
+        for d in self._domains(p):
+            seqs = sorted(r[0] for r in self.cx.execute(
+                "SELECT seq FROM rules WHERE project=? AND domain=?", (p, d)))
+            if seqs:
+                missing = [n for n in range(1, max(seqs) + 1) if n not in seqs]
+                if missing:
+                    gaps.append({"domain": d, "missing": missing})
+        # Redundancy CANDIDATES, not a verdict: two rules in force, in the same
+        # perimeter, citing the same IDs. The registry puts the pairs under your
+        # eyes; deciding they say the same thing is a judgement.
+        cand = []
+        rows = self.cx.execute("SELECT id FROM rules WHERE project=:p AND " + self._IN_FORCE,
+                               {"p": p, "now": now}).fetchall()
+        info = {r[0]: (frozenset(self._scopes_of(p, r[0])),
+                       frozenset(x[0] for x in self.cx.execute(
+                           "SELECT dst FROM rule_refs WHERE project=? AND src=?", (p, r[0]))))
+                for r in rows}
+        ids = sorted(info)
+        for i, a in enumerate(ids):
+            for b in ids[i + 1:]:
+                sa, ra = info[a]
+                sb, rb = info[b]
+                if sa and sa == sb and ra and ra == rb:
+                    cand.append({"pair": [a, b], "same_scopes": sorted(sa),
+                                 "same_citations": sorted(ra)})
+        clean = not (broken or to_retired or no_scope)
+        return {"project": p, "coherent": clean,
+                "broken_pointers": broken, "citations_to_retired": to_retired,
+                "rules_without_perimeter": no_scope, "numbering_gaps": gaps,
+                "redundancy_candidates": cand,
+                "verdict": "coherent" if clean else "there are things to fix"}
+
+    def history(self, code: str, rid: str) -> dict:
+        p = self._project(code)
+        rid = _norm_id(rid)
+        rows = self.cx.execute(
+            "SELECT version, ts, action, reason, status, permanence, scopes, consumers "
+            "  FROM rule_versions WHERE project=? AND rule_id=? ORDER BY version", (p, rid)).fetchall()
+        if not rows:
+            raise RulesError(f"{rid}: no history — this ID was never defined in this project")
+        return {"project": p, "id": rid, "versions": [dict(r) for r in rows], "count": len(rows)}
+
+    def compare(self, code: str, rid: str, va: int, vb: int) -> dict:
+        p = self._project(code)
+        rid = _norm_id(rid)
+        def grab(v):
+            r = self.cx.execute("SELECT * FROM rule_versions WHERE project=? AND rule_id=? "
+                                "AND version=?", (p, rid, v)).fetchone()
+            if r is None:
+                raise RulesError(f"{rid}: version {v} does not exist (see history)")
+            return r
+        a, b = grab(int(va)), grab(int(vb))
+        def text(r):
+            return (f"type: {r['type']}\ntitle: {r['title']}\nstatus: {r['status']}\n"
+                    f"permanence: {r['permanence']}\nscopes: {r['scopes']}\n"
+                    f"consumers: {r['consumers']}\n\n{r['body']}\n").splitlines()
+        diff = list(difflib.unified_diff(text(a), text(b),
+                                         fromfile=f"v{va}", tofile=f"v{vb}", lineterm=""))
+        return {"project": p, "id": rid, "from": int(va), "to": int(vb),
+                "identical": not diff, "diff": "\n".join(diff)}
+
+    # ---------- writing ----------
+
+    def _refs(self, p: str, rid: str, body: str) -> int:
+        self.cx.execute("DELETE FROM rule_refs WHERE project=? AND src=?", (p, rid))
+        n = 0
+        for m in RE_REF.finditer(body or ""):
+            dst = f"{m.group(1)}-{m.group(2)}"
+            if dst == rid:
+                continue
+            self.cx.execute("INSERT OR IGNORE INTO rule_refs (project, src, dst) VALUES (?,?,?)",
+                            (p, rid, dst))
+            n += 1
+        return n
+
+    def _check_scopes(self, p: str, scopes: list[str]) -> list[str]:
+        if not scopes:
+            raise RulesError("a rule with no perimeter reaches nobody: give at least one "
+                             f"scope, or {ALL} if it binds everyone")
+        for s in scopes:
+            if not self.cx.execute("SELECT 1 FROM scopes WHERE project=? AND name=?",
+                                   (p, s)).fetchone():
+                raise RulesError(
+                    f"{s!r} is neither a consumer nor a scope of this project. "
+                    "Every consumer has a scope with its own name; groups are made "
+                    "with create_scope.")
+        return scopes
+
+    def _split_id(self, p: str, rid: str) -> tuple[str, int]:
+        m = RE_ID.match(rid)
+        dom, seq = m.group(1), int(m.group(2))
+        if dom not in self._domains(p):
+            raise RulesError(f"domain {dom!r} is not declared by this project "
+                             f"(declared: {', '.join(self._domains(p)) or 'none'})")
+        return dom, seq
+
+    def propose(self, code: str, rid: str, rtype: str, title: str, body: str,
+                scopes, reason: str, proposed_by: str = "",
+                changelog: str = "", source: str = "") -> dict:
+        """File a proposal. It reaches NOBODY until the batch is approved — which
+        is why this needs only the project code: an unapproved proposal cannot
+        do harm, and a chat that deposits one stops keeping a note about it."""
+        p = self._project(code)
+        rid = _norm_id(rid)
+        dom, seq = self._split_id(p, rid)
+        rtype = (rtype or "").strip().upper()
+        if rtype not in TYPES:
+            raise RulesError(f"type {rtype!r}: R binding, M method, F technical fact. "
+                             "Retirement is a STATE, not a type.")
+        if not (title or "").strip():
+            raise RulesError("the rule needs a title")
+        if not (body or "").strip():
+            raise RulesError("the rule needs a body")
+        if len(body.encode()) > MAX_BODY_BYTES:
+            raise RulesError(f"body over {MAX_BODY_BYTES} bytes: split the rule")
+        if not (reason or "").strip():
+            raise RulesError("reason is mandatory: without the why a rule cannot be "
+                             "defended, and at the first opportunity it gets reopened")
+        prior = self.cx.execute("SELECT id, denied_reason, updated_at FROM rules "
+                                "WHERE project=? AND id=? AND status='denied'",
+                                (p, rid)).fetchone()
+        if prior:
+            raise RulesError(
+                f"{rid} was already DENIED on {prior['updated_at'][:10]} — reason: "
+                f"{prior['denied_reason']}. The registry keeps refusals so the same idea "
+                "cannot come back through another chat. If things have changed, say so to "
+                "Alfredo rather than proposing it again.")
+        if self._row(p, rid):
+            raise RulesError(f"{rid} already exists in this project. IDs are never reused, "
+                             "not even by a retired rule: pick the next free number.")
+        scopes = self._check_scopes(p, _norm_scope_list(scopes))
+        by = _norm_name(proposed_by, "consumer") if proposed_by else None
+        if by:
+            self._consumer(p, by)
+        self.cx.execute("BEGIN")
+        try:
+            for s in scopes:
+                self.cx.execute("INSERT INTO rule_scopes (project, rule_id, scope) VALUES (?,?,?)",
+                                (p, rid, s))
+            self.cx.execute(
+                "INSERT INTO rules (project, id, domain, seq, type, title, body, status, "
+                "permanence, changelog, source, reason, proposed_by, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,'proposed','provisional',?,?,?,?,?)",
+                (p, rid, dom, seq, rtype, title.strip(), body, changelog or None,
+                 source or None, reason.strip(), by, _now()))
+            self._refs(p, rid, body)
+            self.cx.execute("COMMIT")
+        except sqlite3.IntegrityError as e:
+            self.cx.execute("ROLLBACK")
+            raise RulesError(f"{rid} refused: {e}")
+        except Exception:
+            self.cx.execute("ROLLBACK")
+            raise
+        return {"project": p, "id": rid, "status": "proposed", "scopes": scopes,
+                "reaches_now": [],
+                "note": "it reaches nobody until the batch is approved. Check back with "
+                        "pending: you do not need to keep a note about it."}
+
+    def batch(self, code: str) -> dict:
+        """The pending batch plus its DIGEST — sha256 over the ordered list of
+        IDs and bodies. You sign the batch, not the single rule: that is what
+        makes the signature worth reading, and it is where three proposals that
+        say the same thing become visible next to each other."""
+        p = self._project(code)
+        rows = self.cx.execute("SELECT * FROM rules WHERE project=? AND status='proposed' "
+                               "ORDER BY id", (p,)).fetchall()
+        ids = [r["id"] for r in rows]
+        h = hashlib.sha256()
+        h.update(p.encode())
+        for r in rows:
+            h.update(b"\x00")
+            h.update(r["id"].encode())
+            h.update(b"\x00")
+            h.update((r["body"] or "").encode())
+        digest = h.hexdigest()
+        return {"project": p, "count": len(ids), "ids": ids,
+                "proposals": [self._dict(r, p) for r in rows],
+                "digest": digest,
+                "approval_required": not self.in_grace(),
+                "how_to_sign": ("run the signer on your own machine over this exact digest "
+                                "string, then pass the base64 signature to approve. The "
+                                "private key never enters this conversation."),
+                "note": "if a proposal arrives after you read this, the digest changes and "
+                        "the old signature is refused. That is on purpose."}
+
+    def approve(self, code: str, digest: str, signature: str = "") -> dict:
+        p = self._project(code)
+        current = self.batch(code)
+        if (digest or "").strip() != current["digest"]:
+            raise RulesError(
+                "that digest is not the current one: the batch changed after you read it "
+                "(someone proposed or denied something). Ask for the batch again and "
+                "re-sign. You cannot sign one batch and have another approved.")
+        if not current["ids"]:
+            raise RulesError("nothing to approve: the batch is empty")
+        signed = self._require_signature(p, current["digest"], signature,
+                                         len(current["ids"]), current["ids"])
+        expires = _plus_days(self.provisional_days)
+        for rid in current["ids"]:
+            self.cx.execute(
+                "UPDATE rules SET status='active', permanence='provisional', expires_at=?, "
+                "reason=?, updated_at=? WHERE project=? AND id=?",
+                (expires, f"approved{'' if signed else ' under grace'}", _now(), p, rid))
+        return {"project": p, "approved": current["ids"], "count": len(current["ids"]),
+                "signed": signed, "expires_at": expires,
+                "note": ("they are PROVISIONAL: unless renewed they leave the lists by "
+                         "themselves. Staying costs a decision, going is free.")}
+
+    def deny(self, code: str, ids, reason: str) -> dict:
+        """No signature: denying cannot do harm. And an explicit denial turns
+        silence into an answer — the chat learns instead of guessing."""
+        p = self._project(code)
+        if not (reason or "").strip():
+            raise RulesError("a denial without a reason teaches nothing: say why")
+        if isinstance(ids, str):
+            ids = [ids]
+        out = []
+        for rid in [_norm_id(i) for i in (ids or [])]:
+            row = self._row(p, rid)
+            if row is None:
+                raise RulesError(f"{rid}: no such proposal")
+            if row["status"] != "proposed":
+                raise RulesError(f"{rid} is {row['status']}, not a pending proposal")
+            self.cx.execute("UPDATE rules SET status='denied', denied_reason=?, reason=?, "
+                            "updated_at=? WHERE project=? AND id=?",
+                            (reason.strip(), "denied", _now(), p, rid))
+            out.append(rid)
+        return {"project": p, "denied": out, "reason": reason.strip(),
+                "note": "the row stays: the ID is burnt and the same idea cannot come back "
+                        "through another chat"}
+
+    def renew(self, code: str, ids, signature: str = "", days: int = 0) -> dict:
+        """Keeping a rule alive is letting it in again, so it is signed too."""
+        p = self._project(code)
+        if isinstance(ids, str):
+            ids = [ids]
+        ids = sorted(_norm_id(i) for i in (ids or []))
+        if not ids:
+            raise RulesError("no ID to renew")
+        for rid in ids:
+            row = self._row(p, rid)
+            if row is None or row["status"] != "active":
+                raise RulesError(f"{rid}: not an active rule")
+        message = hashlib.sha256(("renew|" + p + "|" + ",".join(ids)).encode()).hexdigest()
+        signed = self._require_signature(p, message, signature, len(ids), ids)
+        expires = _plus_days(int(days) or self.provisional_days)
+        for rid in ids:
+            self.cx.execute("UPDATE rules SET expires_at=?, reason=?, updated_at=? "
+                            "WHERE project=? AND id=?",
+                            (expires, "renewed", _now(), p, rid))
+        return {"project": p, "renewed": ids, "expires_at": expires, "signed": signed,
+                "digest": message}
+
+    def promote(self, code: str, ids, signature: str = "") -> dict:
+        """From provisional to permanent. Rare, deliberate, and signed."""
+        p = self._project(code)
+        if isinstance(ids, str):
+            ids = [ids]
+        ids = sorted(_norm_id(i) for i in (ids or []))
+        if not ids:
+            raise RulesError("no ID to promote")
+        for rid in ids:
+            row = self._row(p, rid)
+            if row is None or row["status"] != "active":
+                raise RulesError(f"{rid}: not an active rule")
+        message = hashlib.sha256(("promote|" + p + "|" + ",".join(ids)).encode()).hexdigest()
+        signed = self._require_signature(p, message, signature, len(ids), ids)
+        for rid in ids:
+            self.cx.execute("UPDATE rules SET permanence='permanent', expires_at=NULL, "
+                            "reason=?, updated_at=? WHERE project=? AND id=?",
+                            ("promoted to permanent", _now(), p, rid))
+        return {"project": p, "promoted": ids, "signed": signed, "digest": message}
+
+    def amend(self, code: str, rid: str, expected_version: int, reason: str,
+              title: str = None, body: str = None, rtype: str = None,
+              changelog: str = None) -> dict:
+        """Fix a DEFECT in place: a wrong number, a broken pointer, a sentence
+        that says something false. Same ID, the rule stays in force.
+        A superseded DECISION is not fixed this way: propose the new one and
+        retire the old pointing at it."""
+        p = self._project(code)
+        rid = _norm_id(rid)
+        row = self._row(p, rid)
+        if row is None:
+            raise RulesError(f"{rid}: never defined in this project")
+        if not (reason or "").strip():
+            raise RulesError("reason is mandatory")
+        cur = self._version(p, rid)
+        if int(expected_version) != cur:
+            raise RulesError(f"{rid} is at version {cur}, you read {expected_version}: "
+                             "someone wrote in the meantime. Re-read and retry.")
+        if rtype is not None and rtype.strip().upper() not in TYPES:
+            raise RulesError(f"type {rtype!r}: R, M or F")
+        new_body = row["body"] if body is None else body
+        self.cx.execute(
+            "UPDATE rules SET type=?, title=?, body=?, changelog=?, reason=?, updated_at=? "
+            "WHERE project=? AND id=?",
+            (row["type"] if rtype is None else rtype.strip().upper(),
+             row["title"] if title is None else title.strip(),
+             new_body,
+             row["changelog"] if changelog is None else changelog,
+             reason.strip(), _now(), p, rid))
+        self._refs(p, rid, new_body)
+        return {"project": p, "id": rid, "version": self._version(p, rid), "amended": True}
+
+    def widen(self, code: str, rid: str, scopes, reason: str = "") -> dict:
+        """Make a rule also reach someone else. One more row in rule_scopes: the
+        scope it already belonged to is NOT touched, because that scope has other
+        tenants who have nothing to do with this."""
+        p = self._project(code)
+        rid = _norm_id(rid)
+        if self._row(p, rid) is None:
+            raise RulesError(f"{rid}: never defined in this project")
+        scopes = self._check_scopes(p, _norm_scope_list(scopes))
+        added = []
+        for s in scopes:
+            if self.cx.execute("SELECT 1 FROM rule_scopes WHERE project=? AND rule_id=? "
+                               "AND scope=?", (p, rid, s)).fetchone():
+                continue
+            self.cx.execute("INSERT INTO rule_scopes (project, rule_id, scope) VALUES (?,?,?)",
+                            (p, rid, s))
+            added.append(s)
+        return {"project": p, "id": rid, "added": added,
+                "scopes": self._scopes_of(p, rid), "reaches": self._holders(p, rid)}
+
+    def narrow(self, code: str, rid: str, scopes) -> dict:
+        p = self._project(code)
+        rid = _norm_id(rid)
+        if self._row(p, rid) is None:
+            raise RulesError(f"{rid}: never defined in this project")
+        removed = []
+        for s in _norm_scope_list(scopes):
+            n = self.cx.execute("DELETE FROM rule_scopes WHERE project=? AND rule_id=? "
+                                "AND scope=?", (p, rid, s)).rowcount
+            if n:
+                removed.append(s)
+        left = self._scopes_of(p, rid)
+        return {"project": p, "id": rid, "removed": removed, "scopes": left,
+                "warning": "this rule now reaches nobody" if not left else None}
+
+    def retire(self, code: str, rid: str, reason: str, superseded_by: str = "",
+               changelog: str = "") -> dict:
+        p = self._project(code)
+        rid = _norm_id(rid)
+        row = self._row(p, rid)
+        if row is None:
+            raise RulesError(f"{rid}: never defined in this project")
+        if row["status"] == "retired":
+            raise RulesError(f"{rid} is already retired")
+        if not (reason or "").strip():
+            raise RulesError("reason is mandatory")
+        sb = None
+        if superseded_by:
+            sb = _norm_id(superseded_by)
+            if self._row(p, sb) is None:
+                raise RulesError(f"{sb} does not exist: create the new rule first")
+        self.cx.execute("UPDATE rules SET status='retired', superseded_by=?, changelog=?, "
+                        "reason=?, updated_at=? WHERE project=? AND id=?",
+                        (sb, changelog or row["changelog"], reason.strip(), _now(), p, rid))
+        citing = [r[0] for r in self.cx.execute(
+            "SELECT DISTINCT f.src FROM rule_refs f JOIN rules r "
+            "  ON r.project=f.project AND r.id=f.src "
+            " WHERE f.project=? AND f.dst=? AND r.status='active' ORDER BY f.src", (p, rid))]
+        return {"project": p, "id": rid, "retired": True, "superseded_by": sb,
+                "still_cited_by": citing,
+                "note": "the row stays: the ID is never reused and citations must keep "
+                        "resolving. Active rules still citing it need fixing."}
+
+    # ---------- migration ----------
+
+    def import_rules(self, code: str, rules, reason: str, permanent: bool = True) -> dict:
+        """Bulk import for the MIGRATION from the Markdown files. Runs only on an
+        EMPTY project: a migration happens once, on a clean table. This is the
+        door that is already designed to open a single time, which is why the
+        approval lock needs no global off switch."""
+        p = self._project(code)
+        n = self.cx.execute("SELECT COUNT(*) FROM rules WHERE project=?", (p,)).fetchone()[0]
+        if n:
+            raise RulesError(f"this project already holds {n} rules: import runs only on an "
+                             "empty project. Use propose for one rule at a time.")
+        if not rules:
+            raise RulesError("nothing to import")
+        if len(rules) > MAX_IMPORT:
+            raise RulesError(f"{len(rules)} rules at once: the ceiling is {MAX_IMPORT}")
+        if not (reason or "").strip():
+            raise RulesError("reason is mandatory")
+        taken, rejected = [], []
+        for item in rules:
+            try:
+                rid = _norm_id(item.get("id", ""))
+                dom, seq = self._split_id(p, rid)
+                rtype = (item.get("type") or "").strip().upper()
+                if rtype not in TYPES:
+                    raise RulesError(f"type {rtype!r}: R, M or F")
+                scopes = self._check_scopes(p, _norm_scope_list(item.get("scopes")))
+                body = item.get("body") or ""
+                if not body.strip():
+                    raise RulesError("empty body")
+                self.cx.execute("BEGIN")
+                for s in scopes:
+                    self.cx.execute("INSERT INTO rule_scopes (project, rule_id, scope) "
+                                    "VALUES (?,?,?)", (p, rid, s))
+                self.cx.execute(
+                    "INSERT INTO rules (project, id, domain, seq, type, title, body, status, "
+                    "permanence, expires_at, changelog, source, reason, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?)",
+                    (p, rid, dom, seq, rtype, (item.get("title") or rid).strip(), body,
+                     "permanent" if permanent else "provisional",
+                     None if permanent else _plus_days(self.provisional_days),
+                     item.get("changelog"), item.get("source"), reason.strip(), _now()))
+                self._refs(p, rid, body)
+                self.cx.execute("COMMIT")
+                taken.append(rid)
+            except Exception as e:
+                try:
+                    self.cx.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    pass
+                rejected.append({"id": item.get("id"), "why": str(e)})
+        audit = self.check(code)
+        return {"project": p, "imported": len(taken), "ids": taken,
+                "rejected": rejected, "audit": audit,
+                "note": "the broken pointers listed by the audit were already in the "
+                        "Markdown files: they were just not visible."}
+
+    # ---------- derivatives ----------
+
+    def export(self, code: str, consumer: str = "") -> dict:
+        """A Markdown snapshot. It is a DERIVATIVE: the truth stays in the
+        database and this regenerates. With a consumer it is the block to paste
+        into that chat's memory; without one, the whole project."""
+        p = self._project(code)
+        lines = [f"# {p} — rules", "",
+                 f"> Generated {_now()} by codifier-mcp {VERSION}. This file is a "
+                 f"DERIVATIVE: the truth is the registry, and this regenerates.", ""]
+        if consumer:
+            c = self._consumer(p, consumer)
+            data = self.list_rules(code, c)
+            lines[0] = f"# {p} — rules for {c}"
+            lines += [f"{data['count']} rules in force, widest first. "
+                      f"{data['outside_your_scope']} are outside your perimeter.", ""]
+            groups: dict[int, list] = {}
+            for r in data["rules"]:
+                groups.setdefault(r["breadth"], []).append(r)
+            for breadth in sorted(groups, reverse=True):
+                block = groups[breadth]
+                via = sorted({v for r in block for v in r["via"]})
+                lines += [f"## Reaching {breadth} consumer(s) — via {', '.join(via)}", ""]
+                for r in block:
+                    lines += [f"### {r['id']} · {r['title']}  `{r['type']}`", "", r["body"], ""]
+        else:
+            now = _now()
+            rows = self.cx.execute("SELECT * FROM rules WHERE project=? ORDER BY domain, seq",
+                                   (p,)).fetchall()
+            for d in self._domains(p):
+                block = [r for r in rows if r["domain"] == d]
+                if not block:
+                    continue
+                lines += [f"## {d}", ""]
+                for r in block:
+                    mark = "" if r["status"] == "active" else f"  _{r['status']}_"
+                    lines += [f"### {r['id']} · {r['title']}  `{r['type']}`{mark}", "",
+                              f"*scopes: {', '.join(self._scopes_of(p, r['id'])) or 'none'} · "
+                              f"{r['permanence']}"
+                              + (f" · expires {r['expires_at'][:10]}" if r["expires_at"] else "")
+                              + "*", "", r["body"], ""]
+        md = "\n".join(lines)
+        return {"project": p, "consumer": consumer or None,
+                "markdown": md, "bytes": len(md.encode())}
 
     def backup(self, dest_dir: str) -> dict:
+        """A quiescent copy of the WHOLE database (VACUUM INTO): it opens without
+        recovery. In WAL the database is THREE files, so copying one is a
+        corrupt backup."""
         os.makedirs(dest_dir, exist_ok=True)
         try:
-            os.chmod(dest_dir, MODO_DIR)
+            os.chmod(dest_dir, DIR_MODE)
         except OSError:
             pass
-        nome = f"regole-{datetime.now(timezone.utc).strftime('%Y-%b-%d-%H%M')}.db"
-        dest = os.path.join(dest_dir, nome)
-        if os.path.exists(dest):
-            dest = os.path.join(dest_dir, f"regole-{secrets.token_hex(3)}.db")
+        name = f"codifier-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.db"
+        dest = os.path.join(dest_dir, name)
         self.cx.execute("VACUUM INTO ?", (dest,))
         try:
-            os.chmod(dest, MODO_FILE)
+            os.chmod(dest, FILE_MODE)
         except OSError:
             pass
-        return {"esito": "copia quiescente creata", "file": dest, "byte": os.path.getsize(dest),
-                "nota": "apribile senza recovery: e' la copia da portare off-site"}
+        return {"backup": dest, "bytes": os.path.getsize(dest),
+                "note": "quiescent copy: opens without recovery, and it is the one to take "
+                        "off-site. ZFS snapshots stay the main net."}
