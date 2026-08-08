@@ -118,6 +118,10 @@ mount for the database, one for state, and environment variables.
    prints the public half, which goes in `APPROVAL_PUBKEY`; the private half
    stays in `~/.codifier/approval.key` at mode 0600 and never travels. The same
    script signs the batch digests later: `python3 sign.py <digest>`.
+   It needs `cryptography`, and recent macOS and Linux refuse a plain
+   `pip install` into the system Python — so make it a venv once,
+   `python3 -m venv ~/.codifier/venv`, install there, and forget about it:
+   sign.py finds that venv and re-executes itself inside it.
    While you are still setting up you can leave the key empty and set
    `APPROVAL_GRACE_UNTIL` to a near date instead — it is a date and not a
    switch, so it closes by itself.

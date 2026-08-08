@@ -120,6 +120,10 @@ il database, uno per lo stato, e variabili d'ambiente.
    `APPROVAL_PUBKEY`; la privata resta in `~/.codifier/approval.key` a 0600 e
    non viaggia mai. Lo stesso script firma poi i digest dei lotti:
    `python3 sign.py <digest>`.
+   Gli serve `cryptography`, e macOS e Linux recenti rifiutano un `pip install`
+   normale nel Python di sistema — quindi fanne un venv una volta sola,
+   `python3 -m venv ~/.codifier/venv`, installalo lì, e dimenticatene: sign.py
+   quel venv lo trova e ci si ri-esegue dentro.
    Finché stai ancora montando tutto puoi lasciare la chiave vuota e mettere
    `APPROVAL_GRACE_UNTIL` a una data vicina — è una data e non un interruttore,
    quindi si chiude da sola.

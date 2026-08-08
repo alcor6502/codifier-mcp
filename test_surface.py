@@ -306,6 +306,25 @@ except Exception:
 ok(signer(["not-a-digest"], _key).returncode == 2,
    "something that is not a digest is refused before it is signed")
 
+# What happens on a machine WITHOUT cryptography — which is every fresh macOS,
+# since the system Python refuses a plain pip install. Simulated by shadowing
+# the module with one that raises on import.
+_shadow = os.path.join(_d, "shadow")
+os.makedirs(_shadow, exist_ok=True)
+with open(os.path.join(_shadow, "cryptography.py"), "w") as f:
+    f.write("raise ImportError('not installed')\n")
+
+_env = dict(os.environ, CODIFIER_KEY=_key, PYTHONPATH=_shadow,
+            HOME=os.path.join(_d, "nohome"))
+try:
+    _r = subprocess.run([sys.executable, SIGNER, "--pubkey"], capture_output=True,
+                        text=True, env=_env, timeout=20)
+    ok(_r.returncode == 2 and "venv" in _r.stderr,
+       "without cryptography it says how to fix it, in two commands", _r.stderr[:100])
+except subprocess.TimeoutExpired:
+    ok(False, "without cryptography it says how to fix it, in two commands",
+       "it hung — the re-exec is looping")
+
 print("\n== the template is publishable ==")
 
 TEMPLATE_PATH = os.path.join(HERE, "codifier-mcp.template.xml")

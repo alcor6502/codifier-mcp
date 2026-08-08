@@ -46,11 +46,35 @@ def die(msg: str) -> None:
     sys.exit(2)
 
 
+# A venv next to the key, if one exists. Recent macOS and Linux refuse a plain
+# `pip install` into the system Python (PEP 668), so the honest answer is a
+# virtual environment — but having to remember to activate it every time you
+# approve a batch is exactly the kind of friction that ends with the signing
+# step being skipped. So: if the import fails and that venv is there, this
+# re-executes itself inside it. After the one-time setup the venv is invisible.
+VENV = os.path.expanduser("~/.codifier/venv")
+VENV_PY = os.path.join(VENV, "bin", "python3")
+
 try:
     from cryptography.hazmat.primitives import serialization as ser
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 except ImportError:
-    die("this needs the 'cryptography' package: pip install cryptography")
+    # The sentinel is what stops a loop, and it has to be an environment
+    # variable: comparing interpreters does NOT work, because a venv's python3
+    # is a symlink to the same binary as the system one — realpath makes the
+    # two look identical. sys.prefix is the honest answer, and the sentinel
+    # covers the case where even that goes wrong.
+    already = (os.environ.get("CODIFIER_REEXEC") == "1"
+               or os.path.realpath(sys.prefix) == os.path.realpath(VENV))
+    if os.path.exists(VENV_PY) and not already:
+        os.environ["CODIFIER_REEXEC"] = "1"
+        os.execv(VENV_PY, [VENV_PY, os.path.abspath(__file__)] + sys.argv[1:])
+    die("this needs the 'cryptography' package. On macOS the system Python "
+        "refuses a plain pip install, so make it a venv once — after this, "
+        "sign.py finds it by itself:\n"
+        "    python3 -m venv ~/.codifier/venv\n"
+        "    ~/.codifier/venv/bin/pip install --quiet --upgrade pip cryptography\n"
+        "Then run this command again, exactly as you ran it.")
 
 
 def load(path: str) -> Ed25519PrivateKey:
