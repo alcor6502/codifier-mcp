@@ -1,26 +1,41 @@
 """
-server.py — MCP self-hosted per il REGISTRO REGOLE. UN database, N progetti.
+server.py — self-hosted MCP server for a RULES REGISTRY. ONE database, N projects.
 
-Gemello del vault-mcp: stessa architettura, stesso gate OAuth, stesso preflight
-bloccante. Due differenze deliberate:
-- gira come ROOT e i file del database sono 644: chi monta la share li LEGGE e
-  non li tocca. Toccare il database a mano rompe lo storico in silenzio;
-- non c'e' un container per progetto: il progetto e' un argomento — e non e' il
-  suo NOME ma un CODICE alfanumerico opaco, che sta in testa alle istruzioni del
-  progetto. Nessun tool di lettura elenca i progetti e nessun errore ne nomina
-  uno: chi non ha il codice non trova la porta.
+Twin of archivist-mcp: same architecture, same OAuth gate, same blocking
+preflight. Three deliberate differences:
 
-Nomi dei tool tutti prefissati `rules_`: nella stessa chat vivono anche i tool
-del vault (status, history, diff, search...) e due omonimi si confondono.
+- it runs as ROOT and the database files are 0644: whoever mounts the share
+  READS them and does not touch them. Writing by hand bypasses the triggers and
+  breaks history in silence;
+- there is no container per project: the project is an ARGUMENT — and not its
+  NAME but an opaque alphanumeric CODE that lives at the top of that project's
+  instructions. No read tool lists projects and no error names one: whoever
+  lacks the code cannot find the door;
+- writing is a two-step affair. A chat PROPOSES; the batch is approved with an
+  ed25519 signature over its digest. The registry holds only the public half.
 
-Config via variabili d'ambiente:
-  DB_PATH                 database unico (es. /db/regole.db)
-  BACKUP_DIR              copie VACUUM INTO (default: <dir del db>/backup)
-  ADMIN_ACCESS_CODE       codice di scrittura: viaggia a ogni chiamata
-  BASE_URL                URL pubblico (es. https://svc-a2.<tailnet>.ts.net)
+Every tool name is prefixed `rules_`: the vault's tools (status, history, diff,
+search...) live in the same chat, and two namesakes get confused. The prefix
+stays `rules_` even though the repository is called codifier-mcp — inside this
+project "rules" is the only subject there is.
+
+Configuration, all through environment variables:
+  DB_PATH                 the single database (default /db/rules.db)
+  BACKUP_DIR              VACUUM INTO copies (default: <db dir>/backup)
+  ADMIN_ACCESS_CODE       the maintenance code: it travels on every call
+  APPROVAL_PUBKEY         ed25519 PUBLIC key, raw base64. Never the private half
+  APPROVAL_GRACE_UNTIL    YYYY-MM-DD: until then a batch passes unsigned
+  PROVISIONAL_DAYS        how long an approved rule lives (default 90)
+  BASE_URL                public URL (e.g. https://host.tailnet.ts.net)
   GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET / ALLOWED_GITHUB_LOGIN / JWT_SIGNING_KEY
   PORT                    default 3001
-  ANTHROPIC_CIDR          default 160.79.104.0/21; stringa vuota = filtro spento
+  LOG_LEVEL               default INFO — ours only, never the root logger
+  ALLOWED_CIDRS           accepted ranges, ';' between entries and '#' opening a
+                          description. Empty string disables the filter
+  ANTHROPIC_CIDR          DEPRECATED, still honoured: see ALLOWED_CIDRS
+  WEB_PORT                reserved for the read-only web UI of v1.1. Inert here,
+                          and declared in the template already because Unraid
+                          does not propagate new variables to installed containers
 """
 from __future__ import annotations
 
@@ -29,36 +44,61 @@ import logging
 import os
 import secrets
 import sys
+from pathlib import Path
 
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.github import GitHubProvider
 from fastmcp.server.dependencies import get_access_token, get_http_request
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
-from rules import Registro, RulesError
+from preflight import cidrs_from_env, describe_cidrs
+from rules import Registry, RulesError, VERSION
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-log = logging.getLogger("rules-mcp")
+# The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
+# for every library loaded, not for ours: that is where the noise came from.
+# Only our own logger follows LOG_LEVEL.
+logging.basicConfig(level=logging.WARNING,
+                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("codifier-mcp")
+log.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+
+# uvicorn's access log is one line per request. Left on, it slowly becomes a
+# record of who asked what and when — and the arguments here are project codes.
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
+# FastMCP's banner, rich formatting and boot-time update check are switched off
+# in the Dockerfile (ENV), NOT here: those are read when fastmcp is imported, so
+# anything set after the import above would arrive too late.
 
 
 def env(name: str, default: str | None = None) -> str:
     v = os.environ.get(name, default)
     if v is None:
-        log.error("variabile d'ambiente mancante: %s", name)
+        log.error("missing environment variable: %s", name)
         sys.exit(2)
     return v
 
 
-DB_PATH = env("DB_PATH", "/db/regole.db")
+DB_PATH = env("DB_PATH", "/db/rules.db")
 BASE_URL = env("BASE_URL")
 ALLOWED_LOGIN = env("ALLOWED_GITHUB_LOGIN")
-CODE = env("ADMIN_ACCESS_CODE")
+ADMIN_CODE = env("ADMIN_ACCESS_CODE")
 PORT = int(env("PORT", "3001"))
-CIDR = os.environ.get("ANTHROPIC_CIDR", "160.79.104.0/21").strip()
 BACKUP_DIR = os.environ.get("BACKUP_DIR") or os.path.join(os.path.dirname(DB_PATH), "backup")
+# Resolved in preflight.cidrs_from_env so the service and the preflight can
+# never disagree about what the filter is.
+ALLOWED_CIDRS = cidrs_from_env()
 
-reg = Registro(DB_PATH)
-log.info("registro: %s — %s", DB_PATH, reg.stato())
+registry = Registry(DB_PATH,
+                    public_key=os.environ.get("APPROVAL_PUBKEY", ""),
+                    grace_until=os.environ.get("APPROVAL_GRACE_UNTIL", ""),
+                    provisional_days=int(os.environ.get("PROVISIONAL_DAYS") or 90))
+if registry.repaired:
+    log.warning("schema rebuilt at open: %s — somebody had removed these objects",
+                ", ".join(registry.repaired))
+log.info("registry %s — %s — %s projects — approval: %s",
+         VERSION, DB_PATH, registry.projects()["count"],
+         "grace open until " + registry.grace_until if registry.in_grace() else "signature required")
 
 auth = GitHubProvider(
     client_id=env("GITHUB_CLIENT_ID"),
@@ -68,265 +108,488 @@ auth = GitHubProvider(
     require_authorization_consent=True,
 )
 
-mcp = FastMCP(name="Registro Regole", auth=auth)
+mcp = FastMCP("codifier-mcp", auth=auth)
 
 
 class Gate(Middleware):
-    """Due controlli su OGNI messaggio: (1) IP nell'egress Anthropic (XFF del
-    Funnel, che lo compila lui: proxy fidato); (2) login GitHub == ALLOWED_LOGIN."""
+    """Two filters, before anything else: the GitHub identity and the source IP.
+    The XFF header is filled in by the Funnel, which is the trusted proxy."""
 
     def __init__(self) -> None:
-        self.net = ipaddress.ip_network(CIDR) if CIDR else None
+        self.nets = [ipaddress.ip_network(c) for c, _ in ALLOWED_CIDRS]
 
-    async def on_message(self, ctx: MiddlewareContext, call_next):
-        if self.net is not None:
-            try:
-                req = get_http_request()
-                xff = (req.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-                ip = xff or (req.client.host if req.client else "")
-                if not ip or ipaddress.ip_address(ip) not in self.net:
-                    log.warning("rifiutato: IP %r fuori da %s", ip, CIDR)
-                    raise RulesError("accesso rifiutato (origine non ammessa)")
-            except RulesError:
-                raise
-            except Exception:
-                pass  # niente request HTTP nel contesto (es. ping interno)
+    async def on_call_tool(self, ctx: MiddlewareContext, call_next):
         tok = get_access_token()
-        login = (tok.claims or {}).get("login") if tok else None
+        login = (tok.claims.get("login") if tok and tok.claims else None)
         if login != ALLOWED_LOGIN:
-            log.warning("rifiutato: login GitHub %r != %r", login, ALLOWED_LOGIN)
-            raise RulesError("accesso rifiutato (utente non ammesso)")
+            log.warning("refused: GitHub login %r is not %r", login, ALLOWED_LOGIN)
+            raise ValueError("user not authorised")
+        if self.nets:
+            req = get_http_request()
+            src = (req.headers.get("x-forwarded-for", "").split(",")[0].strip()
+                   or (req.client.host if req.client else ""))
+            try:
+                ip = ipaddress.ip_address(src) if src else None
+                if ip is None or not any(ip in n for n in self.nets):
+                    raise ValueError("origin not allowed")
+            except ValueError:
+                log.warning("refused: source %r outside the allowed ranges", src)
+                raise ValueError("origin not allowed")
         return await call_next(ctx)
 
 
 mcp.add_middleware(Gate())
 
-
-def _admin(codice: str) -> None:
-    """Il gate di MANUTENZIONE: scrittura, e le letture che escono dal perimetro
-    di chi chiede (stato, audit, storico, export). Non e' uno stato di sessione:
-    il codice viaggia a ogni chiamata, cosi' non esiste una 'modalita' rimasta
-    aperta per sbaglio."""
-    if not secrets.compare_digest((codice or "").strip(), CODE):
-        raise RulesError("codice admin mancante o errato: questa operazione la fa solo "
-                         "la chat che MANTIENE il registro, col codice che le da' "
-                         "Alfredo. Non provare a indovinarlo: chiedilo.")
+_GUIDE = Path(__file__).with_name("reference-guide.md")
 
 
-# ---------------- lettura: aperta a tutti i ruoli ----------------
+def _admin(code: str) -> None:
+    """The MAINTENANCE gate: writing, and the reads that step outside the
+    caller's own perimeter (status, audit, history, export, the registry index).
 
-@mcp.tool
-def rules_project_info(progetto: str) -> dict:
-    """Cosa c'e' dentro il progetto di cui hai il codice: i RUOLI che esistono e
-    i DOMINI delle sigle. Chiamalo per primo, se non sai quale ruolo dichiarare:
-    e' anche la prova che il registro risponde.
-    `progetto` e' il CODICE alfanumerico in testa alle istruzioni del progetto,
-    non il suo nome. Non esiste un tool che elenchi i progetti: senza codice il
-    registro non risponde."""
-    return reg.info_progetto(progetto)
+    It is not session state: the code travels on every call, so there is no
+    "mode" left open by accident."""
+    if not secrets.compare_digest((code or "").strip(), ADMIN_CODE):
+        raise RulesError("admin code missing or wrong: this is done only by the chat that "
+                         "MAINTAINS the registry, with the code Alfredo gives it. Do not try "
+                         "to guess it: ask.")
 
+
+# =====================================================================
+# Reading — open to every consumer
+# =====================================================================
 
 @mcp.tool
-def rules_status(progetto: str, codice: str) -> dict:
-    """MANUTENZIONE. Verdetto sul registro: integrita' del database, permessi dei
-    file, conteggi per dominio e per ruolo, ultima modifica. I conteggi
-    riguardano tutti i perimetri, per questo vuole il codice admin."""
-    _admin(codice)
-    return reg.stato(progetto)
+def rules_project_info(project: str) -> dict:
+    """What is inside the project whose code you hold: the CONSUMERS that exist,
+    the SCOPES with who is in them, and the DOMAINS of the IDs. Call this first
+    if you do not know which consumer to declare — it is also the proof that the
+    registry answers.
+
+    `project` is the alphanumeric CODE at the top of the project's instructions,
+    not its name. There is no tool that lists projects: without the code the
+    registry does not answer, and no error will ever hint at another one."""
+    return registry.project_info(project)
 
 
 @mcp.tool
-def rules_list(progetto: str, ruolo: str) -> dict:
-    """TUTTE le regole che valgono per te, in UNA chiamata: passa il CODICE del
-    progetto (quello in testa alle sue istruzioni) e il tuo ruolo, e le ricevi
-    complete, ordinate per dominio. Sostituisce l'apertura dei
-    file di regole — non serve leggere altro.
-    I ruoli non sono fissi: li dichiara ogni progetto (vedi rules_projects). Le
-    regole con perimetro '*' arrivano sempre, a chiunque.
-    Il verdetto dice anche QUANTE regole restano fuori dal tuo perimetro: se un
-    ID che ti serve non e' nell'elenco, non e' inesistente — e' di qualcun altro.
-    Solo regole IN VIGORE: le ritirate non compaiono mai (restano raggiungibili
-    per ID, perche' le citazioni devono risolvere)."""
-    return reg.regole(progetto, ruolo)
+def reference_guide() -> dict:
+    """The manual for this registry: the model, what a consumer and a scope are,
+    the life of a rule from proposal to retirement, which tool for which job, and
+    what the errors mean. Read it before your first write."""
+    try:
+        return {"version": VERSION, "guide": _GUIDE.read_text(encoding="utf-8")}
+    except OSError as e:
+        raise RulesError(f"guide not available in the image: {e}")
 
 
 @mcp.tool
-def rules_get(progetto: str, id: str, ruolo: str) -> dict:
-    """Una regola sola dal suo ID (es. "VA-02"; il suffisso di tipo si tollera ma
-    la citazione corretta e' nuda). Tre risposte DIVERSE, e la differenza conta:
-    la regola · "esiste ma non e' di tua competenza" (con chi la tiene) · "ID mai
-    definito" — che significa citazione rotta, da segnalare, OPPURE che stai
-    usando il codice di un altro progetto."""
-    return reg.regola(progetto, id, ruolo)
+def rules_list(project: str, consumer: str) -> dict:
+    """EVERY rule in force for you, in ONE call: pass the project CODE and your
+    own consumer name, and you get them whole, ordered from the most widespread
+    to the most specific. This replaces opening the rule files — there is
+    nothing else to read.
+
+    The order is the BREADTH of the scope a rule reaches you through: what comes
+    first binds everyone, what comes last is yours alone. Each rule carries
+    `via` (which scope it arrives through) and `breadth` (how many consumers
+    that scope holds).
+
+    Consumers are not fixed: every project declares its own, and a skill is a
+    consumer exactly like a chat. The verdict also says HOW MANY rules stayed
+    outside your perimeter: if an ID you need is not in the list, it is not
+    undefined — it belongs to somebody else.
+
+    Only rules IN FORCE: retired ones never appear here, and neither do expired
+    provisional ones (both stay reachable by ID, because citations must keep
+    resolving)."""
+    return registry.list_rules(project, consumer)
 
 
 @mcp.tool
-def rules_search(progetto: str, testo: str, ruolo: str) -> dict:
-    """Cerca una stringa nel titolo e nel corpo delle regole attive del tuo
-    perimetro. Dice anche quante corrispondenze sono cadute fuori perimetro,
-    cosi' sai che esistono senza vederle."""
-    return reg.cerca(progetto, testo, ruolo)
+def rules_get(project: str, ids: list[str], consumer: str) -> dict:
+    """One or MANY rules by ID (e.g. ["VA-02","ST-11"]; the type suffix is
+    tolerated, but the correct citation is bare).
+
+    Three DIFFERENT answers, kept apart, and the difference is the point:
+      found          the rules, whole
+      not_yours      they exist, but outside your perimeter — with who holds them
+      never_defined  those IDs were never defined here: a BROKEN CITATION to be
+                     reported, or you are using another project's code
+
+    Asking for the batch at once is what turns a stumble into an audit: broken
+    citations are worth much more seen together than one at a time."""
+    return registry.get_rules(project, ids, consumer)
 
 
 @mcp.tool
-def rules_check(progetto: str, codice: str) -> dict:
-    """MANUTENZIONE. Audit di un progetto: puntatori rotti (sigle citate che non esistono),
-    citazioni verso regole ritirate, regole senza perimetro, buchi di
-    numerazione. Verdetto, non dump: se torna "coerente" non c'e' altro da fare.
-    Elenca ID di tutti i perimetri: per questo vuole il codice admin."""
-    _admin(codice)
-    return reg.verifica(progetto)
+def rules_search(project: str, text: str, consumer: str) -> dict:
+    """Search a string in the title and body of the rules in force within your
+    perimeter. It also says how many matches fell outside it, so you know they
+    exist without seeing them."""
+    return registry.search(project, text, consumer)
 
 
 @mcp.tool
-def rules_history(progetto: str, id: str, codice: str) -> dict:
-    """MANUTENZIONE. Come quella regola e' cambiata nel tempo: una riga per versione, con data,
-    azione e MOTIVO. Lo storico lo scrivono i trigger del database, non i tool:
-    c'e' dentro anche una modifica fatta a mano. Serve a chi MANTIENE la regola,
-    non a chi la applica: a quest'ultimo basta il testo in vigore."""
-    _admin(codice)
-    return reg.storico(progetto, id)
+def rules_pending(project: str, consumer: str = "") -> dict:
+    """Your noticeboard: the proposals of yours still waiting, the ones that were
+    DENIED with the reason why, and your rules expiring within 30 days.
+
+    This is what replaces the note a chat used to keep in its own memory. You
+    filed a proposal three weeks ago and you do not remember what became of it:
+    ask here rather than proposing it again. Without `consumer` it shows the
+    whole project, which is the maintainer's view."""
+    return registry.pending(project, consumer)
+
+
+# =====================================================================
+# Proposing — no admin code: a proposal reaches nobody
+# =====================================================================
+
+@mcp.tool
+def rules_propose(project: str, id: str, type: str, title: str, body: str,
+                  scopes: list[str], reason: str, proposed_by: str = "",
+                  changelog: str = "", source: str = "") -> dict:
+    """File a proposal for a new rule. It needs ONLY the project code, because a
+    proposal reaches nobody until its batch is approved: it cannot do harm, and
+    a chat that deposits one can stop keeping a note about it.
+
+    `type`: R binding · M method · F technical fact. Retirement is a STATE, not
+    a type. `scopes`: consumer names, group scope names, or ["*"] if it binds
+    everyone present and future. `reason` is mandatory: without the why a rule
+    cannot be defended, and at the first opportunity it gets reopened.
+    `proposed_by` is your own consumer name — it is what makes rules_pending
+    able to show you your own.
+
+    The ID is never reused, not even by a retired or a denied rule. A domain
+    must already be declared by the project."""
+    return registry.propose(project, id, type, title, body, scopes, reason,
+                            proposed_by, changelog, source)
+
+
+# =====================================================================
+# Approving — the admin code, and a signature over the batch
+# =====================================================================
+
+@mcp.tool
+def rules_batch(project: str, code: str) -> dict:
+    """MAINTENANCE. The pending proposals, whole, plus the DIGEST of the batch.
+
+    You sign the BATCH, never the single rule. Two reasons, and both were paid
+    for: at the twelfth signature in a row a person signs without reading; and
+    seen side by side, three proposals that say the same thing become visible as
+    what they are.
+
+    Sign the digest string on your own machine and pass the base64 signature to
+    rules_approve. The private key never enters this conversation, and the
+    registry holds only the public half. If a proposal arrives in between, the
+    digest changes and the old signature is refused — that is on purpose."""
+    _admin(code)
+    return registry.batch(project)
 
 
 @mcp.tool
-def rules_diff(progetto: str, id: str, versione_a: int, versione_b: int, codice: str) -> dict:
-    """MANUTENZIONE. Cosa e' cambiato fra due versioni di UNA regola (i numeri li da'
-    rules_history). Si conservano versioni intere, non diff: il confronto si
-    calcola al volo fra due qualsiasi, anche lontane."""
-    _admin(codice)
-    return reg.confronta(progetto, id, versione_a, versione_b)
+def rules_approve(project: str, digest: str, code: str, signature: str = "") -> dict:
+    """MAINTENANCE. Approve the whole batch: the proposals become ACTIVE and
+    PROVISIONAL, with an expiry date.
+
+    Provisional is the point of the whole mechanism. Rules did not pile up
+    because somebody wrote them without permission — they piled up because
+    adding one costs a call and removing one costs a decision nobody takes.
+    Expiry inverts that: staying costs a decision, going is free.
+
+    `digest` must be the current one from rules_batch. Inside the grace window
+    the signature may be omitted, and the approval is recorded AS UNSIGNED."""
+    _admin(code)
+    return registry.approve(project, digest, signature)
 
 
 @mcp.tool
-def rules_export(progetto: str, codice: str, ruolo: str = "") -> dict:
-    """MANUTENZIONE. Snapshot Markdown, da scrivere nel vault con write_file del
-    vault-mcp. Due usi:
-    - con `ruolo`: solo il perimetro di quel ruolo, regole in vigore — e' il
-      testo da incollare nella MEMORIA di quella chat;
-    - senza `ruolo`: il progetto intero, ritirate comprese — documento di
-      manutenzione, e la copia che finisce in git.
-    Domini in ordine alfabetico (arrivano a blocchi), dentro il blocco per
-    progressivo. E' un DERIVATO: la verita' resta il database, si rigenera."""
-    _admin(codice)
-    return reg.esporta(progetto, ruolo)
+def rules_deny(project: str, ids: list[str], reason: str, code: str) -> dict:
+    """MAINTENANCE. Refuse one or more proposals, with a reason. No signature is
+    asked for: refusing cannot do harm.
 
-
-# ---------------- scrittura: codice a OGNI chiamata ----------------
-
-@mcp.tool
-def rules_registry(codice: str) -> dict:
-    """L'elenco COMPLETO dei progetti del registro, CODICI COMPRESI. E' l'unica
-    porta da cui i codici possono uscire, e per questo vuole il codice di
-    scrittura. Serve ad Alfredo per ritrovare un codice smarrito, non alle chat
-    di lavoro: quelle il loro codice ce l'hanno gia' nelle istruzioni."""
-    _admin(codice)
-    return reg.progetti()
+    The row STAYS, and the ID is burnt. That is what stops the same idea coming
+    back through a different chat in three weeks — and the reason turns silence
+    into an answer, so whoever proposed it learns something instead of
+    guessing."""
+    _admin(code)
+    return registry.deny(project, ids, reason)
 
 
 @mcp.tool
-def rules_project_create(codice_progetto: str, nome: str, ruoli: list[str], domini: dict,
-                         codice: str, descrizione: str = "") -> dict:
-    """Crea un progetto nuovo nel registro. Serve prima di qualunque regola.
-    `codice_progetto`: l'handle con cui quel progetto sara' indirizzato per
-    sempre — 8-32 caratteri alfanumerici, generato da Alfredo, da mettere in
-    testa alle istruzioni del progetto. Non e' il nome e non si deduce dal nome.
-    `ruoli`: i ruoli che quel progetto avra' (es. ["architect","tax monitor"]).
-    `domini`: le sigle con la loro descrizione, es. {"VA":"vault e file",
-    "ST":"struttura e convenzioni"} — due lettere maiuscole ciascuna.
-    Ruoli e domini sono dati: un progetto nuovo non richiede codice nuovo."""
-    _admin(codice)
-    return reg.crea_progetto(codice_progetto, nome, ruoli, domini, descrizione)
+def rules_renew(project: str, ids: list[str], code: str,
+                signature: str = "", days: int = 0) -> dict:
+    """MAINTENANCE. Push the expiry of provisional rules forward. Signed, because
+    keeping a rule alive is letting it in again.
+
+    The digest to sign is returned by the error when the signature is missing or
+    wrong, and in the verdict when it succeeds."""
+    _admin(code)
+    return registry.renew(project, ids, signature, days)
 
 
 @mcp.tool
-def rules_project_rekey(progetto: str, codice_progetto_nuovo: str, codice: str) -> dict:
-    """Cambia il codice di accesso di un progetto (se e' finito dove non doveva).
-    Le regole non si toccano: dentro il registro il progetto e' indirizzato per
-    nome, il codice e' solo la porta. Aggiorna le istruzioni del progetto PRIMA
-    di chiudere la chat: col vecchio codice non ci si arriva piu'."""
-    _admin(codice)
-    return reg.cambia_codice(progetto, codice_progetto_nuovo)
+def rules_promote(project: str, ids: list[str], code: str, signature: str = "") -> dict:
+    """MAINTENANCE. From provisional to PERMANENT: no expiry, it never leaves on
+    its own again. Rare, deliberate, and signed.
+
+    Think twice: a permanent rule is one you are promising to notice when it
+    goes stale, because nothing else will notice for you."""
+    _admin(code)
+    return registry.promote(project, ids, signature)
+
+
+# =====================================================================
+# Maintaining rules
+# =====================================================================
+
+@mcp.tool
+def rules_fix(project: str, id: str, expected_version: int, reason: str, code: str,
+              title: str = "", body: str = "", type: str = "", changelog: str = "") -> dict:
+    """MAINTENANCE. Fix a DEFECT in place: a wrong number, a broken pointer, a
+    sentence that says something false. Same ID, the rule stays in force, and a
+    new version is born in history.
+
+    A superseded DECISION is NOT fixed this way: propose the new rule and retire
+    the old one pointing at it. The difference matters — a defect never was
+    right, a superseded decision was right and stopped being so.
+
+    `expected_version` is the number you read with rules_get: if somebody wrote
+    in the meantime the change is refused and you are told the current version.
+    Leave empty whatever you are not changing."""
+    _admin(code)
+    return registry.amend(project, id, expected_version, reason,
+                          title or None, body or None, type or None, changelog or None)
 
 
 @mcp.tool
-def rules_project_update(progetto: str, codice: str, ruoli: list[str] | None = None,
-                         domini: dict | None = None) -> dict:
-    """Aggiunge ruoli o domini a un progetto esistente. Si AGGIUNGE soltanto:
-    togliere un ruolo o un dominio orfanerebbe le regole che li usano."""
-    _admin(codice)
-    return reg.aggiorna_progetto(progetto, ruoli, domini)
+def rules_widen(project: str, id: str, scopes: list[str], code: str, reason: str = "") -> dict:
+    """MAINTENANCE. Make a rule ALSO reach somebody else: one more row, and the
+    scope it already belonged to is not touched — that scope has other tenants
+    who have nothing to do with this rule.
+
+    This is the difference between moving a rule and widening a group, and they
+    are two different things. To change who is in a GROUP, use rules_scope_edit,
+    and know that it changes the perimeter of every rule pointing at it."""
+    _admin(code)
+    return registry.widen(project, id, scopes, reason)
 
 
 @mcp.tool
-def rules_create(progetto: str, id: str, tipo: str, titolo: str, corpo: str,
-                 ruoli: list[str], motivo: str, codice: str, changelog: str = "") -> dict:
-    """Crea una regola nuova.
-    `tipo`: R vincolante · M metodo · F fatto tecnico. Il ritiro NON e' un tipo.
-    `ruoli`: fra quelli dichiarati dal progetto, oppure ["*"] se vale per chiunque.
-    `motivo` e' obbligatorio: senza il perche' la regola non si difende e alla
-    prima occasione viene riaperta. `changelog` e' il riferimento alla voce
-    (es. "Architect/0007"), cartella + numero, mai il numero nudo.
-    L'ID non si riusa MAI: se e' gia' stato usato in quel progetto, anche da una
-    regola ritirata, la creazione viene rifiutata. Il dominio dev'essere gia'
-    dichiarato (rules_project_update per aggiungerne uno)."""
-    _admin(codice)
-    return reg.crea(progetto, id, tipo, titolo, corpo, ruoli, motivo, changelog or None)
+def rules_narrow(project: str, id: str, scopes: list[str], code: str) -> dict:
+    """MAINTENANCE. Stop a rule reaching a scope. Symmetric to rules_widen: one
+    row less. If it ends up with no scope at all the verdict says so — a rule
+    that reaches nobody is not retired, it is invisible, which is worse."""
+    _admin(code)
+    return registry.narrow(project, id, scopes)
 
 
 @mcp.tool
-def rules_fix(progetto: str, id: str, versione_attesa: int, motivo: str, codice: str,
-              titolo: str = "", corpo: str = "", tipo: str = "",
-              ruoli: list[str] | None = None, changelog: str = "") -> dict:
-    """Corregge un DIFETTO sul posto: un numero sbagliato, un puntatore rotto,
-    una frase che dice il falso. Stesso ID, la regola resta in vigore, nasce una
-    versione nuova nello storico.
-    Una DECISIONE superata NON si corregge cosi': si crea la regola nuova e si
-    ritira la vecchia puntando a lei (rules_create + rules_retire).
-    `versione_attesa` e' il numero che hai letto con rules_get: se nel frattempo
-    ha scritto qualcun altro, la modifica viene rifiutata e ti dice qual e' la
-    versione corrente. Lascia vuoti i campi che non cambi."""
-    _admin(codice)
-    return reg.correggi(progetto, id, versione_attesa, motivo,
-                        titolo or None, corpo or None, tipo or None, ruoli, changelog or None)
+def rules_retire(project: str, id: str, reason: str, code: str,
+                 superseded_by: str = "", changelog: str = "") -> dict:
+    """MAINTENANCE. Retire a rule: it leaves the consumers' lists, but the row
+    STAYS. The ID is never reused and citations must keep resolving. There is no
+    deletion.
+
+    `superseded_by` when a new rule takes its place (create it first). The
+    verdict lists the active rules that still cite this one: those need
+    fixing."""
+    _admin(code)
+    return registry.retire(project, id, reason, superseded_by, changelog)
+
+
+# =====================================================================
+# Projects, consumers, scopes
+# =====================================================================
+
+@mcp.tool
+def rules_registry(code: str) -> dict:
+    """MAINTENANCE. The COMPLETE list of projects in the registry, CODES
+    INCLUDED. This is the only door codes come out of, which is why it wants the
+    admin code. It is for Alfredo, to recover a code he has mislaid — working
+    chats already have theirs, at the top of their instructions."""
+    _admin(code)
+    return registry.projects()
 
 
 @mcp.tool
-def rules_retire(progetto: str, id: str, motivo: str, codice: str,
-                 superata_da: str = "", changelog: str = "") -> dict:
-    """Ritira una regola: esce dalle liste dei ruoli ma la riga RESTA, perche'
-    l'ID non si riusa mai e le citazioni devono restare risolvibili. Non esiste
-    una cancellazione.
-    `superata_da` va compilato quando la regola e' sostituita da una nuova (che
-    dev'essere gia' stata creata). Il verdetto elenca le regole attive che la
-    citano ancora: vanno sistemate."""
-    _admin(codice)
-    return reg.ritira(progetto, id, motivo, superata_da or None, changelog or None)
+def rules_status(project: str, code: str) -> dict:
+    """MAINTENANCE. The verdict on the registry: database integrity, journal
+    mode, file permissions, counts by domain and by consumer, how many rules
+    have expired without being retired, how many batches were approved. The
+    counts cover every perimeter, which is why it wants the admin code."""
+    _admin(code)
+    return registry.status(project)
 
 
 @mcp.tool
-def rules_import(progetto: str, regole: list[dict], motivo: str, codice: str) -> dict:
-    """Import in blocco per la MIGRAZIONE dai file MD. Solo su progetto VUOTO:
-    una migrazione si fa una volta sola, su tavolo pulito (gli altri progetti
-    dello stesso database non c'entrano).
-    Ogni elemento: {"id","tipo","titolo","corpo","ruoli",["changelog"],["fonte"]}.
-    Le regole rifiutate vengono elencate col motivo, le altre passano: si
-    correggono e si rilanciano con rules_create. In coda gira rules_check."""
-    _admin(codice)
-    return reg.importa(progetto, regole, motivo)
+def rules_check(project: str, code: str) -> dict:
+    """MAINTENANCE. Audit of a project: broken pointers (IDs cited that do not
+    exist), citations towards retired rules, rules with no perimeter, numbering
+    gaps, and REDUNDANCY CANDIDATES.
+
+    The candidates are a suspicion, not a verdict: two rules in force, in the
+    same perimeter, citing the same IDs. The registry puts the pairs under your
+    eyes — deciding they say the same thing is a judgement, and it stays
+    yours."""
+    _admin(code)
+    return registry.check(project)
 
 
 @mcp.tool
-def rules_backup(codice: str) -> dict:
-    """Copia quiescente dell'INTERO database (VACUUM INTO) nella cartella di
-    backup: si apre senza recovery, ed e' quella da portare off-site. Sicuro
-    anche a database vivo. Gli snapshot ZFS restano la rete principale."""
-    _admin(codice)
-    return reg.backup(BACKUP_DIR)
+def rules_history(project: str, id: str, code: str) -> dict:
+    """MAINTENANCE. How that rule changed over time: one row per version, with
+    date, action and REASON, plus the perimeter in two columns — `scopes` what
+    was declared, `consumers` who was actually reached that day.
+
+    History is written by the database TRIGGERS, not by these tools, so a change
+    made by hand with sqlite3 is in here too. It serves whoever MAINTAINS the
+    rule, not whoever applies it: the latter only needs the text in force."""
+    _admin(code)
+    return registry.history(project, id)
+
+
+@mcp.tool
+def rules_diff(project: str, id: str, version_a: int, version_b: int, code: str) -> dict:
+    """MAINTENANCE. What changed between two versions of ONE rule (the numbers
+    come from rules_history). Whole versions are kept, not diffs: the comparison
+    is computed on the fly between any two, however far apart."""
+    _admin(code)
+    return registry.compare(project, id, version_a, version_b)
+
+
+@mcp.tool
+def rules_export(project: str, code: str, consumer: str = "") -> dict:
+    """MAINTENANCE. A Markdown snapshot, to be written into the vault with the
+    archivist's write_file. Two uses:
+      with `consumer`     only that perimeter, rules in force, widest first
+      without `consumer`  the whole project, retired rules included — the
+                          maintenance document, and the copy that goes into git
+
+    It is a DERIVATIVE: the truth stays in the database and this regenerates. Do
+    not edit it and expect the registry to notice."""
+    _admin(code)
+    return registry.export(project, consumer)
+
+
+@mcp.tool
+def rules_project_create(project_code: str, name: str, consumers: list, domains: dict,
+                         code: str, description: str = "") -> dict:
+    """MAINTENANCE. Create a new project. Needed before any rule.
+
+    `project_code`: the handle that project will be addressed by forever — 8 to
+    32 alphanumeric characters, generated by Alfredo, to be put at the top of
+    the project's instructions. It is not the name and cannot be derived from it.
+    `consumers`: [["architect","chat"], ["update-tax","skill"]] — whoever
+    downloads rules. A person is not a consumer: a rule that binds a person says
+    so in its body.
+    `domains`: {"VA":"vault and files", "ST":"structure"} — two uppercase
+    letters each.
+
+    Every consumer is given a scope of its own by the database. A new project
+    does not need a new container: consumers and domains are data."""
+    _admin(code)
+    return registry.create_project(project_code, name, consumers, domains, description)
+
+
+@mcp.tool
+def rules_project_rekey(project: str, new_project_code: str, code: str) -> dict:
+    """MAINTENANCE. Change a project's access code (if it ended up somewhere it
+    should not have). The rules are untouched: inside the registry a project is
+    addressed by name, and the code is only the door.
+
+    Update the project's instructions BEFORE closing the chat: the old code no
+    longer reaches anything."""
+    _admin(code)
+    return registry.rekey_project(project, new_project_code)
+
+
+@mcp.tool
+def rules_consumers_add(project: str, consumers: list, code: str) -> dict:
+    """MAINTENANCE. Add consumers to a project — chats or skills. Each one gets
+    a scope of its own name, made by the database.
+
+    Only adding: removing a consumer would orphan the rules aimed at it. And a
+    consumer is never RENAMED — a renamed consumer is a different consumer, and
+    the rules that reached it need reviewing, not dragging along behind a name.
+    Create the new one and retire the old."""
+    _admin(code)
+    return registry.add_consumers(project, consumers)
+
+
+@mcp.tool
+def rules_domains_add(project: str, domains: dict, code: str) -> dict:
+    """MAINTENANCE. Add ID domains to a project: {"LQ":"liquidity"}. Two
+    uppercase letters each. Only adding, for the same reason."""
+    _admin(code)
+    return registry.add_domains(project, domains)
+
+
+@mcp.tool
+def rules_scope_create(project: str, name: str, members: list[str], code: str) -> dict:
+    """MAINTENANCE. Create a named group of consumers, e.g. "deliberativi" over
+    the four chats that deliberate.
+
+    At least two members: every consumer already has a singleton scope of its
+    own name, made by the database, so a one-member group would add nothing but
+    a second name for the same set. A group cannot take a consumer's name —
+    consumers and scopes share one namespace, and that is the right
+    constraint."""
+    _admin(code)
+    return registry.create_scope(project, name, members)
+
+
+@mcp.tool
+def rules_scope_edit(project: str, name: str, code: str,
+                     add: list[str] = None, remove: list[str] = None) -> dict:
+    """MAINTENANCE. Change who is in a GROUP scope. Careful: this changes the
+    perimeter of EVERY rule pointing at it, and the verdict says how many that
+    is. To make one rule reach one more consumer, use rules_widen instead.
+
+    A managed scope — a consumer's singleton, or _ALL_ — is refused: its
+    membership is fixed by construction, and the refusal comes from the
+    database."""
+    _admin(code)
+    return registry.edit_scope(project, name, add, remove)
+
+
+# =====================================================================
+# Migration and service
+# =====================================================================
+
+@mcp.tool
+def rules_import(project: str, rules: list[dict], reason: str, code: str,
+                 permanent: bool = True) -> dict:
+    """MAINTENANCE. Bulk import for the MIGRATION from the Markdown files. Only
+    on an EMPTY project: a migration happens once, on a clean table.
+
+    Each item: {"id","type","title","body","scopes",["changelog"],["source"]}.
+    Rejected rules are listed with the reason and the others go through; fix
+    them and file them with rules_propose. rules_check runs in its wake, and the
+    broken pointers it finds were already in the Markdown — they were just not
+    visible."""
+    _admin(code)
+    return registry.import_rules(project, rules, reason, permanent)
+
+
+@mcp.tool
+def rules_backup(code: str) -> dict:
+    """MAINTENANCE. A quiescent copy of the WHOLE database (VACUUM INTO) into
+    the backup directory: it opens without recovery, and it is the one to take
+    off-site. Safe on a live database.
+
+    In WAL the database is THREE files, so copying one by hand is a corrupt
+    backup. ZFS snapshots stay the main net."""
+    _admin(code)
+    return registry.backup(BACKUP_DIR)
 
 
 if __name__ == "__main__":
-    log.info("avvio su 127.0.0.1:%s — base_url %s — utente ammesso: %s — filtro IP: %s — "
-             "db: %s (uid processo: %s) — store token: %s",
-             PORT, BASE_URL, ALLOWED_LOGIN, CIDR or "SPENTO", DB_PATH, os.geteuid(),
-             os.environ.get("FASTMCP_HOME", "(default NON persistente!)"))
+    log.info("codifier-mcp %s — starting on 127.0.0.1:%s — base_url %s — allowed user: %s "
+             "— IP filter: %s — token store: %s — db: %s (process uid %s) — web UI: %s",
+             VERSION, PORT, BASE_URL, ALLOWED_LOGIN, describe_cidrs(ALLOWED_CIDRS),
+             os.environ.get("FASTMCP_HOME", "(default — NOT persistent!)"),
+             DB_PATH, os.geteuid(),
+             os.environ.get("WEB_PORT") or "off (planned for v1.1)")
     mcp.run(transport="http", host=os.environ.get("BIND_HOST", "127.0.0.1"), port=PORT)
