@@ -114,13 +114,11 @@ mount for the database, one for state, and environment variables.
    fight over the callback.
 2. **`JWT_SIGNING_KEY`**: `openssl rand -hex 32`. Stable forever — change it and
    every issued token dies.
-3. **An ed25519 key pair**, on your own machine:
-   ```
-   openssl genpkey -algorithm ed25519 -out approval.key
-   openssl pkey -in approval.key -pubout -outform DER | tail -c 32 | base64
-   ```
-   The second line's output goes in `APPROVAL_PUBKEY`. The key file stays where
-   it is. While you are still setting up you can leave the key empty and set
+3. **An ed25519 key pair**, on your own machine: `python3 sign.py --keygen`. It
+   prints the public half, which goes in `APPROVAL_PUBKEY`; the private half
+   stays in `~/.codifier/approval.key` at mode 0600 and never travels. The same
+   script signs the batch digests later: `python3 sign.py <digest>`.
+   While you are still setting up you can leave the key empty and set
    `APPROVAL_GRACE_UNTIL` to a near date instead — it is a date and not a
    switch, so it closes by itself.
 4. **The database directory must be local storage**, never a network share:
@@ -156,7 +154,7 @@ Three suites. No network, no FastMCP, no Docker.
 
 ```
 python3 test_collaudo.py    # 158 cases — the engine, refusals included
-python3 test_surface.py     # 138 cases — the seam between server and engine
+python3 test_surface.py     # 185 cases — the seam, the image, the template, the signer
 python3 test_crash.py       # SIGKILL mid-transaction, as Docker does
 ```
 

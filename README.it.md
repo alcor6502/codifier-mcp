@@ -116,14 +116,13 @@ il database, uno per lo stato, e variabili d'ambiente.
 2. **`JWT_SIGNING_KEY`**: `openssl rand -hex 32`. Stabile per sempre — cambiarla
    invalida ogni token già emesso.
 3. **Una coppia di chiavi ed25519**, sulla tua macchina:
-   ```
-   openssl genpkey -algorithm ed25519 -out approval.key
-   openssl pkey -in approval.key -pubout -outform DER | tail -c 32 | base64
-   ```
-   L'uscita della seconda riga va in `APPROVAL_PUBKEY`. Il file della chiave
-   resta dov'è. Finché stai ancora montando tutto puoi lasciare la chiave vuota
-   e mettere `APPROVAL_GRACE_UNTIL` a una data vicina — è una data e non un
-   interruttore, quindi si chiude da sola.
+   `python3 sign.py --keygen`. Stampa la metà pubblica, che va in
+   `APPROVAL_PUBKEY`; la privata resta in `~/.codifier/approval.key` a 0600 e
+   non viaggia mai. Lo stesso script firma poi i digest dei lotti:
+   `python3 sign.py <digest>`.
+   Finché stai ancora montando tutto puoi lasciare la chiave vuota e mettere
+   `APPROVAL_GRACE_UNTIL` a una data vicina — è una data e non un interruttore,
+   quindi si chiude da sola.
 4. **La cartella del database dev'essere storage locale**, mai una share di
    rete: SQLite in WAL vuole locking vero.
 
@@ -157,7 +156,7 @@ Tre suite. Niente rete, niente FastMCP, niente Docker.
 
 ```
 python3 test_collaudo.py    # 158 casi — il motore, rifiuti compresi
-python3 test_surface.py     # 138 casi — la cucitura fra server e motore
+python3 test_surface.py     # 185 casi — la cucitura, l'immagine, il template, il firmatario
 python3 test_crash.py       # SIGKILL a metà transazione, come fa Docker
 ```
 
