@@ -25,6 +25,7 @@ Run it with `python3 test_surface.py`. Exit code 0 means green.
 from __future__ import annotations
 
 import ast
+import hashlib
 import os
 import re
 import sys
@@ -256,6 +257,54 @@ ok(not any("test_" in l for l in DOCKER_COPIES), "Dockerfile: no test file is co
 # with an error, and the failure would surface in a chat rather than here.
 ok(os.path.exists(os.path.join(HERE, "reference-guide.md")),
    "the file reference_guide serves actually exists")
+
+print("\n== the signer exists, works, and stays OUT of the image ==")
+
+# rules_batch tells the caller to run `python3 sign.py <digest>`. For a while it
+# said that about a file nobody had written — same class of defect as the
+# reference guide, and it would have surfaced at the first approval.
+SIGNER = os.path.join(HERE, "sign.py")
+ok(os.path.exists(SIGNER), "sign.py exists — the batch note points at something real")
+ok(not any("sign.py" in l for l in DOCKER_COPIES),
+   "sign.py is NOT in the image: it belongs on Alfredo's machine, with the key")
+
+import subprocess                                               # noqa: E402
+import tempfile                                                 # noqa: E402
+
+def signer(args, key):
+    env = dict(os.environ, CODIFIER_KEY=key)
+    return subprocess.run([sys.executable, SIGNER] + args, capture_output=True,
+                          text=True, env=env)
+
+_d = tempfile.mkdtemp(prefix="signer-")
+_key = os.path.join(_d, "approval.key")
+_gen = signer(["--keygen"], _key)
+ok(_gen.returncode == 0 and os.path.exists(_key), "--keygen writes a key", _gen.stderr[:120])
+ok(oct(os.stat(_key).st_mode)[-3:] == "600", "the private key is born 0600")
+ok(signer(["--keygen"], _key).returncode == 2,
+   "generating over an existing key is refused — it would orphan every approval")
+
+_pub = signer(["--pubkey"], _key).stdout.strip()
+_digest = hashlib.sha256(b"a batch").hexdigest()
+_sig = signer([_digest], _key).stdout.strip()
+
+# The round trip is the point: a signer whose output the engine rejects is worse
+# than no signer, because the error would send you looking at the key.
+try:
+    from rules import verify_signature                          # noqa: E402
+    verify_signature(_pub, _digest, _sig)
+    ok(True, "a signature from sign.py verifies against the engine")
+except Exception as e:
+    ok(False, "a signature from sign.py verifies against the engine", str(e)[:120])
+
+try:
+    verify_signature(_pub, _digest.replace("a", "b", 1), _sig)
+    ok(False, "and it does NOT verify against another digest", "it was accepted")
+except Exception:
+    ok(True, "and it does NOT verify against another digest")
+
+ok(signer(["not-a-digest"], _key).returncode == 2,
+   "something that is not a digest is refused before it is signed")
 
 print("\n== the template is publishable ==")
 

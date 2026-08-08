@@ -1151,9 +1151,9 @@ class Registry:
                 "proposals": [self._dict(r, p) for r in rows],
                 "digest": digest,
                 "approval_required": not self.in_grace(),
-                "how_to_sign": ("run the signer on your own machine over this exact digest "
-                                "string, then pass the base64 signature to approve. The "
-                                "private key never enters this conversation."),
+                "how_to_sign": ("on your own machine: python3 sign.py <digest>, over this "
+                                "exact digest string, then pass the base64 signature to "
+                                "approve. The private key never enters this conversation."),
                 "note": "if a proposal arrives after you read this, the digest changes and "
                         "the old signature is refused. That is on purpose."}
 
