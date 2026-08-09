@@ -60,7 +60,7 @@ from fastmcp.server.dependencies import get_access_token, get_http_request
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
 from preflight import cidrs_from_env, describe_cidrs, log_level_from_env
-from rules import Registry, RulesError, VERSION
+from rules import Registry, RulesError, RulesFault, VERSION
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
 # for every library loaded, not for ours: that is where the noise came from.
@@ -138,18 +138,59 @@ def tool(fn):
     """Register a tool, and turn its refusals into something the log can tell
     apart from a fault.
 
-    Every error this engine raises is a RulesError, and every RulesError is
-    DESIGNED: a wrong project code, a stale version, a signature that does not
-    match. Left as a plain exception, FastMCP logs each one through
+    A RulesError is a DESIGNED refusal: a wrong project code, a stale version,
+    a signature that does not match. Not every error the engine raises is one —
+    the signature library missing from the image is a FAULT, and it carries
+    RulesFault, which is caught first and left alone. That distinction is not
+    decoration: without it this decorator would take a broken image and make it
+    a line beginning with the word "refused", which is the defect it exists to
+    close, inverted. Anything sqlite raises on its own never becomes a
+    RulesError at all, so it keeps its traceback without help from here.
+
+    Left as a plain exception, a refusal is logged by FastMCP through
     logger.exception — thirty lines of traceback through anyio and pydantic,
     shaped exactly like a real fault. After a week of those, nobody reads
     tracebacks any more, and the next genuine fault arrives disguised as
     routine. The thread-pool defect was caught precisely because its traceback
     stood out.
 
-    Raised as ToolError it becomes ONE line, at the level the exception
-    carries: FastMCP logs FastMCPError with exc_info=False. A bug still gets
-    the full traceback at ERROR, which is what a bug deserves.
+    Raised as ToolError the traceback goes away: FastMCP logs FastMCPError with
+    exc_info=False, at the level the exception carries. A bug still gets the
+    full traceback at ERROR, which is what a bug deserves.
+
+    But FastMCP's own line does not survive the container, and this was
+    MEASURED rather than assumed: the Dockerfile sets FASTMCP_LOG_LEVEL=WARNING
+    — for the noise, and rightly — so an INFO record from fastmcp.server.server
+    is dropped before it is printed. Converting alone therefore does not turn
+    thirty lines into one: it turns them into NONE, and a refusal that leaves
+    no trace at all is a different bargain from the one being made here — the
+    day somebody says "the registry refuses my calls" there would be nothing to
+    read. So the line is OURS. It goes on the codifier-mcp logger, which
+    follows LOG_LEVEL, and it says more than FastMCP's ever did — which tool,
+    and why:
+
+        INFO codifier-mcp: refused rules_propose: citation that does not resolve: …
+
+    Deliberately INFO and not WARNING. WARNING is where the Gate logs a
+    stranger turned away, and that line is contractual precisely because it is
+    the only thing that tells a refused stranger from a broken deployment. A
+    wrong project code — the system working — must not sit at the same height.
+
+    What the line carries was CHECKED rather than assumed, because the twin's
+    version of this paragraph says "which carries paths" and is true there.
+    Here the messages carry consumer names, domains, malformed IDs and
+    constants — no project code, and not the text that was searched for. So
+    this is not an access log even by accident: an access log records
+    everything that was READ and becomes a register of what was consulted and
+    when; this records only what was REFUSED, which is rare, useless as a
+    register because it is precisely the calls that did not happen, and exactly
+    what you are trying to diagnose. Anyone who disagrees has one knob, and it
+    is documented: LOG_LEVEL=WARNING takes the line away.
+
+    Where project codes DO reach the log is not here: FastMCP logs invalid
+    arguments itself, at WARNING, on its own logger, with the arguments in the
+    line — before this decorator is ever entered. LOG_LEVEL does not reach it.
+    Worth knowing, and not fixable from here.
 
     THE TRAP, and it cost an hour: doing this in a Middleware does not work.
     call_tool applies the middleware chain OUTSIDE and logs INSIDE — the outer
@@ -175,7 +216,15 @@ def tool(fn):
     def guarded(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
+        except RulesFault:
+            # A fault is not a refusal, and the ORDER of these two branches is
+            # the whole distinction: RulesFault subclasses RulesError, so
+            # swapping them would swallow every fault into the quiet path and
+            # nothing would look wrong. Python does not warn; the static check
+            # is the warning. Left to rise, it keeps its traceback at ERROR.
+            raise
         except RulesError as e:
+            log.info("refused %s: %s", fn.__name__, e)
             raise ToolError(str(e), log_level=logging.INFO) from None
     return mcp.tool(guarded)
 
@@ -264,11 +313,15 @@ def _admin(code: str) -> None:
     It is not session state: the code travels on every call, so there is no
     "mode" left open by accident."""
     if not secrets.compare_digest((code or "").strip(), ADMIN_CODE):
-        # Every other refusal goes to the log at INFO (see TalkingErrors). This
-        # one is worth a WARNING: once is a chat that does not have the code,
-        # but a run of them is the only signal you would ever get that somebody
-        # is trying.
-        log.warning("refused: wrong or missing admin code")
+        # No log line here, and that is a change from v1.2. It used to warn,
+        # on the argument that a run of wrong codes is the only signal that
+        # somebody is trying — but since v1.2 the Gate covers the handshake, so
+        # nobody who is not Alfredo's own GitHub login, from an allowed range,
+        # ever reaches a tool at all. A wrong code can now only come from one
+        # of his own chats, which makes it an ordinary refusal and not a
+        # security signal. The decorator logs it once, at INFO, with the tool
+        # name and the reason — more than this line ever said. Logging here as
+        # well put the same event at two heights, one of them the Gate's.
         raise RulesError("admin code missing or wrong: this is done only by the chat that "
                          "MAINTAINS the registry, with the code Alfredo gives it. Do not try "
                          "to guess it: ask.")

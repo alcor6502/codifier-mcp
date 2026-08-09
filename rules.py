@@ -60,7 +60,7 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 TYPES = ("R", "M", "F")                 # R binding · M method · F technical fact
 ALL = "_ALL_"                           # reaches every consumer, present and future
@@ -146,7 +146,48 @@ ERR_PROJECT = ("project not specified: this needs the project CODE, the one at t
 
 
 class RulesError(Exception):
-    """A talking error: says what happened AND what to do about it."""
+    """A talking error: says what happened AND what to do about it.
+
+    By default it means a DESIGNED REFUSAL: the caller asked for something the
+    rules do not allow, or asked with stale information. A wrong project code,
+    a citation that does not resolve, a version that moved under them, a reason
+    left empty. Nothing is broken — the answer is no, and the message says what
+    to do instead. server.py turns these into one quiet line."""
+
+
+class RulesFault(RulesError):
+    """A refusal's opposite: the machinery failed, and the caller could not have
+    prevented it.
+
+    It exists because server.py has to tell the two apart. A designed refusal
+    becomes one line at INFO; a fault keeps its full traceback at ERROR, which
+    is what a fault deserves. Without the distinction, the decorator would take
+    a broken image and log it as a line beginning with the word "refused" — and
+    at LOG_LEVEL=WARNING as nothing at all, inverting the very defect it exists
+    to close.
+
+    It SUBCLASSES RulesError on purpose: everything that already catches
+    RulesError — the suites' must_fail, the boot path — keeps catching it, and
+    the text still reaches the caller. Only its fate in the log differs.
+
+    The line between the two is not the wording, it is WHO CAUSED IT. In this
+    engine almost everything is the caller: of the eighty-odd refusals, one is
+    a fault, and it is the missing signature library — an image built wrong,
+    which no caller can do anything about. Two neighbours that deliberately
+    stay ordinary refusals, because the reasoning is not obvious:
+
+    - the UNIQUE collision on (project, domain, seq) when two writers take the
+      same number. It comes from the database, but nothing was written and the
+      message says filing it again is safe — the twin decided the same for its
+      CAS conflicts, which are the same shape;
+    - "no approval public key configured and the grace window is closed". It is
+      configuration, not machinery, and the preflight refuses to start in that
+      state — so reaching it means the window expired while the service ran,
+      and the message is exactly the instruction to fix it.
+
+    Anything sqlite raises on its own — a locked file, a half-written page, a
+    full disk — never becomes a RulesError at all: this engine lets it rise
+    untouched, so it already keeps its traceback."""
 
 
 def _now() -> str:
@@ -237,7 +278,11 @@ def verify_signature(public_key_b64: str, message: str, signature_b64: str) -> N
         from cryptography.exceptions import InvalidSignature
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     except ImportError as e:                                    # pragma: no cover
-        raise RulesError(f"signature verification unavailable: {e}")
+        # A FAULT, and the only one in this file: the image was built without
+        # the signature library. The caller asked for nothing wrong and can do
+        # nothing about it, so this keeps its traceback instead of being filed
+        # away as a refusal.
+        raise RulesFault(f"signature verification unavailable: {e}")
     try:
         raw = base64.b64decode(public_key_b64.strip(), validate=True)
         sig = base64.b64decode(signature_b64.strip(), validate=True)
@@ -1621,10 +1666,26 @@ class Registry:
             self.cx.execute("COMMIT")
         except sqlite3.IntegrityError as e:
             self.cx.execute("ROLLBACK")
+            # ONE integrity error here is a refusal, and it is the race on the
+            # counter: two writers took the same number, nothing was written,
+            # filing it again works. Everything else that the integrity layer
+            # can raise — a foreign key, a NOT NULL, a CHECK — means the schema
+            # and the code disagree, which no caller can fix and which will
+            # fail again for ever. Telling THEM to retry is the worst answer
+            # available. The discrimination is on the constraint, not on prose:
+            # this branch used to say "if it names the unique constraint …" and
+            # classify unconditionally, which is a comment doing a condition's
+            # job.
+            if "rules.project, rules.domain, rules.seq" not in str(e).replace(
+                    "UNIQUE constraint failed: ", ""):
+                raise RulesFault(
+                    f"the database refused the proposal for a reason that is not the "
+                    f"counter race: {e}. Schema and code disagree — retrying will not "
+                    f"help.")
             raise RulesError(
-                f"the proposal for domain {dom} was refused by the database: {e}. If it "
-                "names the unique constraint on (project, domain, seq), two writers took "
-                "the same number — nothing was written, so filing it again is safe.")
+                f"the proposal for domain {dom} was refused by the database: {e}. Two "
+                "writers took the same number — nothing was written, so filing it again "
+                "is safe.")
         except Exception:
             self.cx.execute("ROLLBACK")
             raise
@@ -1948,12 +2009,44 @@ class Registry:
                 self._write_refs(p, rid, self._legacy_cites(body))
                 self.cx.execute("COMMIT")
                 taken.append(rid)
-            except Exception as e:
+            except RulesFault:
+                # A fault is not a rejected item. Swallowing it here would put
+                # a full disk, a locked database or a half-written page into
+                # the `rejected` list, return 200, and let the audit below
+                # declare the project clean — which is the defect RulesFault
+                # exists to close, on the door that writes the most. The ORDER
+                # matters for the same reason it matters in server.py: it
+                # subclasses RulesError.
                 try:
                     self.cx.execute("ROLLBACK")
-                except sqlite3.OperationalError:
+                except sqlite3.Error:
+                    pass
+                raise
+            except RulesError as e:
+                # A rejected ITEM: this one is malformed, the others go on.
+                try:
+                    self.cx.execute("ROLLBACK")
+                except sqlite3.Error:
                     pass
                 rejected.append({"id": item.get("id"), "why": str(e)})
+            except sqlite3.IntegrityError as e:
+                # The caller's data collided with a constraint — same shape as
+                # a malformed item, and it must not stop the rest.
+                try:
+                    self.cx.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                rejected.append({"id": item.get("id"), "why": str(e)})
+            except Exception:
+                # Anything else is the machine: roll back so the connection is
+                # left usable, then let it RISE. It keeps its traceback, the
+                # import stops, and nobody is told that a half-written database
+                # imported cleanly.
+                try:
+                    self.cx.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
         audit = self.check(code)
         return {"project": p, "imported": len(taken), "ids": taken,
                 "rejected": rejected, "audit": audit,

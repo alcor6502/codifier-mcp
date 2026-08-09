@@ -188,10 +188,120 @@ def is_tool(fn: ast.FunctionDef) -> bool:
     return False
 
 
-TOOLS = [n for n in SERVER_TREE.body if isinstance(n, ast.FunctionDef) and is_tool(n)]
+# ast.walk, not SERVER_TREE.body. The census used to look at module level only,
+# and that is not where a tool has to be: `if os.environ.get("FEATURE"): @tool
+# def rules_wipe(...)` is nested, so it escaped the census, escaped the count,
+# escaped the async ban AND escaped the check that every write passes _admin —
+# an ungated mutating tool on the surface with the suite at 262 passed, 0
+# failed. Demonstrated, not imagined.
+TOOLS = [n for n in ast.walk(SERVER_TREE)
+         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and is_tool(n)]
 TOOL_NAMES = {t.name for t in TOOLS}
 
-ok(len(TOOLS) >= 25, f"{len(TOOLS)} tools exposed")
+# The other door, and it carries no decorator line at all: `tool(rules_purge)`
+# as a plain statement registers the function just as well, and every check
+# that looks for a decorator is blind to it. Same for handing it to anything
+# else. `tool` may be USED only as a decorator.
+_TOOL_CALLS = [n for n in ast.walk(SERVER_TREE)
+               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+               and n.func.id == "tool"]
+ok(not _TOOL_CALLS, "`tool` is only ever used as a decorator, never called",
+   [ast.unparse(n)[:40] for n in _TOOL_CALLS])
+
+# An EQUALITY against what the file says, never a threshold. `>= 25` against
+# thirty tools tolerates five escapees, and one escapee is the realistic
+# mistake — you forget a line, not five. Worse, the one way a tool escapes
+# quietly is `@tool()` with the brackets: that is an ast.Call and not an
+# ast.Name, so it slips the list AND satisfies the threshold, while at boot it
+# raises TypeError because the decorator takes the function itself. The suites
+# never import server.py, so nothing else would ever see it.
+#
+# Three counts that have to agree, because they fall in different ways. The AST
+# list and the bare-line count BOTH lose a tool written `@tool()` — it matches
+# neither — so on their own the two stay in step while a tool escapes. The
+# wider line count is the third leg: it sees the brackets.
+def _names_tool(d) -> bool:
+    node = d.func if isinstance(d, ast.Call) else d
+    return isinstance(node, ast.Name) and node.id == "tool"
+
+
+_DECORATED = [n for n in ast.walk(SERVER_TREE)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and any(_names_tool(d) for d in n.decorator_list)]
+_WRAPPED = [n.name for n in _DECORATED
+            if any(isinstance(d, ast.Name) and d.id == "tool"
+                   for d in n.decorator_list)]
+_CALLED = [n.name for n in _DECORATED if n.name not in _WRAPPED]
+ok(not _CALLED, "every @tool is written bare: `@tool()` calls the decorator with "
+                "no function and dies at import", _CALLED)
+
+ok(len(_WRAPPED) == len(_DECORATED) == len(TOOLS),
+   f"all {len(_WRAPPED)} tools go through the decorator, in the bare form",
+   f"{len(_WRAPPED)} bare, {len(_DECORATED)} named tool, {len(TOOLS)} counted")
+
+# `mcp.tool` is reached ONE way, from the AST and not by counting the string —
+# a comment saying "the mcp.tool door" satisfied the count, which is the third
+# time this file has paid for a textual check. Everywhere except inside the
+# decorator, calling it is a tool that converts nothing.
+_MCP_TOOL = [n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
+             and ast.unparse(n.func) == "mcp.tool"]
+ok(len(_MCP_TOOL) == 1, "`mcp.tool` is called exactly once, inside the decorator",
+   len(_MCP_TOOL))
+
+# add_tool() is the other door into the surface, and it carries no decorator at
+# all: a tool entering that way would convert nothing AND go missing from no
+# manual, because there is nothing for either check to recognise. From the AST:
+# the textual version refused to let this repo write the word in a comment,
+# which in a project that explains itself in comments is a check that will be
+# deleted rather than obeyed.
+ok(not [n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
+        and ast.unparse(n.func).endswith("add_tool")],
+   "tools enter through the decorator and nowhere else")
+
+# The other way of falling out of the surface, and the counts above cannot see
+# it: a tool that loses its decorator ALTOGETHER stops being a tool, so all
+# three counts drop together and stay in step. Nothing at runtime complains
+# either — the tool simply is not there any more, and the chat that needed it
+# gets "no such tool" weeks later. The twin catches this with the signature
+# block in its manual; this project has no such block yet (see the two-manuals
+# decision), so the manual's PROSE is the witness: every rules_* it names must
+# still be a tool. Injected and confirmed: removing @tool from rules_search
+# left the whole suite green before this existed.
+_NAMED_IN_GUIDE = set(re.findall(r"\brules_[a-z_]+\b", GUIDE_SRC))
+_VANISHED = sorted(n for n in _NAMED_IN_GUIDE if n not in TOOL_NAMES)
+ok(not _VANISHED,
+   "every tool the manual names is still registered as one", _VANISHED)
+
+# The manual covers 26 of the 30, and it is PROSE — rewrite the sentence and
+# the witness is gone. So the real witness is the engine: a function in
+# server.py that reaches `registry.<something>` is a tool by definition, and if
+# it is not one any more it has fallen off the surface while still looking like
+# a tool. This covers all thirty and cannot be talked out of it.
+_TOUCHES_REGISTRY = []
+for _fn in ast.walk(SERVER_TREE):
+    if not isinstance(_fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        continue
+    if is_tool(_fn) or _fn.name in ("tool", "guarded", "env", "_admin"):
+        continue
+    if any(isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+           and isinstance(c.func.value, ast.Name) and c.func.value.id == "registry"
+           for c in ast.walk(_fn)):
+        _TOUCHES_REGISTRY.append(_fn.name)
+ok(not _TOUCHES_REGISTRY,
+   "nothing reaches the registry except a registered tool — a tool that lost "
+   "its decorator still looks like one from in here", _TOUCHES_REGISTRY)
+
+# `guarded` is synchronous and RETURNS what fn returns. Handed a coroutine
+# function it would hand back the coroutine unawaited, FastMCP would await it
+# further out, the tool would work — and the RulesError would surface with the
+# try/except never entered. The conversion would silently not happen. Today
+# every tool is sync; the day one is not, this says so instead of blessing it.
+_ASYNC_TOOLS = [n.name for n in ast.walk(SERVER_TREE)
+                if isinstance(n, ast.AsyncFunctionDef)
+                and any(_names_tool(d) for d in n.decorator_list)]
+ok(not _ASYNC_TOOLS,
+   "no tool is async: `guarded` would return the coroutine without ever seeing "
+   "its refusals", _ASYNC_TOOLS)
 
 for tool in TOOLS:
     reached = {n.func.attr for n in ast.walk(tool)
@@ -453,36 +563,155 @@ print("\n== a designed refusal does not look like a fault in the log ==")
 # outside and logs inside, so a middleware sees the exception after
 # logger.exception has already run. That cost an hour, and it is the kind of
 # thing that gets undone by somebody tidying up — hence this check.
-_converter = next((n for n in SERVER_TREE.body
-                   if isinstance(n, ast.FunctionDef) and n.name == "tool"), None)
-ok(_converter is not None, "server.py defines its own `tool` decorator")
+# EXACTLY one `def tool`. A second one further down wins for every tool defined
+# after it — and since all thirty are defined after the Gate, a three-line
+# `def tool(fn): return fn` left there while debugging empties the entire MCP
+# surface with the suite at 261 passed, 0 failed. Demonstrated.
+_converters = [n for n in ast.walk(SERVER_TREE)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and n.name == "tool"]
+ok(len(_converters) == 1, "server.py defines its own `tool` decorator, once",
+   len(_converters))
+_converter = _converters[0] if len(_converters) == 1 else None
+
+# And the name RulesFault must mean in the engine what this file assumes it
+# means. `RulesFault = RulesError` in rules.py — one line, plausible as a
+# simplification — turns the fault branch into the FIRST branch for every
+# refusal: no log line, no ToolError, every wrong project code back to thirty
+# lines of traceback, and the whole of v1.3 undone with every suite green.
+# Also demonstrated. So: it exists, it is a class, it subclasses RulesError,
+# and the engine actually raises it somewhere.
+_ENGINE_FAULT = [n for n in ENGINE_TREE.body
+                 if isinstance(n, ast.ClassDef) and n.name == "RulesFault"]
+ok(len(_ENGINE_FAULT) == 1, "rules.py defines RulesFault as a class",
+   len(_ENGINE_FAULT))
+ok(_ENGINE_FAULT and [ast.unparse(b) for b in _ENGINE_FAULT[0].bases] == ["RulesError"],
+   "and it SUBCLASSES RulesError, so everything that already catches RulesError "
+   "keeps catching it and the text still reaches the caller",
+   [ast.unparse(b) for b in _ENGINE_FAULT[0].bases] if _ENGINE_FAULT else "absent")
+_FAULT_RAISES = [n for n in ast.walk(ENGINE_TREE) if isinstance(n, ast.Raise)
+                 and isinstance(n.exc, ast.Call)
+                 and getattr(n.exc.func, "id", "") == "RulesFault"]
+ok(_FAULT_RAISES, "and the engine raises it: a branch nothing can enter is a "
+                  "branch whose order the tests below certify for nothing",
+   len(_FAULT_RAISES))
+
+# Every name server.py imports from the engine must exist there. Removing
+# RulesFault from rules.py while server.py still imports it kills the container
+# at boot, and nothing in this suite noticed: the seam check above only follows
+# `registry.<method>(...)`.
+_ENGINE_NAMES = set()
+for _n in ENGINE_TREE.body:
+    if isinstance(_n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        _ENGINE_NAMES.add(_n.name)
+    elif isinstance(_n, ast.Assign):
+        _ENGINE_NAMES |= {t.id for t in _n.targets if isinstance(t, ast.Name)}
+_IMPORTED = [a.name for n in SERVER_TREE.body if isinstance(n, ast.ImportFrom)
+             and n.module == "rules" for a in n.names]
+_MISSING = [n for n in _IMPORTED if n not in _ENGINE_NAMES]
+ok(not _MISSING, "every name server.py imports from rules.py exists there — "
+                 "otherwise the container dies at import", _MISSING)
 
 if _converter is not None:
-    handlers = [h for h in ast.walk(_converter) if isinstance(h, ast.ExceptHandler)]
-    caught = {getattr(h.type, "id", "") for h in handlers}
-    ok("RulesError" in caught, "the decorator catches RulesError")
+    # THE WRAPPER, not the decorator. Everything below used to be gathered with
+    # ast.walk over the whole of `def tool`, which asks only that the pieces be
+    # WRITTEN somewhere inside it. Three mutations exploited that and stayed
+    # green: the try/except moved into a `_convert()` nobody calls, with
+    # `guarded` reduced to `return fn(...)`; a `_rethrow` helper carrying a
+    # decoy `except RulesFault` above a `guarded` whose two branches were
+    # swapped; a dead handler holding the INFO level while the live ToolError
+    # went to ERROR. So: find the function that is actually returned, and read
+    # only that.
+    _WRAPPER = "guarded"
+    _guarded = next((n for n in ast.walk(_converter)
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                     and n.name == _WRAPPER), None)
+    ok(_guarded is not None, f"the decorator defines its wrapper, `{_WRAPPER}`")
+
+    # ...and that the name has not been quietly pointed at something else.
+    # `guarded = fn` one line before the return is the same defect as
+    # `mcp.tool(fn)`, wearing the name the check looks for.
+    _REBOUND = [n for n in ast.walk(_converter) if isinstance(n, ast.Assign)
+                and any(getattr(t, "id", "") == _WRAPPER for t in n.targets)]
+    ok(not _REBOUND, f"`{_WRAPPER}` is only ever the def, never reassigned",
+       [ast.unparse(n) for n in _REBOUND])
+
+if _converter is not None and _guarded is not None:
+    handlers = [h for t in ast.walk(_guarded) if isinstance(t, ast.Try)
+                for h in t.handlers]
+    caught = [ast.unparse(h.type) for h in handlers if h.type is not None]
+    ok("RulesError" in caught, "the wrapper catches RulesError", caught)
+
+    # The ORDER, which is the whole distinction and is invisible once written:
+    # RulesFault SUBCLASSES RulesError, so `except RulesError` placed first
+    # would swallow every fault into the quiet path and nothing would look
+    # wrong. Python has no warning for this; this is the warning.
+    ok(caught[:1] == ["RulesFault"],
+       "and it catches RulesFault FIRST, or the subclass never gets its turn",
+       caught)
+    _fault_h = [h for h in handlers
+                if h.type is not None and ast.unparse(h.type) == "RulesFault"]
+    ok(_fault_h and all(isinstance(s, ast.Raise) and s.exc is None
+                        for h in _fault_h for s in h.body),
+       "and it lets a fault rise untouched: traceback at ERROR, as before")
+
+    # The refusal must leave a line of OUR own. FastMCP's never reaches the
+    # container's log: the Dockerfile pins FASTMCP_LOG_LEVEL=WARNING, so an
+    # INFO record from fastmcp.server.server is dropped before it is printed.
+    # Without this line the conversion trades thirty lines for none — which is
+    # what this service did in v1.2 and earlier, measured on the twin.
+    _logged = [n for h in handlers for n in ast.walk(h)
+               if isinstance(n, ast.Call) and ast.unparse(n.func).startswith("log.")]
+    ok(_logged, "the refusal leaves a line of our own, or the conversion trades "
+                "thirty lines for none")
+    ok(all(ast.unparse(n.func) == "log.info" for n in _logged),
+       "at INFO: WARNING is the Gate's height, and a wrong project code is not "
+       "a warning", sorted({ast.unparse(n.func) for n in _logged}))
+    # WHAT it says. `log.info("refused")` satisfies everything above and is
+    # useless: the line exists to name the tool and the reason.
+    ok(all(any(ast.unparse(a) == "fn.__name__" for a in n.args) for n in _logged)
+       and all(any(ast.unparse(a) == "e" for a in n.args) for n in _logged),
+       "and it names the tool and carries the reason",
+       [ast.unparse(n)[:60] for n in _logged])
     raised = [n for h in handlers for n in ast.walk(h)
               if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "ToolError"]
     ok(raised, "and re-raises ToolError")
-    # The level is the whole point: ERROR would change nothing.
+    # Pinned to INFO, not merely "below ERROR". `"ERROR" not in level` is a
+    # substring search: CRITICAL satisfies it and is HIGHER, and so does
+    # WARNING — the one value there is a paragraph explaining we must not use,
+    # because WARNING is the Gate's height and a refused project code must not
+    # sit where a refused stranger sits. A test that asserts something looser
+    # than its own docstring promises is worse than no test.
+    # EVERY ToolError in the wrapper, not the first one found: reading only
+    # levels[0] let a dead handler hold the INFO while the live one went to
+    # ERROR.
     levels = [ast.unparse(k.value) for r in raised for k in r.keywords
               if k.arg == "log_level"]
-    ok(levels and "ERROR" not in levels[0],
-       f"at a level below ERROR ({levels[0] if levels else 'not set'})")
+    ok(levels and set(levels) == {"logging.INFO"},
+       "at logging.INFO exactly, which is the decision, and nowhere else",
+       levels or "log_level not set")
     # `raise X from None` parses as cause=Constant(None) — not as no cause at
     # all, which is what a bare `raise X` gives you.
     ok(any(isinstance(n, ast.Raise) and isinstance(n.cause, ast.Constant)
-           and n.cause.value is None for n in ast.walk(_converter)),
+           and n.cause.value is None for n in ast.walk(_guarded)),
        "with `from None`: the chained traceback is what we are removing")
     # functools.wraps is what keeps the MCP schema intact: FastMCP reads the
     # name, docstring and signature, and follows __wrapped__ to find them.
-    ok(any(ast.unparse(d) == "functools.wraps(fn)"
-           for f in ast.walk(_converter) if isinstance(f, ast.FunctionDef)
-           for d in f.decorator_list),
-       "and functools.wraps, or every tool would lose its schema")
-    ok(any(isinstance(n, ast.Call) and ast.unparse(n.func) == "mcp.tool"
-           for n in ast.walk(_converter)),
-       "and it still registers the tool with FastMCP")
+    ok(any(ast.unparse(d) == "functools.wraps(fn)" for d in _guarded.decorator_list),
+       "and functools.wraps ON THE WRAPPER, or every tool loses its schema",
+       [ast.unparse(d) for d in _guarded.decorator_list])
+    # WHAT it registers, not merely that it registers something. Changing the
+    # last line to `return mcp.tool(fn)` defines `guarded` and throws it away:
+    # no conversion, no log line, tracebacks back — and every check above still
+    # passes, because every piece they look for is still written down. That is
+    # the exact shape of a check that filters out the case it was written for.
+    _registers = [n for n in ast.walk(_converter) if isinstance(n, ast.Call)
+                  and ast.unparse(n.func) == "mcp.tool"]
+    ok(_registers and _registers[0].args
+       and ast.unparse(_registers[0].args[0]) == "guarded",
+       "and it registers the WRAPPED function, not the bare one",
+       ast.unparse(_registers[0].args[0]) if _registers and _registers[0].args
+       else "no argument")
 
 # Every tool must go through it. One @mcp.tool left behind is one tool whose
 # refusals still print a traceback — and it would be the one you never test.
@@ -751,6 +980,28 @@ ok(not _READS, "server.py does not read LOG_LEVEL on its own — it comes from t
 # And it must USE what the helper returned. Both halves: the level, and the
 # report of what was rejected — the report is the half worth testing, because a
 # knob that ignores you in silence is how you get accused of having broken it.
+# And `log` must be the service's logger, bound once. Pointing the name at
+# `logging.getLogger("codifier-mcp.quiet")` — with a NullHandler and
+# propagate=False, which is two more plausible lines — takes the refusal line
+# out of the log entirely while every check on it stays green: they all read
+# `log.info`, and `log` is whatever the last assignment says.
+_LOG_BINDS = [n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Assign)
+              and any(getattr(t, "id", "") == "log" for t in n.targets)]
+def _is_our_logger(v) -> bool:
+    # Structurally, not by comparing rendered source: ast.unparse normalises
+    # quotes, so a string comparison here fails on the correct code.
+    return (isinstance(v, ast.Call) and ast.unparse(v.func) == "logging.getLogger"
+            and len(v.args) == 1 and isinstance(v.args[0], ast.Constant)
+            and v.args[0].value == "codifier-mcp")
+
+
+ok(len(_LOG_BINDS) == 1 and _is_our_logger(_LOG_BINDS[0].value),
+   "`log` is the service's own logger, bound once and never repointed",
+   [ast.unparse(n) for n in _LOG_BINDS])
+ok(not [n for n in ast.walk(SERVER_TREE)
+        if isinstance(n, ast.Attribute) and n.attr == "propagate"],
+   "and nothing switches propagation off under it")
+
 _SETS = [n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
          and ast.unparse(n.func) == "log.setLevel"]
 ok(len(_SETS) == 1 and ast.unparse(_SETS[0]) == "log.setLevel(_LEVEL)",
