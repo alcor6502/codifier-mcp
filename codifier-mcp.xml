@@ -28,7 +28,7 @@
   <TemplateURL>https://raw.githubusercontent.com/alcor6502/codifier-mcp/main/codifier-mcp.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/alcor6502/codifier-mcp/main/codifier-icon.png</Icon>
   <ExtraParams>--restart=unless-stopped</ExtraParams>
-  <PostArgs>entrypoint.sh</PostArgs>
+  <PostArgs/>
   <CPUset/>
   <DonateText/>
   <DonateLink/>
