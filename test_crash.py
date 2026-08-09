@@ -34,9 +34,12 @@ DB = os.path.join(D, "rules.db")
 R = Registry(DB)
 CODE = "Tst1Trial999"
 R.create_project(CODE, "Trial", [("architect", "chat")], {"VA": "vault and files"})
-R.import_rules(CODE, [{"id": "VA-02", "type": "R", "title": "First rule",
-                       "body": "Original body.", "scopes": [ALL]}], reason="setup")
-BASE_VERSIONS = R.history(CODE, "VA-02")["count"]
+# Filed through the front door, so the ID below is the one the COUNTER handed
+# out: VA-0001, because it is the first of its domain.
+RID = R.propose(CODE, "VA", "R", "First rule", "Original body.", [ALL],
+                reason="setup", proposed_by="architect")["id"]
+assert RID == "VA-0001", RID
+BASE_VERSIONS = R.history(CODE, RID)["count"]
 R.close()
 
 CHILD = textwrap.dedent(f"""
@@ -47,9 +50,9 @@ CHILD = textwrap.dedent(f"""
     R.cx.execute("BEGIN IMMEDIATE")
     R.cx.execute("UPDATE rules SET body='BODY NEVER COMMITTED', reason='crash', "
                  "updated_at='2026-01-01T00:00:00Z' "
-                 "WHERE project='Trial' AND id='VA-02'")
+                 "WHERE project='Trial' AND id='VA-0001'")
     R.cx.execute("INSERT INTO rules (project,id,domain,seq,type,title,body,status,"
-                 "reason,updated_at) VALUES ('Trial','VA-99','VA',99,'R','ghost',"
+                 "reason,updated_at) VALUES ('Trial','VA-9999','VA',9999,'R','ghost',"
                  "'never born','active','crash','2026-01-01T00:00:00Z')")
     sys.stdout.write("written, not committed\\n"); sys.stdout.flush()
     os.kill(os.getpid(), signal.SIGKILL)
@@ -60,13 +63,13 @@ print(f"  child said {p.stdout.strip()!r} — signal {-p.returncode} (9 = SIGKIL
 assert p.returncode == -signal.SIGKILL, p
 
 R2 = Registry(DB)
-body = R2.cx.execute("SELECT body FROM rules WHERE id='VA-02'").fetchone()[0]
-ghosts = R2.cx.execute("SELECT COUNT(*) FROM rules WHERE id='VA-99'").fetchone()[0]
+body = R2.cx.execute("SELECT body FROM rules WHERE id='VA-0001'").fetchone()[0]
+ghosts = R2.cx.execute("SELECT COUNT(*) FROM rules WHERE id='VA-9999'").fetchone()[0]
 integrity = R2.cx.execute("PRAGMA integrity_check").fetchone()[0]
 journal = R2.cx.execute("PRAGMA journal_mode").fetchone()[0]
-versions = R2.history(CODE, "VA-02")["count"]
+versions = R2.history(CODE, RID)["count"]
 ghost_versions = R2.cx.execute(
-    "SELECT COUNT(*) FROM rule_versions WHERE rule_id='VA-99'").fetchone()[0]
+    "SELECT COUNT(*) FROM rule_versions WHERE rule_id='VA-9999'").fetchone()[0]
 
 print(f"  body after the crash : {body!r}")
 print(f"  ghost rule rows      : {ghosts}")

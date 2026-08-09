@@ -21,6 +21,17 @@ The model
 Invariants
 ----------
 - an ID is a pointer and is NEVER reused, not even by a retired rule;
+- an ID is ASSIGNED BY THE DATABASE, four digits, counting up per domain.
+  Whoever files a rule gives the domain and gets the number back: a number is
+  not a choice, it is a position in a sequence. Whoever does not pass it cannot
+  pick it — the same structural guarantee, not a rule to remember;
+- a CITATION is what is marked as one, `(VA-0002)`, and it is validated at the
+  door: it must resolve, it must point at a rule ALREADY APPROVED, and a bare ID
+  left outside the brackets is refused. So a chat cannot hallucinate a pointer,
+  and a batch cannot be approved into a state where its own pointers only ever
+  made sense while it was being written. On the way out every citation is
+  expanded with the CURRENT title of what it points at — the gloss is generated,
+  never stored, so it cannot go stale;
 - history is written by TRIGGERS, not by tool code, so a change made by hand
   with sqlite3 is recorded too;
 - deletion does not exist: a rule is retired;
@@ -49,7 +60,7 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 
-VERSION = "1.0.4"
+VERSION = "1.1.0"
 
 TYPES = ("R", "M", "F")                 # R binding · M method · F technical fact
 ALL = "_ALL_"                           # reaches every consumer, present and future
@@ -58,10 +69,67 @@ KINDS = ("chat", "skill")
 STATUSES = ("proposed", "active", "retired", "denied")
 PERMANENCE = ("provisional", "permanent")
 
-RE_ID = re.compile(r"^([A-Z]{2})-(\d{2,3})$")
-RE_REF = re.compile(r"\b([A-Z]{2})-(\d{2,3})\b")
+# The canonical ID is FOUR digits — the same width as the changelog. Two
+# conventions where one is enough get confused, and IDs are never reused, so a
+# domain that retires and rewrites burns numbers even while only twenty are
+# alive: with two digits the ceiling is 99 forever, and there is no remedy the
+# day you touch it.
+RE_ID = re.compile(r"^([A-Z]{2})-(\d{4})$")
+# What is ACCEPTED as input, everywhere an ID is read: two to four digits,
+# padded to four by _norm_id. So a citation written 'VA-02' before the change
+# resolves onto VA-0002 and is the same rule. No text has to be rewritten.
+RE_ID_IN = re.compile(r"^([A-Z]{2})-(\d{2,4})$")
+ID_DIGITS = 4
+MAX_SEQ = 10 ** ID_DIGITS - 1
+
+# A CITATION is what is MARKED as one — ROUND BRACKETS — not whatever happens
+# to look like an acronym. The old pattern caught any XX-NN anywhere in the
+# prose, so a sentence that merely NAMED an acronym became a citation nobody
+# wanted, and a citation written slightly differently was not seen at all. A
+# citation that disappears is worse than a broken one: nobody looks for it.
+#
+# ROUND and not double square. Double square is the vault's own link syntax, and
+# reserving it here would mean a rule could never link a note — a door closed on
+# something that may well be wanted later, in exchange for nothing. Round
+# brackets cost nothing because the check does not hang on the bracket: it hangs
+# on the SHAPE XX-NNNN, which is what makes a token an ID. An ordinary
+# parenthesis is ordinary prose; a parenthesis holding an ID is a citation; an
+# ID outside one is a mistake. The strictness lives in the shape, so the
+# delimiter is free to be the cheap one.
+#
+# The gloss reading adds goes INSIDE the same brackets, which is why the pattern
+# accepts it: `(VA-0002 — its title)` comes back in and the title is dropped.
+# The gloss slot is DELIBERATELY narrow: one em dash, and text with no bracket
+# and no newline. A wide slot was tried and it was a silent shredder — anything
+# after the separator was swallowed by the compaction before the bare-ID check
+# ever saw it, so `(VA-0001 | VA-0002)` stored `(VA-0001)` and lost both the
+# second pointer and the author's words without a word. Narrow here means the
+# odd shapes fall THROUGH the pattern, and then the bare-ID scan finds the ID
+# inside and refuses out loud. Losing text quietly is the one outcome a registry
+# must never have.
+RE_CITE = re.compile(
+    r"\(\s*([A-Za-z]{2}-\d{2,4}(?:-[RMFrmf])?)\s*(?:—\s*([^()\n]*?))?\s*\)")
+# A bare ID, hunted OUTSIDE the brackets: that is a forgotten bracket, and a typo
+# must not be able to become a mute citation. CASE-INSENSITIVE on both letters —
+# `va-0001`, `Va-0001`, `vA-0001` are the same mistake, not three different ones,
+# and everywhere else an ID is read case does not matter either.
+RE_BARE = re.compile(r"\b([A-Za-z]{2})-(\d{2,})")
+# What the engine looked for BEFORE this change: uppercase, two or three digits.
+# Kept because import_rules has to read a legacy body exactly as the engine that
+# wrote it would have, and not one token more.
+RE_BARE_LEGACY = re.compile(r"\b[A-Z]{2}-\d{2,3}\b")
+# Reading expands a citation with the current title; this lets that expanded
+# form come back in through rules_fix without the gloss having to be stripped
+# by hand. Only the pointer is ever stored, so the gloss cannot go stale.
+RE_CITE_GLOSSED = re.compile(
+    r"^([A-Za-z]{2}-\d{2,4}(?:-[RMFrmf])?)\s*(?:—|--|·|\|).*$", re.S)
+# The separator the gloss is generated with. It is written once, here, because
+# the parser has to be able to take back exactly what the writer put out.
+GLOSS_SEP = " — "
+
 RE_CODE = re.compile(r"^[A-Za-z0-9]{8,32}$")
 RE_NAME = re.compile(r"^[a-z0-9][a-z0-9 _-]{0,40}$")
+RE_LEGACY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,31}$")
 
 FILE_MODE = 0o644                       # root writes, everyone else reads
 DIR_MODE = 0o755
@@ -93,12 +161,41 @@ def _plus_days(days: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _strip_gloss(s: str) -> str:
+    """Take the pointer out of anything reading may have handed back: the
+    brackets, and the title the expansion added inside them."""
+    s = (s or "").strip()
+    if s.startswith("(") and s.endswith(")"):
+        s = s[1:-1].strip()
+    g = RE_CITE_GLOSSED.match(s)
+    return g.group(1) if g else s
+
+
 def _norm_id(rid: str) -> str:
-    s = (rid or "").strip().upper()
-    if s.count("-") == 2:               # 'VA-02-R': cite it bare, but do not argue
-        s = s.rsplit("-", 1)[0]
-    if not RE_ID.match(s):
-        raise RulesError(f"malformed ID {rid!r}: it must be DOMAIN-NN, e.g. VA-02")
+    """The one door every ID goes through. It PADS to four digits, so the old
+    two-digit form written in some older text still resolves onto the same
+    rule."""
+    s = _strip_gloss(rid).upper()
+    if s.count("-") == 2 and s.rsplit("-", 1)[1] in TYPES:
+        s = s.rsplit("-", 1)[0]         # 'VA-02-R': cite it bare, but do not argue
+    m = RE_ID_IN.match(s)
+    if not m:
+        raise RulesError(f"malformed ID {rid!r}: it must be DOMAIN-NNNN, e.g. VA-0002")
+    return f"{m.group(1)}-{int(m.group(2)):0{ID_DIGITS}d}"
+
+
+def _norm_legacy(v: str) -> str:
+    """The old markdown identifier of a rule. It is normalised but NOT parsed:
+    it is a label from another world, and pretending it has our grammar would
+    be the first step towards addressing a rule by it."""
+    s = (v or "").strip().upper()
+    if not s:
+        return ""
+    if not RE_LEGACY.match(s):
+        raise RulesError(
+            f"invalid legacy_id {v!r}: letters, digits, '.', '_', '-' and '/', max 32 "
+            "characters. It is the OLD markdown identifier, recorded only so the "
+            "citations can be mapped afterwards.")
     return s
 
 
@@ -258,10 +355,20 @@ CREATE TABLE IF NOT EXISTS rules (
   source        TEXT,                   -- where it came from: the renewal criterion
   reason        TEXT NOT NULL DEFAULT 'created',
   proposed_by   TEXT,
+  legacy_id     TEXT,                   -- the old markdown identifier. READ ONLY:
+                                        -- never a second way to address a rule
   updated_at    TEXT NOT NULL,
   PRIMARY KEY (project, id),
   UNIQUE (project, domain, seq)
 );
+
+-- Two rules cannot claim the same old identifier. It costs one line and it
+-- catches the OPPOSITE error to the one feared: in a long seeding pass
+-- forgetting a rule is possible, but entering one TWICE is likelier, and
+-- without this nobody would notice. Partial, so the nulls of everything born
+-- after the migration cost nothing.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_rules_legacy
+    ON rules(project, legacy_id) WHERE legacy_id IS NOT NULL;
 
 -- A rule points to a SET of scopes: widening it is one more row, and the group
 -- it already belonged to is not touched.
@@ -425,6 +532,11 @@ END;
 
 TABLES = ("projects", "project_domains", "consumers", "scopes", "scope_members",
           "rules", "rule_scopes", "rule_refs", "rule_versions", "approvals")
+# Indexes the preflight has to see. Only the ones that carry a GUARANTEE, not
+# the ones that carry speed: ux_rules_legacy is what stops two rules claiming
+# the same old identifier, and a constraint nobody checks is a constraint that
+# is not there.
+INDEXES = ("ux_rules_legacy",)
 TRIGGERS = ("trg_rules_ins", "trg_rules_upd", "trg_rules_del",
             "trg_scope_link_ins", "trg_scope_link_del", "trg_consumer_scope",
             "trg_managed_no_extra_member", "trg_managed_no_member_update",
@@ -498,12 +610,66 @@ class Registry:
         # trigger dropped by hand — is rebuilt. But the repair is DECLARED: a
         # trigger that vanishes raises no error, it just stops writing history.
         before = {r[0] for r in self.cx.execute("SELECT name FROM sqlite_master")}
+        self._migrate()
         self.cx.executescript(SCHEMA)
         after = {r[0] for r in self.cx.execute("SELECT name FROM sqlite_master")}
-        self.repaired = [] if fresh else sorted(after - before)
+        self.repaired = ([] if fresh else
+                         sorted((after - before) - set(self._MIGRATION_OBJECTS)))
         self._fix_modes()
 
     # ---------- housekeeping ----------
+
+    # Objects this version adds to a schema that already exists. They are
+    # subtracted from `repaired`, because a repair means "a trigger vanished and
+    # history stopped being written" — something to worry about. An upgrade
+    # arriving is not that, and a warning that cries wolf on every first open
+    # after a release is a warning nobody reads on the day it is right.
+    _MIGRATION_OBJECTS = ("ux_rules_legacy",)
+
+    def _migrate(self) -> None:
+        """The ONE thing that has to change on an existing database: the new
+        column. Nothing else.
+
+        `CREATE TABLE IF NOT EXISTS` is a no-op on a table that is already
+        there, so a new column never appears on a database in service. This runs
+        BEFORE executescript because the index over legacy_id is in the schema
+        and would fail on a table with no such column. On a fresh database there
+        is nothing to migrate and the schema creates everything whole.
+
+        AND IT DOES NOT CONVERT ANYTHING. An earlier version of this method
+        widened the old two-digit IDs across every table and rewrote the bodies
+        to match. It was deleted, and the reason is the same one that killed the
+        bulk import: A MIGRATION IS NOT CODE, IT IS THE WORK. The rules go back
+        in one at a time, by hand, each one read and decided; the only thing the
+        engine owes that pass is somewhere to write down which old identifier a
+        new rule replaces, which is `legacy_id` and nothing more. Converting
+        prose by pattern invents citations that were never citations, and
+        converting IDs behind the author's back moves the very pointers the pass
+        exists to re-decide.
+
+        So this method has one job, and when the seeding is finished and the
+        mapping has been used, `legacy_id` goes too.
+
+        Kept declarative on purpose: whatever happens here must also be in
+        SCHEMA, or a fresh install and an upgraded one stop being the same
+        thing."""
+        self.migrated: list[str] = []
+        have = {r[0] for r in self.cx.execute("SELECT name FROM sqlite_master "
+                                              "WHERE type='table'")}
+        if "rules" not in have:
+            return
+        cols = {r[1] for r in self.cx.execute("PRAGMA table_info(rules)")}
+        for name, decl in (("legacy_id", "TEXT"),):
+            if name not in cols:
+                try:
+                    self.cx.execute(f"ALTER TABLE rules ADD COLUMN {name} {decl}")
+                except sqlite3.OperationalError as e:
+                    # Two processes opening the database for the first time
+                    # after an upgrade: the loser must not die at __init__.
+                    if "duplicate column" not in str(e).lower():
+                        raise
+                else:
+                    self.migrated.append(f"rules.{name}")
 
     def _fix_modes(self) -> None:
         """0644 is DELIBERATE: whoever mounts the share reads and does not touch."""
@@ -798,8 +964,13 @@ class Registry:
                             "WHERE project=? AND rule_id=?", (p, rid)).fetchone()
         return r[0]
 
-    def _dict(self, row, p: str) -> dict:
-        d = {"id": row["id"], "type": row["type"], "title": row["title"], "body": row["body"],
+    def _dict(self, row, p: str, expand: bool = True) -> dict:
+        """The shape a rule takes on the way out. `expand` is TRUE by default
+        because a chat is never offered a choice it can get wrong: what reaches
+        a consumer always carries the gloss."""
+        body = row["body"]
+        d = {"id": row["id"], "type": row["type"], "title": row["title"],
+             "body": self._expand(p, body) if expand else body,
              "status": row["status"], "permanence": row["permanence"],
              "expires_at": row["expires_at"], "scopes": self._scopes_of(p, row["id"]),
              "version": self._version(p, row["id"]), "changelog": row["changelog"],
@@ -808,6 +979,8 @@ class Registry:
             d["superseded_by"] = row["superseded_by"]
         if row["denied_reason"]:
             d["denied_reason"] = row["denied_reason"]
+        if row["legacy_id"]:
+            d["legacy_id"] = row["legacy_id"]
         return d
 
     _IN_FORCE = ("status = 'active' AND (permanence = 'permanent' "
@@ -831,10 +1004,15 @@ class Registry:
             out[r["rule_id"]] = (max(b, cache[sc]), sorted(lst + [sc]))
         return out
 
-    def list_rules(self, code: str, consumer: str) -> dict:
+    def list_rules(self, code: str, consumer: str, expand: bool = True) -> dict:
         """Every rule in force for one consumer, in ONE call, ordered from the
         most widespread to the most specific. The order IS the breadth of the
-        scope: it stays right on its own when a consumer is added."""
+        scope: it stays right on its own when a consumer is added.
+
+        Citations arrive EXPANDED with the current title of the rule they point
+        at, so the reference is understood without a second call. `expand` is
+        here for the Markdown export, which is read by a person; no tool offers
+        it to a chat."""
         p = self._project(code)
         c = self._consumer(p, consumer)
         reaching = self._reaching(p, c)
@@ -848,7 +1026,7 @@ class Registry:
                 continue
             if row["permanence"] != "permanent" and row["expires_at"] and row["expires_at"] <= now:
                 continue
-            d = self._dict(row, p)
+            d = self._dict(row, p, expand)
             d["via"] = scopes
             d["breadth"] = breadth
             rules.append(d)
@@ -954,8 +1132,10 @@ class Registry:
         return {"project": p, "consumer": c or "(all)",
                 "waiting": waiting, "denied": denied, "expiring_within_30_days": expiring,
                 "approval_required": not self.in_grace(),
-                "note": "a denied proposal is kept on purpose: the same idea cannot come "
-                        "back through another chat in three weeks"}
+                "note": "a denied proposal is kept on purpose, with its reason. The registry "
+                        "no longer refuses a re-proposal — the number is assigned by the "
+                        "counter, so the same text filed again simply takes a new one. "
+                        "Reading this list before proposing is now a habit, not a guard rail"}
 
     # ---------- verdicts ----------
 
@@ -998,33 +1178,51 @@ class Registry:
                              "SELECT COUNT(*) FROM approvals WHERE project=:p")},
             "registry_version": VERSION,
             "repaired_at_open": self.repaired,
+            "migrated_at_open": self.migrated,
         }
 
     def check(self, code: str) -> dict:
         """Audit: broken pointers, citations of retired rules, rules with no
-        perimeter, numbering gaps, redundancy candidates."""
+        perimeter, redundancy candidates.
+
+        NUMBERING GAPS ARE GONE, and deliberately. The number is assigned by the
+        database now, so a gap is impossible: the counter does not skip, and
+        retiring leaves none because the row stays. A check that at steady state
+        cannot tell a fault from a choice is not a check — it is a line you
+        learn to skip, and the day it reports something true you have already
+        stopped reading it."""
         p = self._project(code)
         now = _now()
         known = {r[0] for r in self.cx.execute("SELECT id FROM rules WHERE project=?", (p,))}
         retired = {r[0] for r in self.cx.execute(
             "SELECT id FROM rules WHERE project=? AND status='retired'", (p,))}
-        broken, to_retired = [], []
-        for r in self.cx.execute("SELECT src, dst FROM rule_refs WHERE project=?", (p,)):
+        # A citation is only a problem when the rule MAKING it is in force. The
+        # door refuses a denied target and a target that does not resolve, but
+        # it cannot refuse a target that changes state afterwards: a rule is
+        # filed citing a proposal, the proposal is denied or the target is
+        # retired, and nothing ever says so. Hence the three buckets — and hence
+        # the filter on the SOURCE, without which a batch citing itself would
+        # report the project as incoherent every single time.
+        by_status = {r[0]: r[1] for r in self.cx.execute(
+            "SELECT id, status FROM rules WHERE project=?", (p,))}
+        in_force = {r[0] for r in self.cx.execute(
+            "SELECT id FROM rules WHERE project=:p AND " + self._IN_FORCE,
+            {"p": p, "now": now})}
+        broken, to_retired, to_denied, to_proposed = [], [], [], []
+        for r in self.cx.execute("SELECT src, dst FROM rule_refs WHERE project=? "
+                                 "ORDER BY src, dst", (p,)):
             if r[1] not in known:
                 broken.append({"from": r[0], "cites": r[1]})
-            elif r[1] in retired:
-                to_retired.append({"from": r[0], "cites": r[1]})
+                continue
+            if r[0] not in in_force:
+                continue
+            bucket = {"retired": to_retired, "denied": to_denied,
+                      "proposed": to_proposed}.get(by_status.get(r[1]))
+            if bucket is not None:
+                bucket.append({"from": r[0], "cites": r[1]})
         no_scope = [r[0] for r in self.cx.execute(
             "SELECT id FROM rules r WHERE r.project=? AND r.status='active' AND NOT EXISTS "
             "(SELECT 1 FROM rule_scopes s WHERE s.project=r.project AND s.rule_id=r.id)", (p,))]
-        gaps = []
-        for d in self._domains(p):
-            seqs = sorted(r[0] for r in self.cx.execute(
-                "SELECT seq FROM rules WHERE project=? AND domain=?", (p, d)))
-            if seqs:
-                missing = [n for n in range(1, max(seqs) + 1) if n not in seqs]
-                if missing:
-                    gaps.append({"domain": d, "missing": missing})
         # Redundancy CANDIDATES, not a verdict: two rules in force, in the same
         # perimeter, citing the same IDs. The registry puts the pairs under your
         # eyes; deciding they say the same thing is a judgement.
@@ -1043,10 +1241,12 @@ class Registry:
                 if sa and sa == sb and ra and ra == rb:
                     cand.append({"pair": [a, b], "same_scopes": sorted(sa),
                                  "same_citations": sorted(ra)})
-        clean = not (broken or to_retired or no_scope)
+        clean = not (broken or to_retired or to_denied or to_proposed or no_scope)
         return {"project": p, "coherent": clean,
                 "broken_pointers": broken, "citations_to_retired": to_retired,
-                "rules_without_perimeter": no_scope, "numbering_gaps": gaps,
+                "citations_to_denied": to_denied,
+                "citations_to_proposed": to_proposed,
+                "rules_without_perimeter": no_scope,
                 "redundancy_candidates": cand,
                 "verdict": "coherent" if clean else "there are things to fix"}
 
@@ -1058,7 +1258,13 @@ class Registry:
             "  FROM rule_versions WHERE project=? AND rule_id=? ORDER BY version", (p, rid)).fetchall()
         if not rows:
             raise RulesError(f"{rid}: no history — this ID was never defined in this project")
-        return {"project": p, "id": rid, "versions": [dict(r) for r in rows], "count": len(rows)}
+        out = {"project": p, "id": rid, "versions": [dict(r) for r in rows], "count": len(rows)}
+        # legacy_id is immutable, so it belongs to the rule and not to any one
+        # version: putting it in every row of the history would be noise.
+        cur = self._row(p, rid)
+        if cur is not None and cur["legacy_id"]:
+            out["legacy_id"] = cur["legacy_id"]
+        return out
 
     def compare(self, code: str, rid: str, va: int, vb: int) -> dict:
         p = self._project(code)
@@ -1081,17 +1287,216 @@ class Registry:
 
     # ---------- writing ----------
 
-    def _refs(self, p: str, rid: str, body: str) -> int:
+    # ---------- citations ----------
+
+    def _cites(self, p: str, body: str, self_id: str = "") -> list[str]:
+        """Parse a body and VALIDATE its citations. Raises, so this is the door.
+
+        Three refusals:
+          · a bare ID left OUTSIDE the brackets, which is a forgotten bracket
+            and would otherwise become a mute citation. Case does not matter:
+            `va-0001` and `Va-0001` are the same mistake;
+          · a citation that does not RESOLVE — a chat cannot hallucinate a
+            pointer, because the proposal does not go in;
+          · a citation towards a rule that is NOT YET APPROVED.
+
+        THE THIRD ONE IS THE LOAD-BEARING ONE, and it is a decision about how
+        the corpus is built, not a technicality. You may only cite a rule that
+        has already been through approval. So the order of work is forced: file
+        the cited rule, get it approved, then file the one that cites it. A
+        proposal that needs a rule which does not exist yet simply waits.
+
+        The alternative — citing something still in the batch — looks convenient
+        and is a trap: the number of a proposal is not final until it is in, so
+        a batch whose members cite each other is a batch that can be approved
+        into an inconsistent state. Nobody is writing twelve thousand rules
+        here; waiting one round is cheaper than a registry whose pointers were
+        right only at the moment they were written.
+
+        There is NO escape hatch on the bare-ID check, and the reason is worth
+        keeping: an exception was proposed — IDs inside backticks do not count —
+        so that a rule ABOUT the format of IDs could be written. A rule about
+        how rules are written must not exist: that matter belongs to the manual,
+        which a chat reads before writing. If a body ever trips over the check,
+        the cure is to rewrite the sentence, never to add an exception.
+
+        It cannot live in a trigger: SQLite has no regular expressions, and a
+        trigger calling a REGEXP the application registers would fail the moment
+        somebody opened the file with sqlite3 by hand."""
+        body = body or ""
+        out: list[str] = []
+        glossed: list[tuple[str, str]] = []
+        for m in RE_CITE.finditer(body):
+            # ONE normalising door, the same one rules_get uses. Two doors with
+            # two ideas of what an ID looks like is how a tolerance documented
+            # in one place becomes a refusal in another. The pattern already
+            # guarantees the shape, so this cannot raise.
+            dst = _norm_id(m.group(1))
+            if m.group(2) is not None:
+                glossed.append((dst, m.group(2).strip()))
+            if dst == self_id:
+                continue
+            if dst not in out:
+                out.append(dst)
+        # Anything shaped like an ID and NOT inside brackets of its own: a
+        # forgotten bracket. An ordinary parenthesis is ordinary prose — what
+        # makes a token a citation is the shape XX-NNNN, not the bracket.
+        #
+        # Only the DECLARED domains of this project are hunted. Refusing every
+        # two-letter-and-digits token caught a URL path, a locale, a ticket
+        # number — things no rewriting of the sentence can fix — while catching
+        # nothing extra: a forgotten bracket is always a forgotten bracket
+        # around a domain that exists.
+        doms = set(self._domains(p))
+        outside = RE_CITE.sub(" ", body)
+        stray = sorted({f"{m.group(1).upper()}-{m.group(2)}"
+                        for m in RE_BARE.finditer(outside)
+                        if m.group(1).upper() in doms})
+        if stray:
+            example = stray[0]
+            try:
+                example = _norm_id(example)
+            except RulesError:
+                pass
+            raise RulesError(
+                f"bare ID in the body: {', '.join(stray)}. A citation is the ID ALONE "
+                f"inside round brackets — ({example}) — so 'see {stray[0]}' and "
+                f"'(see {stray[0]})' are both refused: in the second the brackets hold a "
+                "sentence, not a pointer. Outside a bracket of its own an ID is a typo, and "
+                "a typo must not be able to turn into a citation nobody sees. If you did "
+                "not mean a rule at all, rewrite the token so it does not read as one of "
+                "this project's IDs. There is no exception, on purpose.")
+        missing = [d for d in out if self._row(p, d) is None]
+        if missing:
+            raise RulesError(
+                f"citation that does not resolve: {', '.join(missing)} "
+                f"{'were' if len(missing) > 1 else 'was'} never defined in this project.")
+        unborn = sorted(d for d in out
+                        if self._row(p, d)["status"] in ("proposed", "denied"))
+        if unborn:
+            raise RulesError(
+                f"citation towards a rule that is not in force yet: {', '.join(unborn)}. "
+                "You may only cite a rule that has ALREADY been approved. File the cited "
+                "rule first, have it approved, then file this one — a batch whose members "
+                "cite each other can be approved into a state where the pointers were only "
+                "ever right at the moment they were written. If it was refused, "
+                "rules_pending says why.")
+        # THE GLOSS IS CHECKED, NOT SWALLOWED. Reading hands back
+        # `(VA-0002 — its title)` and pasting that straight back must work — but
+        # anything else inside those brackets is the author's own words, and
+        # dropping them on the way to storage would be a registry losing text in
+        # silence. So the only gloss accepted is the one the registry itself
+        # would have written.
+        for dst, gloss in glossed:
+            row = self._row(p, dst)
+            wanted = self._gloss(row)
+            if gloss == wanted or gloss.startswith(wanted + " ·"):
+                continue
+            raise RulesError(
+                f"the text inside ({dst} — …) is not that rule's title. A citation is the "
+                f"ID alone; the title is added when you READ, so the only thing that may "
+                f"sit there is what came back — right now that is {wanted!r}. If you have "
+                "something of your own to say about the rule, say it outside the brackets: "
+                "what goes in them is stored, and a note stored there could not be dropped "
+                "without losing your words.")
+        return out
+
+    @staticmethod
+    def _legacy_cites(body: str) -> list[str]:
+        """The citations a body HAPPENS to carry, without judging it: marked
+        ones AND bare IDs, because that is what the old parser counted.
+
+        Only import_rules uses this, and it uses the OLD engine's pattern on
+        purpose — uppercase, two or three digits — not the wider one the new
+        check hunts with. Its bodies come from a world where the acronyms were
+        bare, so reading only the marked ones would silently drop the whole
+        reference graph and the audit in its wake would call a broken project
+        clean. But reading MORE than the old parser did is just as wrong: it
+        would invent pointers that were never pointers, and a seeding pass would
+        go chasing them."""
+        out: list[str] = []
+        for raw in ([m.group(1) for m in RE_CITE.finditer(body or "")]
+                    + [m.group(0) for m in RE_BARE_LEGACY.finditer(
+                        RE_CITE.sub(" ", body or ""))]):
+            try:
+                dst = _norm_id(_strip_gloss(raw))
+            except RulesError:
+                continue
+            if dst not in out:
+                out.append(dst)
+        return out
+
+    @staticmethod
+    def _compact(body: str) -> str:
+        """Put a body back into its stored form: every citation reduced to the
+        bare pointer.
+
+        Reading expands, and a maintainer is told to paste back what they read —
+        so without this the gloss WOULD be stored, and a title changed the next
+        day would leave a stale copy of itself inside somebody else's rule. That
+        is the staleness of a materialised export, except inside the
+        authoritative source instead of a derivative. Only the pointer is
+        stored, and that is what makes the gloss unable to rot."""
+        def one(m):
+            try:
+                return f"({_norm_id(m.group(1))})"
+            except RulesError:
+                return m.group(0)
+        return RE_CITE.sub(one, body or "")
+
+    def _write_refs(self, p: str, rid: str, cites: list[str]) -> int:
         self.cx.execute("DELETE FROM rule_refs WHERE project=? AND src=?", (p, rid))
-        n = 0
-        for m in RE_REF.finditer(body or ""):
-            dst = f"{m.group(1)}-{m.group(2)}"
+        for dst in cites:
             if dst == rid:
                 continue
             self.cx.execute("INSERT OR IGNORE INTO rule_refs (project, src, dst) VALUES (?,?,?)",
                             (p, rid, dst))
-            n += 1
-        return n
+        return len(cites)
+
+    def _expand(self, p: str, body: str) -> str:
+        """Expand every citation with the CURRENT title of the rule it points at.
+
+        The gloss is NOT written, it is GENERATED — so it cannot go stale, which
+        is the same defect as a materialised export but inside the authoritative
+        source instead of a derivative. And the expansion knows the STATE of the
+        rule it points at, so a citation towards a retired one arrives already
+        marked as such, in the text, while the chat is reading.
+
+        It never raises: what is in the database has already passed the door,
+        and a reading path that can fail is a reading path that will."""
+        now = _now()
+
+        def one(m):
+            try:
+                rid = _norm_id(m.group(1))
+            except RulesError:
+                return m.group(0)
+            row = self._row(p, rid)
+            if row is None:
+                return f"({rid}{GLOSS_SEP}⚠ never defined)"
+            mark = ""
+            if row["status"] != "active":
+                mark = f" · {row['status']}"
+            elif (row["permanence"] != "permanent" and row["expires_at"]
+                  and row["expires_at"] <= now):
+                mark = " · expired"
+            # The title gives up its own round brackets before it goes inside
+            # a round bracket. Without this a title holding a ')' closes the
+            # citation early, and pasting the body back into rules_fix is
+            # refused for text the registry itself generated — blaming the
+            # author for the writer's mistake.
+            return f"({rid}{GLOSS_SEP}{self._gloss(row)}{mark})"
+
+        return RE_CITE.sub(one, body or "")
+
+    @staticmethod
+    def _gloss(row) -> str:
+        """The title as it appears inside a citation. It gives up its own round
+        brackets first: a title holding a ')' would close the citation early, and
+        pasting the body back into rules_fix would then be refused for text the
+        registry itself generated — blaming the author for the writer's
+        mistake."""
+        return (row["title"] or "").replace("(", "[").replace(")", "]")
 
     def _check_scopes(self, p: str, scopes: list[str]) -> list[str]:
         if not scopes:
@@ -1114,15 +1519,49 @@ class Registry:
                              f"(declared: {', '.join(self._domains(p)) or 'none'})")
         return dom, seq
 
-    def propose(self, code: str, rid: str, rtype: str, title: str, body: str,
+    def _check_domain(self, p: str, domain: str) -> str:
+        d = (domain or "").strip().upper()
+        if not d:
+            raise RulesError("the rule needs a DOMAIN: the number is not yours to pick, "
+                             "the registry assigns it")
+        if d not in self._domains(p):
+            raise RulesError(f"domain {d!r} is not declared by this project "
+                             f"(declared: {', '.join(self._domains(p)) or 'none'})")
+        return d
+
+    def _next_seq(self, p: str, dom: str) -> int:
+        """The next number in that domain, counting from the LAST ever used —
+        retired and denied rows included, because an ID is never reused."""
+        last = self.cx.execute("SELECT IFNULL(MAX(seq), 0) FROM rules "
+                               "WHERE project=? AND domain=?", (p, dom)).fetchone()[0]
+        n = int(last) + 1
+        if n > MAX_SEQ:
+            raise RulesError(f"domain {dom} has burned all {MAX_SEQ} numbers: it needs a "
+                             "new domain, because IDs are never reused")
+        return n
+
+    def propose(self, code: str, domain: str, rtype: str, title: str, body: str,
                 scopes, reason: str, proposed_by: str = "",
-                changelog: str = "", source: str = "") -> dict:
+                changelog: str = "", source: str = "", legacy_id: str = "") -> dict:
         """File a proposal. It reaches NOBODY until the batch is approved — which
         is why this needs only the project code: an unapproved proposal cannot
-        do harm, and a chat that deposits one stops keeping a note about it."""
+        do harm, and a chat that deposits one stops keeping a note about it.
+
+        THE NUMBER IS NOT A PARAMETER. You give the DOMAIN and the registry
+        assigns the next number in it, four digits. A number is not a choice, it
+        is a position in a sequence: whoever does not pass it cannot pick it,
+        which is a structural guarantee and not a rule anybody has to remember.
+
+        `legacy_id` is the old markdown identifier, optional. Since the number is
+        no longer yours, recording the old one alongside the new one builds the
+        mapping WHILE the work happens, instead of reconstructing it afterwards:
+        the second pass over the citations becomes a substitution, not an
+        investigation.
+
+        The ID assigned comes back in the verdict — without it you could not
+        write the citations that point at this rule."""
         p = self._project(code)
-        rid = _norm_id(rid)
-        dom, seq = self._split_id(p, rid)
+        dom = self._check_domain(p, domain)
         rtype = (rtype or "").strip().upper()
         if rtype not in TYPES:
             raise RulesError(f"type {rtype!r}: R binding, M method, F technical fact. "
@@ -1131,50 +1570,73 @@ class Registry:
             raise RulesError("the rule needs a title")
         if not (body or "").strip():
             raise RulesError("the rule needs a body")
-        if len(body.encode()) > MAX_BODY_BYTES:
-            raise RulesError(f"body over {MAX_BODY_BYTES} bytes: split the rule")
         if not (reason or "").strip():
             raise RulesError("reason is mandatory: without the why a rule cannot be "
                              "defended, and at the first opportunity it gets reopened")
-        prior = self.cx.execute("SELECT id, denied_reason, updated_at FROM rules "
-                                "WHERE project=? AND id=? AND status='denied'",
-                                (p, rid)).fetchone()
-        if prior:
-            raise RulesError(
-                f"{rid} was already DENIED on {prior['updated_at'][:10]} — reason: "
-                f"{prior['denied_reason']}. The registry keeps refusals so the same idea "
-                "cannot come back through another chat. If things have changed, say so to "
-                "Alfredo rather than proposing it again.")
-        if self._row(p, rid):
-            raise RulesError(f"{rid} already exists in this project. IDs are never reused, "
-                             "not even by a retired rule: pick the next free number.")
+        legacy = _norm_legacy(legacy_id)
+        if legacy:
+            twin = self.cx.execute("SELECT id FROM rules WHERE project=? AND legacy_id=?",
+                                   (p, legacy)).fetchone()
+            if twin:
+                raise RulesError(
+                    f"{legacy} was already filed, as {twin['id']}. Two rules cannot claim "
+                    "the same old identifier: in a long pass entering one twice is likelier "
+                    "than forgetting one, and this is what notices.")
+        # Citations are validated BEFORE anything is written: a chat cannot
+        # hallucinate a pointer, because the proposal does not go in.
+        # VALIDATED ON WHAT ARRIVED, then compacted, then measured. The order is
+        # the whole safety of it: compacting first would drop a gloss before the
+        # bare-ID check could look at it, so a body could lose a pointer and a
+        # sentence without anybody being told. Measured last because the ceiling
+        # has to be about what actually goes into the database.
+        cites = self._cites(p, body)
+        body = self._compact(body)
+        if len(body.encode()) > MAX_BODY_BYTES:
+            raise RulesError(f"body over {MAX_BODY_BYTES} bytes once stored: split the rule")
         scopes = self._check_scopes(p, _norm_scope_list(scopes))
         by = _norm_name(proposed_by, "consumer") if proposed_by else None
         if by:
             self._consumer(p, by)
-        self.cx.execute("BEGIN")
+        # IMMEDIATE, not the default deferred: the write lock is taken BEFORE
+        # the counter is read, so nobody can read the same MAX(seq) in between.
+        # A plain BEGIN would upgrade from read to write halfway through, and in
+        # WAL that upgrade cannot wait — the loser dies with "database is
+        # locked" no matter how long the busy timeout is.
+        self.cx.execute("BEGIN IMMEDIATE")
         try:
+            # The number is read and taken in one go, and
+            # UNIQUE(project, domain, seq) is the net underneath.
+            seq = self._next_seq(p, dom)
+            rid = f"{dom}-{seq:0{ID_DIGITS}d}"
             for s in scopes:
                 self.cx.execute("INSERT INTO rule_scopes (project, rule_id, scope) VALUES (?,?,?)",
                                 (p, rid, s))
             self.cx.execute(
                 "INSERT INTO rules (project, id, domain, seq, type, title, body, status, "
-                "permanence, changelog, source, reason, proposed_by, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,'proposed','provisional',?,?,?,?,?)",
+                "permanence, changelog, source, reason, proposed_by, legacy_id, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,'proposed','provisional',?,?,?,?,?,?)",
                 (p, rid, dom, seq, rtype, title.strip(), body, changelog or None,
-                 source or None, reason.strip(), by, _now()))
-            self._refs(p, rid, body)
+                 source or None, reason.strip(), by, legacy or None, _now()))
+            self._write_refs(p, rid, cites)
             self.cx.execute("COMMIT")
         except sqlite3.IntegrityError as e:
             self.cx.execute("ROLLBACK")
-            raise RulesError(f"{rid} refused: {e}")
+            raise RulesError(
+                f"the proposal for domain {dom} was refused by the database: {e}. If it "
+                "names the unique constraint on (project, domain, seq), two writers took "
+                "the same number — nothing was written, so filing it again is safe.")
         except Exception:
             self.cx.execute("ROLLBACK")
             raise
-        return {"project": p, "id": rid, "status": "proposed", "scopes": scopes,
-                "reaches_now": [],
-                "note": "it reaches nobody until the batch is approved. Check back with "
-                        "pending: you do not need to keep a note about it."}
+        out = {"project": p, "id": rid, "domain": dom, "seq": seq,
+               "status": "proposed", "scopes": scopes, "cites": cites,
+               "reaches_now": [],
+               "note": "the ID above was ASSIGNED by the registry: write it down, it is what "
+                       "other rules must cite. It reaches nobody until the batch is "
+                       "approved — check back with pending instead of keeping a note."}
+        if legacy:
+            out["legacy_id"] = legacy
+        return out
 
     def batch(self, code: str) -> dict:
         """The pending batch plus its DIGEST — sha256 over the ordered list of
@@ -1246,8 +1708,10 @@ class Registry:
                             (reason.strip(), "denied", _now(), p, rid))
             out.append(rid)
         return {"project": p, "denied": out, "reason": reason.strip(),
-                "note": "the row stays: the ID is burnt and the same idea cannot come back "
-                        "through another chat"}
+                "note": "the row stays and the ID is burnt. It no longer BLOCKS the same "
+                        "idea coming back — with the counter a re-proposal takes a new "
+                        "number — but rules_pending shows the refusal and its reason to "
+                        "whoever filed it"}
 
     def renew(self, code: str, ids, signature: str = "", days: int = 0) -> dict:
         """Keeping a rule alive is letting it in again, so it is signed too."""
@@ -1297,7 +1761,12 @@ class Registry:
         """Fix a DEFECT in place: a wrong number, a broken pointer, a sentence
         that says something false. Same ID, the rule stays in force.
         A superseded DECISION is not fixed this way: propose the new one and
-        retire the old pointing at it."""
+        retire the old pointing at it.
+
+        A new body goes through the SAME citation check as a proposal: this is
+        the door the second seeding pass uses, so it cannot be the door that
+        lets an unresolved pointer in. The body you read back is expanded — you
+        can paste it here as it came, the gloss is dropped."""
         p = self._project(code)
         rid = _norm_id(rid)
         row = self._row(p, rid)
@@ -1311,7 +1780,24 @@ class Registry:
                              "someone wrote in the meantime. Re-read and retry.")
         if rtype is not None and rtype.strip().upper() not in TYPES:
             raise RulesError(f"type {rtype!r}: R, M or F")
-        new_body = row["body"] if body is None else body
+        if body is None:
+            # NO NEW BODY, so nothing is re-validated. Otherwise a rule written
+            # before the citation format existed could never be renamed,
+            # retyped or given a changelog again: the check would refuse a
+            # sentence nobody touched today, and rules_fix is exactly the tool
+            # the conversion pass needs. What is already in the database gets
+            # audited by rules_check, which is the right place — a report, not a
+            # door slammed on unrelated work.
+            new_body, cites = row["body"], None
+        else:
+            # A body that ARRIVED is always checked, before it is compacted.
+            cites = self._cites(p, body, self_id=rid)
+            new_body = self._compact(body)
+            if len(new_body.encode()) > MAX_BODY_BYTES:
+                raise RulesError(f"body over {MAX_BODY_BYTES} bytes once stored: split the rule")
+            if new_body == row["body"]:
+                # Pasting back what you read is not an edit.
+                cites = None
         self.cx.execute(
             "UPDATE rules SET type=?, title=?, body=?, changelog=?, reason=?, updated_at=? "
             "WHERE project=? AND id=?",
@@ -1320,8 +1806,10 @@ class Registry:
              new_body,
              row["changelog"] if changelog is None else changelog,
              reason.strip(), _now(), p, rid))
-        self._refs(p, rid, new_body)
-        return {"project": p, "id": rid, "version": self._version(p, rid), "amended": True}
+        if cites is not None:
+            self._write_refs(p, rid, cites)
+        return {"project": p, "id": rid, "version": self._version(p, rid),
+                "amended": True, "cites": cites if cites is not None else "unchanged"}
 
     def widen(self, code: str, rid: str, scopes, reason: str = "") -> dict:
         """Make a rule also reach someone else. One more row in rule_scopes: the
@@ -1372,8 +1860,20 @@ class Registry:
         sb = None
         if superseded_by:
             sb = _norm_id(superseded_by)
-            if self._row(p, sb) is None:
+            target = self._row(p, sb)
+            if target is None:
                 raise RulesError(f"{sb} does not exist: create the new rule first")
+            if sb == rid:
+                raise RulesError(f"{rid} cannot supersede itself")
+            # The same rule as a citation, and for the same reason: the number
+            # of a proposal is not final until it is in, and a successor that is
+            # never approved leaves the retired rule pointing at nothing for
+            # good. superseded_by is not written to rule_refs, so no audit would
+            # ever come back to it — the check has to be here or nowhere.
+            if target["status"] in ("proposed", "denied"):
+                raise RulesError(
+                    f"{sb} has not been approved yet, so it cannot supersede anything. "
+                    "Have the successor approved first, then retire the rule it replaces.")
         self.cx.execute("UPDATE rules SET status='retired', superseded_by=?, changelog=?, "
                         "reason=?, updated_at=? WHERE project=? AND id=?",
                         (sb, changelog or row["changelog"], reason.strip(), _now(), p, rid))
@@ -1392,7 +1892,16 @@ class Registry:
         """Bulk import for the MIGRATION from the Markdown files. Runs only on an
         EMPTY project: a migration happens once, on a clean table. This is the
         door that is already designed to open a single time, which is why the
-        approval lock needs no global off switch."""
+        approval lock needs no global off switch.
+
+        It is the ONE path that still takes an explicit ID, and the one that does
+        not validate citations: its bodies come from another world, where the
+        acronyms are bare and point at a numbering that is about to change.
+        Recording what is there without judging it is the honest behaviour for a
+        door that is scheduled to be removed — but it does have to RECORD it, so
+        the bare IDs are read as references and the ID given becomes the
+        rule's legacy_id. Otherwise the audit that runs in its wake reports a
+        clean project that is not, which is worse than not auditing."""
         p = self._project(code)
         n = self.cx.execute("SELECT COUNT(*) FROM rules WHERE project=?", (p,)).fetchone()[0]
         if n:
@@ -1409,6 +1918,13 @@ class Registry:
             try:
                 rid = _norm_id(item.get("id", ""))
                 dom, seq = self._split_id(p, rid)
+                # Checked HERE, before the transaction: rule_scopes is written
+                # first (the deferred FK), so without this a duplicate is
+                # rejected by the perimeter's primary key and the message talks
+                # about a table the caller never mentioned.
+                if self._row(p, rid):
+                    raise RulesError(f"{rid} is already in this batch: two entries "
+                                     "normalise onto the same ID")
                 rtype = (item.get("type") or "").strip().upper()
                 if rtype not in TYPES:
                     raise RulesError(f"type {rtype!r}: R, M or F")
@@ -1422,13 +1938,14 @@ class Registry:
                                     "VALUES (?,?,?)", (p, rid, s))
                 self.cx.execute(
                     "INSERT INTO rules (project, id, domain, seq, type, title, body, status, "
-                    "permanence, expires_at, changelog, source, reason, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?)",
+                    "permanence, expires_at, changelog, source, reason, legacy_id, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?)",
                     (p, rid, dom, seq, rtype, (item.get("title") or rid).strip(), body,
                      "permanent" if permanent else "provisional",
                      None if permanent else _plus_days(self.provisional_days),
-                     item.get("changelog"), item.get("source"), reason.strip(), _now()))
-                self._refs(p, rid, body)
+                     item.get("changelog"), item.get("source"), reason.strip(),
+                     _norm_legacy(item.get("id", "")) or None, _now()))
+                self._write_refs(p, rid, self._legacy_cites(body))
                 self.cx.execute("COMMIT")
                 taken.append(rid)
             except Exception as e:
@@ -1445,17 +1962,21 @@ class Registry:
 
     # ---------- derivatives ----------
 
-    def export(self, code: str, consumer: str = "") -> dict:
+    def export(self, code: str, consumer: str = "", expand: bool = False) -> dict:
         """A Markdown snapshot. It is a DERIVATIVE: the truth stays in the
         database and this regenerates. With a consumer it is the block to paste
-        into that chat's memory; without one, the whole project."""
+        into that chat's memory; without one, the whole project.
+
+        This is the ONLY reader that gets a choice about the citations, because
+        it is read by a person: compact by default, `expand` to have every
+        pointer carry the current title of what it points at."""
         p = self._project(code)
         lines = [f"# {p} — rules", "",
                  f"> Generated {_now()} by codifier-mcp {VERSION}. This file is a "
                  f"DERIVATIVE: the truth is the registry, and this regenerates.", ""]
         if consumer:
             c = self._consumer(p, consumer)
-            data = self.list_rules(code, c)
+            data = self.list_rules(code, c, expand)
             lines[0] = f"# {p} — rules for {c}"
             lines += [f"{data['count']} rules in force, widest first. "
                       f"{data['outside_your_scope']} are outside your perimeter.", ""]
@@ -1483,7 +2004,9 @@ class Registry:
                               f"*scopes: {', '.join(self._scopes_of(p, r['id'])) or 'none'} · "
                               f"{r['permanence']}"
                               + (f" · expires {r['expires_at'][:10]}" if r["expires_at"] else "")
-                              + "*", "", r["body"], ""]
+                              + (f" · was {r['legacy_id']}" if r["legacy_id"] else "")
+                              + "*", "",
+                              self._expand(p, r["body"]) if expand else r["body"], ""]
         md = "\n".join(lines)
         return {"project": p, "consumer": consumer or None,
                 "markdown": md, "bytes": len(md.encode())}

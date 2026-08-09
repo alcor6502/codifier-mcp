@@ -52,8 +52,17 @@ def parse(path: str) -> ast.Module:
         return ast.parse(f.read(), filename=path)
 
 
+def source(path: str) -> str:
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
 SERVER_TREE = parse(SERVER)
 ENGINE_TREE = parse(ENGINE)
+SERVER_SRC = source(SERVER)
+RULES_SRC = source(ENGINE)
+PREFLIGHT_SRC = source(os.path.join(HERE, "preflight.py"))
+GUIDE_SRC = source(os.path.join(HERE, "reference-guide.md"))
 
 # =====================================================================
 # The engine: signatures, and which methods write
@@ -85,7 +94,7 @@ def _calls_on_self(fn: ast.FunctionDef) -> set[str]:
 def mutating_methods() -> set[str]:
     """A method mutates if it carries a write statement, or reaches one through
     another method of the class. Transitive, because propose() writes through
-    _refs() and approve() through _require_signature()."""
+    _write_refs() and approve() through _require_signature()."""
     direct = {name for name, fn in METHODS.items() if _writes_directly(fn)}
     edges = {name: _calls_on_self(fn) for name, fn in METHODS.items()}
     changed = True
@@ -203,6 +212,65 @@ for tool in TOOLS:
 ok(set(UNGATED_ON_PURPOSE) <= TOOL_NAMES,
    "every documented exception names a tool that exists",
    sorted(set(UNGATED_ON_PURPOSE) - TOOL_NAMES))
+
+# =====================================================================
+# 2b · the number is not on the surface
+# =====================================================================
+
+print("\n== the counter is a structural guarantee, so it is checked statically ==")
+
+# The whole point of the counter is that whoever files a rule CANNOT pick the
+# number. That guarantee lives in one place — the absence of a parameter — and
+# an absence is exactly the kind of thing that comes back by accident.
+_PROPOSE = next((t for t in TOOLS if t.name == "rules_propose"), None)
+ok(_PROPOSE is not None, "rules_propose is exposed")
+if _PROPOSE is not None:
+    params = [a.arg for a in _PROPOSE.args.posonlyargs + _PROPOSE.args.args]
+    ok("id" not in params,
+       "rules_propose takes NO id: the number is not a choice, it is a position",
+       f"parameters: {params}")
+    ok("domain" in params, "rules_propose takes the domain instead", f"parameters: {params}")
+    ok("legacy_id" in params,
+       "rules_propose takes legacy_id: the mapping is built while the work happens")
+
+_ENGINE_PROPOSE = METHODS.get("propose")
+if _ENGINE_PROPOSE is not None:
+    epar = [a.arg for a in _ENGINE_PROPOSE.args.posonlyargs + _ENGINE_PROPOSE.args.args]
+    ok("rid" not in epar and "domain" in epar,
+       "the engine's propose() agrees: domain in, no ID", f"parameters: {epar}")
+
+# There is exactly one place that hands out an ID, and it reads the database.
+ok("_next_seq" in METHODS, "the counter has a name, and it is a method of the engine")
+# And it reads it under a WRITE lock. A deferred BEGIN would upgrade from read
+# to write halfway through, which in WAL cannot wait: two connections asking the
+# counter at once and one dies with a raw "database is locked". Checked here
+# because the suite that proves it needs four connections to catch it.
+ok("BEGIN IMMEDIATE" in RULES_SRC,
+   "the counter is read inside an IMMEDIATE transaction, not a deferred one")
+# The unique index under legacy_id is a CONSTRAINT, so the preflight has to see
+# it. A guarantee nothing checks is a guarantee that is not there.
+ok("INDEXES" in RULES_SRC and "INDEXES" in PREFLIGHT_SRC,
+   "the preflight verifies the unique indexes the engine declares")
+ok("numbering_gaps" not in RULES_SRC,
+   "numbering_gaps is GONE from the engine — with the counter a gap cannot happen")
+ok("numbering_gaps" not in SERVER_SRC,
+   "and gone from the docstrings too: a report that no longer exists must not be promised")
+
+# The manual travels inside the image, so it can be checked against the code
+# that ships with it — which is the whole reason it lives there and not in the
+# vault. A manual that promises a parameter the tool has not got is the defect
+# this project already paid for once.
+ok("(VA-0002)" in GUIDE_SRC, "the manual teaches the citation format")
+ok("already approved" in GUIDE_SRC,
+   "the manual says a citation may only point at a rule already approved")
+# The migration was DELETED on purpose: a migration is not code, it is the work,
+# and a regex sweep over prose invents citations that were never citations. The
+# engine owes the seeding pass one column and nothing else.
+ok("_widen_ids" not in RULES_SRC and "_widen_bodies" not in RULES_SRC,
+   "no ID or body conversion survives in the engine")
+ok("no `id` parameter" in GUIDE_SRC,
+   "the manual says the number is not a parameter")
+ok("legacy_id" in GUIDE_SRC, "the manual documents legacy_id")
 
 # =====================================================================
 # 3 · no docstring points at a tool that is not there

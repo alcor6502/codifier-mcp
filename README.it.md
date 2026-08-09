@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/versione-1.0.4-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-30%20tool-8A63D2.svg">
+<img src="https://img.shields.io/badge/versione-1.1.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-30%20tool-8A63D2.svg">
 
 **Le regole di un progetto in un registro invece che sparse nei Markdown — così
 una chat può rispondere in una chiamata a «sotto quali regole sto?».**
@@ -86,18 +86,57 @@ pubblica**, quindi anche col database in mano nessuno può fabbricare
 un'approvazione. La metà privata non entra mai in una conversazione — non per
 disciplina, per costruzione.
 
-Il diniego non vuole firma: negare non può fare danno. E la riga di una regola
-respinta resta, così la stessa idea non torna da un'altra chat fra tre
-settimane.
+Il diniego non vuole firma: negare non può fare danno. La riga della regola
+respinta resta, col suo motivo, e `rules_pending` mostra a una chat i propri
+rifiuti — così la stessa idea che torna da un'altra chat fra tre settimane è
+una cosa che si vede, non una cosa che il registro può impedire.
+
+## Il numero non lo scegli tu
+
+`rules_propose` prende il **dominio**, non l'ID: il numero lo assegna il
+registro, quattro cifre, e lo restituisce. Un numero non è una scelta, è una
+posizione in una successione — e chi non lo passa non lo può scegliere. Quattro
+cifre perché gli ID non si riusano mai, quindi un dominio brucia numeri anche
+restandone vive venti.
+
+Non esiste più il referto sui buchi di numerazione, ed è la stessa decisione
+vista dall'altro lato: col contatore un buco è impossibile, quindi segnalarne
+uno avrebbe potuto solo voler dire che qualcuno aveva scelto.
+
+## Le citazioni si marcano, si controllano, si espandono
+
+Una citazione è un ID fra **parentesi tonde**, `(VA-0002)`. Una parentesi
+qualunque è prosa qualunque — quello che rende un token una citazione è la forma
+`XX-NNNN`, non la parentesi — così i `[[link del vault]]` restano liberi.
+
+Alla porta il registro rifiuta la sigla nuda lasciata fuori da una parentesi
+tutta sua (maiuscole o minuscole non cambia nulla), quella che non risolve,
+quella che punta a una regola **non ancora approvata**, e qualunque nota tua
+scritta dentro le parentesi — lì dentro non si conserva niente, e un registro
+che ti mangia le parole in silenzio è peggio di uno che te le rifiuta. Si
+cercano solo i domini che il progetto ha dichiarato, quindi un numero di ticket
+o un locale dentro un URL resta prosa. È quest'ultima che dà la forma al
+lavoro: prima entra la regola citata, poi la si approva, poi entra quella che la
+cita. Il numero di una proposta non è definitivo finché non è dentro, quindi un
+lotto i cui membri si citano fra loro si può approvare in uno stato dove i
+rimandi erano giusti solo mentre li si scriveva.
+
+In lettura ogni citazione porta il titolo attuale di ciò che punta:
+
+    (AL-0004)  →  (AL-0004 — le quote degli alternativi non si vendono in perdita)
+
+La glossa è generata, mai scritta — nel database entra solo il puntatore, ed è
+per questo che non può invecchiare — e un rimando a una regola ritirata arriva
+già marcato come tale, nel testo.
 
 ## Com'è fatto in pratica
 
 ```
 rules_list(project="<codice>", consumer="tax monitor")
 
-  VA-02  Rileggi le fonti            via _ALL_          ampiezza 7
-  PE-01  Il metodo dei quattro       via deliberativi   ampiezza 4
-  FI-03  Stima del bracket           via tax monitor    ampiezza 1
+  VA-0002  Rileggi le fonti          via _ALL_          ampiezza 7
+  PE-0001  Il metodo dei quattro     via deliberativi   ampiezza 4
+  FI-0003  Stima del bracket         via tax monitor    ampiezza 1
   ...
   38 regole in vigore · 132 fuori dal tuo perimetro
 ```
@@ -159,10 +198,13 @@ avvisa è un servizio di cui nessuno legge gli avvisi.
 Tre suite. Niente rete, niente FastMCP, niente Docker.
 
 ```
-python3 test_collaudo.py    # 161 casi — il motore, rifiuti compresi
-python3 test_surface.py     # 185 casi — la cucitura, l'immagine, il template, il firmatario
+python3 test_collaudo.py    # il motore, rifiuti compresi
+python3 test_surface.py     # la cucitura, l'immagine, il template, il firmatario
 python3 test_crash.py       # SIGKILL a metà transazione, come fa Docker
 ```
+
+Ogni suite stampa da sé quanti casi ha, e nessun file lo ripete. Un numero
+scritto in due posti sono due numeri, e qui l'abbiamo già pagato una volta.
 
 `test_surface.py` legge il sorgente invece di eseguirlo: ogni chiamata al motore
 deve esistere con firma compatibile, ogni tool che scrive deve passare dal gate

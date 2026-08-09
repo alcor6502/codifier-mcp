@@ -5,8 +5,8 @@
 This is a **registry of rules**, and it exists to make one question a query:
 *this chat, right now, which rules is it under?*
 
-**One database, N projects.** A project is a column, not a table, so `VA-02` of
-one project and `VA-02` of another coexist with separate histories. You address
+**One database, N projects.** A project is a column, not a table, so `VA-0002` of
+one project and `VA-0002` of another coexist with separate histories. You address
 a project by an opaque **CODE**, never by its name — the code sits at the top of
 that project's instructions. No tool lists projects, and no error names one: a
 missing code and a wrong code give the identical answer.
@@ -44,6 +44,94 @@ Each rule carries `via` — which scope it arrives through. When a rule appears 
 your list and you cannot see why, `via` is the answer, and it is exactly what
 the Architect needs to decide whether it belongs somewhere else.
 
+## THE NUMBER IS NOT YOURS TO PICK
+
+`rules_propose` has **no `id` parameter**. You give the **domain** — two
+uppercase letters the project has declared — and the registry hands back the
+next number in it, four digits: `VA-0001` for the first of its domain. The
+assigned ID is in the verdict, and it is what other rules must cite.
+
+A number is not a choice, it is a position in a sequence. Whoever does not pass
+it cannot pick it, which is why there is no rule anywhere telling you not to.
+
+Four digits because IDs are **never reused**: a domain that retires and rewrites
+burns numbers even while only twenty are alive. Older text may still say
+`VA-02`; wherever an ID is read it is padded, so `VA-02` and `VA-0002` are the
+same rule.
+
+If a rule had an identifier in the old Markdown, pass it as `legacy_id`. It is
+recorded next to the new one so the citations can be mapped afterwards, and no
+two rules may claim the same one. It is **read only**: there is no way to fetch
+a rule by it, because one thing must have one name.
+
+## CITATIONS: `(VA-0002)`
+
+A citation is the ID **alone** inside round brackets. An ordinary parenthesis is
+ordinary prose — what makes a token a citation is the **shape** `XX-NNNN`, not
+the bracket — so `(see the note below)` is prose, `(VA-0002)` is a citation, and
+the vault's own `[[wiki links]]` stay free for whatever you may want them for.
+
+Alone means alone: `(see VA-0002)` is refused, because there the brackets hold a
+sentence and not a pointer. Write *"see (VA-0002)"*.
+
+`rules_propose` and `rules_fix` check citations, and refuse four things:
+
+- a bare `VA-0002` left **outside** a bracket of its own. That is a forgotten
+  bracket, and a typo must not be able to turn into a citation nobody sees. Case
+  does not save you: `va-0002` and `Va-0002` are the same mistake;
+- a citation that does not **resolve** — so a pointer cannot be invented;
+- a citation towards a rule that is **not approved yet**, whether it is still a
+  proposal or was denied;
+- **anything of your own inside the brackets.** `(VA-0002 — a note of mine)` is
+  refused. The only text allowed there is the title the registry itself put
+  there when you read it, because what is inside the brackets is not stored —
+  and a registry that quietly dropped your words would be worse than one that
+  refuses them.
+
+Only the domains **this project has declared** are hunted, so a ticket number,
+a locale in a URL or a standard like `ISO-9001` are prose and stay prose. Within
+those domains there is **no exception**, not even inside backticks: a forgotten
+bracket is always around a domain that exists, which is exactly the case worth
+catching.
+
+### You may only cite a rule that is already approved
+
+This is the one that shapes how you work, so it is worth the paragraph.
+
+Citing something still in the batch looks convenient and is a trap: **the number
+of a proposal is not final until it is in**, so a batch whose members cite each
+other can be approved into a state where the pointers were right only while they
+were being written. The registry refuses it.
+
+The order of work is therefore forced, and it is simple:
+
+1. file the rule that will be cited;
+2. have it approved — the ID it comes back with is final;
+3. file the rule that cites it.
+
+A rule that needs one which does not exist yet **waits**. That is not a delay to
+work around, it is the shape of the job.
+
+A rule filed before this format existed keeps its old text, and that is
+deliberate: nobody rewrites prose by pattern. Such a rule can still be renamed,
+retyped and retired — `rules_fix` only checks a body you actually change. What
+is already stored is reported by `rules_check`, which is a report and not a door
+slammed on unrelated work.
+
+### Reading expands them
+
+On the way back, every citation arrives **expanded** with the current title of
+the rule it points at:
+
+    (AL-0004)  →  (AL-0004 — alternative shares are not sold at a loss)
+
+You understand the reference without a second call, and a pointer to a retired
+rule arrives marked as such. The gloss is **generated, never stored**: what goes
+into the database is the bare pointer, which is exactly why it cannot go stale.
+So you may paste an expanded body straight back into `rules_fix` — the title is
+stripped on the way in, and pasting back what you read counts as no change at
+all.
+
 ## THE FIVE RULES OF THIS REGISTRY
 
 1. **An ID is a pointer and is never reused** — not by a retired rule, not by a
@@ -72,15 +160,18 @@ authorisation alone never would have.
 
 - **`rules_propose`** files it. It needs only the project code: a proposal
   reaches nobody, so it cannot do harm — and it means you can stop keeping a
-  note about it.
+  note about it. It takes the **domain**, not the number, and gives the number
+  back.
 - **`rules_batch`** returns the pending proposals and a **digest**.
   **`rules_approve`** verifies an ed25519 signature over that digest. You sign
   the batch, never the single rule: at the twelfth signature in a row a person
   signs without reading, and three proposals that say the same thing only
   become visible side by side.
 - **`rules_deny`** needs no signature — refusing cannot do harm. The row stays
-  and the ID is burnt, so the same idea cannot come back through another chat
-  in three weeks. The reason turns silence into an answer.
+  and the ID is burnt. The reason turns silence into an answer, and it is what
+  `rules_pending` shows you: since the counter assigns the number, the registry
+  can no longer recognise a re-proposal by its ID. Reading your own refusals is
+  now a habit, not a guard rail.
 - **`rules_renew`** and **`rules_promote`** are signed, because keeping a rule
   alive is letting it in again.
 - **`rules_pending`** is your noticeboard: yours waiting, yours denied with the
@@ -135,9 +226,16 @@ Each of these has a right answer that already exists.
   receives them. The legislator is the Architect; the registry is the code; the
   chat applies. If you spot something worth codifying, `rules_propose` it and
   forget it — `rules_pending` will have the answer when you come back.
-- **Do not re-propose something that was denied.** The registry refuses it and
-  tells you the date and the reason. If circumstances really changed, say so to
-  Alfredo — do not try another door.
+- **Do not re-propose something that was denied.** The registry no longer stops
+  you — it cannot, now that the number is not yours to choose, so the same text
+  filed again simply takes a new one. The refusals are still there, with their
+  reasons, in `rules_pending`: read them before proposing. This one is on you.
+- **Do not write the gloss inside a citation** by hand. Write `(VA-0002)` and
+  nothing else; the title is added on reading, from the rule itself, which is
+  precisely why it cannot go out of date. Pasting back a body you read expanded
+  is fine — that one is stripped for you.
+- **Do not try to cite a rule that is still a proposal.** It is refused, and the
+  cure is to wait for it to be approved, not to work around it.
 - **Do not fix a superseded DECISION with `rules_fix`.** `rules_fix` is for
   defects: a wrong number, a broken pointer, a sentence that says something
   false — things that never were right. A decision that *was* right and stopped

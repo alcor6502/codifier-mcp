@@ -33,7 +33,7 @@ Configuration, all through environment variables:
   ALLOWED_CIDRS           accepted ranges, ';' between entries and '#' opening a
                           description. Empty string disables the filter
   ANTHROPIC_CIDR          DEPRECATED, still honoured: see ALLOWED_CIDRS
-  WEB_PORT                reserved for the read-only web UI of v1.1. Inert here,
+  WEB_PORT                reserved for the read-only web UI, not built yet. Inert here,
                           and declared in the template already because Unraid
                           does not propagate new variables to installed containers
 """
@@ -98,6 +98,13 @@ registry = Registry(DB_PATH,
 if registry.repaired:
     log.warning("schema rebuilt at open: %s — somebody had removed these objects",
                 ", ".join(registry.repaired))
+# A schema change on a database in service happens once and cannot be undone, so
+# the boot that does it says so. It is deliberately a short list: the migration
+# adds a column and converts NOTHING — the rules go back in by hand, one at a
+# time, and an engine that rewrote them behind the author's back would be moving
+# the very pointers that pass exists to re-decide.
+if registry.migrated:
+    log.warning("schema migrated at open: %s", ", ".join(registry.migrated))
 log.info("registry %s — %s — %s projects — approval: %s",
          VERSION, DB_PATH, registry.projects()["count"],
          "grace open until " + registry.grace_until if registry.in_grace() else "signature required")
@@ -261,8 +268,9 @@ def rules_list(project: str, consumer: str) -> dict:
 
 @tool
 def rules_get(project: str, ids: list[str], consumer: str) -> dict:
-    """One or MANY rules by ID (e.g. ["VA-02","ST-11"]; the type suffix is
-    tolerated, but the correct citation is bare).
+    """One or MANY rules by ID (e.g. ["VA-0002","ST-0011"]; the brackets of a
+    citation and the type suffix are both tolerated, and a shorter number is
+    padded — VA-02 is VA-0002).
 
     Three DIFFERENT answers, kept apart, and the difference is the point:
       found          the rules, whole
@@ -271,7 +279,11 @@ def rules_get(project: str, ids: list[str], consumer: str) -> dict:
                      reported, or you are using another project's code
 
     Asking for the batch at once is what turns a stumble into an audit: broken
-    citations are worth much more seen together than one at a time."""
+    citations are worth much more seen together than one at a time.
+
+    Bodies come back with every citation EXPANDED — `(VA-0002 — its title)` — so
+    you understand a reference without a second call, and a pointer to a retired
+    rule arrives already marked as such."""
     return registry.get_rules(project, ids, consumer)
 
 
@@ -300,24 +312,47 @@ def rules_pending(project: str, consumer: str = "") -> dict:
 # =====================================================================
 
 @tool
-def rules_propose(project: str, id: str, type: str, title: str, body: str,
+def rules_propose(project: str, domain: str, type: str, title: str, body: str,
                   scopes: list[str], reason: str, proposed_by: str = "",
-                  changelog: str = "", source: str = "") -> dict:
+                  changelog: str = "", source: str = "", legacy_id: str = "") -> dict:
     """File a proposal for a new rule. It needs ONLY the project code, because a
     proposal reaches nobody until its batch is approved: it cannot do harm, and
     a chat that deposits one can stop keeping a note about it.
+
+    THERE IS NO `id` PARAMETER. You give the `domain` — two uppercase letters,
+    already declared by the project — and the registry assigns the next number
+    in it, four digits: VA-0002. A number is not a choice, it is a position in a
+    sequence. The assigned ID comes back in the verdict, and it is what other
+    rules have to cite.
 
     `type`: R binding · M method · F technical fact. Retirement is a STATE, not
     a type. `scopes`: consumer names, group scope names, or ["*"] if it binds
     everyone present and future. `reason` is mandatory: without the why a rule
     cannot be defended, and at the first opportunity it gets reopened.
     `proposed_by` is your own consumer name — it is what makes rules_pending
-    able to show you your own.
+    able to show you your own. `legacy_id` is the old markdown identifier, if
+    this rule had one: it is recorded so the citations can be mapped afterwards,
+    and no two rules may claim the same one.
 
-    The ID is never reused, not even by a retired or a denied rule. A domain
-    must already be declared by the project."""
-    return registry.propose(project, id, type, title, body, scopes, reason,
-                            proposed_by, changelog, source)
+    CITATIONS IN THE BODY are an ID in ROUND BRACKETS, `(VA-0002)`. An ordinary
+    parenthesis is ordinary prose — what makes a token a citation is the shape
+    XX-NNNN, not the bracket. Four refusals: a bare ID left outside a bracket of
+    its own (case does not save you), one that does not resolve, one pointing at
+    a rule THAT IS NOT APPROVED YET, and anything of your own written inside the
+    brackets — the only text allowed there is the title the registry itself put
+    there when you read it, because what is inside is not stored.
+
+    Only the domains this project declared are hunted, so a ticket number or a
+    locale in a URL stays prose.
+
+    That last one decides the order of the work, so read it twice: file the
+    cited rule, have it approved — the ID it comes back with is final — and only
+    then file the rule that cites it. A rule that needs one which does not exist
+    yet simply waits. Citing a proposal would mean a batch could be approved
+    into a state where its own pointers were right only while it was being
+    written."""
+    return registry.propose(project, domain, type, title, body, scopes, reason,
+                            proposed_by, changelog, source, legacy_id)
 
 
 # =====================================================================
@@ -362,10 +397,11 @@ def rules_deny(project: str, ids: list[str], reason: str, code: str) -> dict:
     """MAINTENANCE. Refuse one or more proposals, with a reason. No signature is
     asked for: refusing cannot do harm.
 
-    The row STAYS, and the ID is burnt. That is what stops the same idea coming
-    back through a different chat in three weeks — and the reason turns silence
-    into an answer, so whoever proposed it learns something instead of
-    guessing."""
+    The row STAYS and the ID is burnt. It no longer BLOCKS a re-proposal: since
+    the counter assigns the number, the same text filed again simply takes a new
+    one. What the refusal buys is the REASON — rules_pending shows it to whoever
+    proposed it, so silence becomes an answer and they learn something instead of
+    guessing. Reading your own refusals is a habit now, not a guard rail."""
     _admin(code)
     return registry.deny(project, ids, reason)
 
@@ -410,7 +446,19 @@ def rules_fix(project: str, id: str, expected_version: int, reason: str, code: s
 
     `expected_version` is the number you read with rules_get: if somebody wrote
     in the meantime the change is refused and you are told the current version.
-    Leave empty whatever you are not changing."""
+    Leave empty whatever you are not changing.
+
+    A new `body` goes through the SAME citation check as a proposal: `(VA-0002)`
+    must resolve and must point at a rule already approved, a bare ID outside a
+    bracket of its own is refused, and so is a note of your own inside one. This is the tool that repairs what rules_check lists
+    as broken pointers, so it cannot be the one that lets a broken one in.
+
+    An UNCHANGED body is not re-checked. That is what lets a rule written before
+    this format existed still be renamed, retyped or given a changelog: the
+    registry does not slam a door on unrelated work over a sentence nobody
+    touched today. You may also paste the body back exactly as you read it — the
+    title inside the brackets is a gloss generated on reading, and it is dropped
+    here."""
     _admin(code)
     return registry.amend(project, id, expected_version, reason,
                           title or None, body or None, type or None, changelog or None)
@@ -479,13 +527,25 @@ def rules_status(project: str, code: str) -> dict:
 @tool
 def rules_check(project: str, code: str) -> dict:
     """MAINTENANCE. Audit of a project: broken pointers (IDs cited that do not
-    exist), citations towards retired rules, rules with no perimeter, numbering
-    gaps, and REDUNDANCY CANDIDATES.
+    exist), and citations made by a rule IN FORCE towards one that is retired,
+    denied or still only proposed — plus rules with no perimeter and REDUNDANCY
+    CANDIDATES.
+
+    Those three buckets exist because the door can only judge a citation on the
+    day it is written: a rule is filed citing a proposal, and the proposal is
+    denied a week later. Nothing would ever say so. They count the SOURCE only
+    when it is in force, so a batch citing itself is not reported as a defect —
+    it is a batch.
 
     The candidates are a suspicion, not a verdict: two rules in force, in the
     same perimeter, citing the same IDs. The registry puts the pairs under your
     eyes — deciding they say the same thing is a judgement, and it stays
-    yours."""
+    yours.
+
+    There is no numbering-gap report any more, and that is a decision: the
+    number is assigned by the database, so a gap cannot happen — the counter
+    does not skip and retiring leaves the row in place. A check that cannot tell
+    a fault from a choice is a line you learn to skip."""
     _admin(code)
     return registry.check(project)
 
@@ -513,17 +573,22 @@ def rules_diff(project: str, id: str, version_a: int, version_b: int, code: str)
 
 
 @tool
-def rules_export(project: str, code: str, consumer: str = "") -> dict:
+def rules_export(project: str, code: str, consumer: str = "", expand: bool = False) -> dict:
     """MAINTENANCE. A Markdown snapshot, to be written into the vault with the
     archivist's write_file. Two uses:
       with `consumer`     only that perimeter, rules in force, widest first
       without `consumer`  the whole project, retired rules included — the
                           maintenance document, and the copy that goes into git
 
+    `expand` decides how citations read: compact `(VA-0002)` by default, or
+    carrying the current title of what they point at. This is the only reader
+    offered the choice, because it is read by a person — rules_list and rules_get
+    always expand, since a chat is not given an option it can get wrong.
+
     It is a DERIVATIVE: the truth stays in the database and this regenerates. Do
     not edit it and expect the registry to notice."""
     _admin(code)
-    return registry.export(project, consumer)
+    return registry.export(project, consumer, expand)
 
 
 @tool
@@ -644,5 +709,5 @@ if __name__ == "__main__":
              VERSION, PORT, BASE_URL, ALLOWED_LOGIN, describe_cidrs(ALLOWED_CIDRS),
              os.environ.get("FASTMCP_HOME", "(default — NOT persistent!)"),
              DB_PATH, os.geteuid(),
-             os.environ.get("WEB_PORT") or "off (planned for v1.1)")
+             os.environ.get("WEB_PORT") or "off (not built yet)")
     mcp.run(transport="http", host=os.environ.get("BIND_HOST", "127.0.0.1"), port=PORT)

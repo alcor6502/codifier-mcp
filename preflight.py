@@ -184,7 +184,7 @@ def c_schema():
     """Post-condition on what the engine says it needs — TABLES and TRIGGERS are
     imported, never retyped here. A list copied into a second file is a list that
     drifts, and this one would drift silently."""
-    from rules import TABLES, TRIGGERS
+    from rules import INDEXES, TABLES, TRIGGERS
     cx = sqlite3.connect(DB, timeout=10)
     try:
         present = {r[0] for r in cx.execute("SELECT name FROM sqlite_master")}
@@ -194,11 +194,13 @@ def c_schema():
     if "code" not in columns:
         raise RuntimeError("table `projects` has no `code` column: this database belongs to an "
                            "earlier schema. Recreate it, or migrate it, before starting.")
-    missing = [x for x in TABLES + TRIGGERS if x not in present]
+    missing = [x for x in TABLES + INDEXES + TRIGGERS if x not in present]
     if missing:
         raise RuntimeError(f"missing from the schema: {', '.join(missing)} — "
                            "the automatic repair did not work")
-    return f"{len(TABLES)} tables + {len(TRIGGERS)} triggers, all present"
+    return (f"{len(TABLES)} tables + {len(INDEXES)} unique "
+            f"{'index' if len(INDEXES) == 1 else 'indexes'} + "
+            f"{len(TRIGGERS)} triggers, all present")
 
 
 @check("writable")

@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-1.0.4-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-30%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-1.1.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-30%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -85,18 +85,56 @@ signature is ed25519 over the batch digest; the registry holds **only the public
 key**, so even with the database in hand nobody can manufacture an approval. The
 private half never enters a conversation — not by discipline, by construction.
 
-Denial needs no signature: refusing cannot do harm. And a denied rule's row
-stays, so the same idea cannot come back through a different chat in three
-weeks.
+Denial needs no signature: refusing cannot do harm. The denied row stays, with
+its reason, and `rules_pending` shows a chat its own refusals — so the same idea
+coming back through another chat in three weeks is something you can see,
+rather than something the registry can block.
+
+## The number is not yours to pick
+
+`rules_propose` takes the **domain**, not the ID: the registry assigns the next
+number in it, four digits, and hands it back. A number is not a choice, it is a
+position in a sequence — and whoever cannot pass it cannot pick it. Four digits
+because IDs are never reused, so a domain burns numbers even while only twenty
+rules are alive.
+
+There is no numbering-gap report, and that is the same decision seen from the
+other side: with a counter a gap cannot happen, so a report of one could only
+ever have meant somebody chose.
+
+## Citations are marked, checked, and expanded
+
+A citation is an ID in **round brackets**, `(VA-0002)`. An ordinary parenthesis
+is ordinary prose — what makes a token a citation is the shape `XX-NNNN`, not
+the bracket — so the vault's own `[[wiki links]]` stay free.
+
+At the door the registry refuses a bare ID left outside a bracket of its own
+(case does not save you), one that does not resolve, one pointing at a rule that
+is **not approved yet**, and any note of your own written inside the brackets —
+what is in there is not stored, and a registry that quietly dropped your words
+would be worse than one that refuses them. Only the domains the project declared
+are hunted, so a ticket number or a locale in a URL stays prose. That last is the one that shapes the work: file the cited
+rule, have it approved, then file the rule that cites it. The number of a
+proposal is not final until it is in, so a batch whose members cite each other
+can be approved into a state where its pointers were right only while they were
+being written.
+
+On the way out every citation carries the current title of what it points at:
+
+    (AL-0004)  →  (AL-0004 — alternative shares are not sold at a loss)
+
+The gloss is generated, never stored — what goes into the database is the bare
+pointer, which is why it cannot go stale — and a pointer at a retired rule
+arrives already marked as such, in the text.
 
 ## What it looks like
 
 ```
 rules_list(project="<code>", consumer="tax monitor")
 
-  VA-02  Re-read the sources         via _ALL_          breadth 7
-  PE-01  The method of the four      via deliberativi   breadth 4
-  FI-03  Estimating the bracket      via tax monitor    breadth 1
+  VA-0002  Re-read the sources       via _ALL_          breadth 7
+  PE-0001  The method of the four    via deliberativi   breadth 4
+  FI-0003  Estimating the bracket    via tax monitor    breadth 1
   ...
   38 rules in force · 132 outside your perimeter
 ```
@@ -157,10 +195,13 @@ and warns is a service whose warnings nobody reads.
 Three suites. No network, no FastMCP, no Docker.
 
 ```
-python3 test_collaudo.py    # 161 cases — the engine, refusals included
-python3 test_surface.py     # 185 cases — the seam, the image, the template, the signer
+python3 test_collaudo.py    # the engine, refusals included
+python3 test_surface.py     # the seam, the image, the template, the signer
 python3 test_crash.py       # SIGKILL mid-transaction, as Docker does
 ```
+
+Each suite prints its own count, and no file repeats it. A number written down
+in two places is two numbers, and this project has already paid for that once.
 
 `test_surface.py` reads the source rather than running it: every call into the
 engine must exist with a compatible signature, every tool that writes must pass
