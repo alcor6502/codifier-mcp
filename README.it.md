@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/versione-1.1.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-30%20tool-8A63D2.svg">
+<img src="https://img.shields.io/badge/versione-1.2.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-30%20tool-8A63D2.svg">
 
 **Le regole di un progetto in un registro invece che sparse nei Markdown — così
 una chat può rispondere in una chiamata a «sotto quali regole sto?».**
@@ -180,7 +180,14 @@ avvisa è un servizio di cui nessuno legge gli avvisi.
 ## Sicurezza
 
 - **OAuth 2.1 con GitHub, ristretto a un solo username.** È la porta d'ingresso.
-- **Filtro sull'IP sorgente** a ogni chiamata, sopra OAuth, non al suo posto.
+- **Filtro sull'IP sorgente**, sopra OAuth e non al suo posto. Tutti e due i
+  controlli scattano a ogni richiesta MCP, handshake compreso — non solo sulle
+  chiamate ai tool. OAuth ferma chi non è autenticato, non chi si autentica col
+  proprio account GitHub, e fino alla 1.1 compresa un estraneo così poteva
+  comunque elencare ogni tool con la sua descrizione. Nessuna regola è mai
+  uscita, ma la forma della superficie sì. Nessuno dei due controlli copre le
+  rotte OAuth: un estraneo fuori dagli intervalli ammessi può completare il
+  login lo stesso. Quello che non può fare è parlare MCP.
 - **Il codice di manutenzione viaggia a ogni chiamata** che scrive: nessuna
   sessione, quindi nessuna modalità rimasta aperta per sbaglio. Leggere le
   proprie regole e depositare una proposta sono gratis — una chat di lavoro il

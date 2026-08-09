@@ -29,7 +29,13 @@ Configuration, all through environment variables:
   BASE_URL                public URL (e.g. https://host.tailnet.ts.net)
   GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET / ALLOWED_GITHUB_LOGIN / JWT_SIGNING_KEY
   PORT                    default 3001
-  LOG_LEVEL               default INFO — ours only, never the root logger
+  BIND_HOST               the interface inside the container, default 127.0.0.1:
+                          legitimate traffic comes from the Funnel, which runs
+                          alongside. 0.0.0.0 exposes the service to the LAN
+  LOG_LEVEL               INFO or WARNING (default INFO) — ours only, never the
+                          root logger. Anything else falls back to INFO and says
+                          so: there are no debug lines to switch on, and above
+                          WARNING the gate's refusals disappear
   ALLOWED_CIDRS           accepted ranges, ';' between entries and '#' opening a
                           description. Empty string disables the filter
   ANTHROPIC_CIDR          DEPRECATED, still honoured: see ALLOWED_CIDRS
@@ -53,7 +59,7 @@ from fastmcp.server.auth.providers.github import GitHubProvider
 from fastmcp.server.dependencies import get_access_token, get_http_request
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
-from preflight import cidrs_from_env, describe_cidrs
+from preflight import cidrs_from_env, describe_cidrs, log_level_from_env
 from rules import Registry, RulesError, VERSION
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
@@ -62,7 +68,15 @@ from rules import Registry, RulesError, VERSION
 logging.basicConfig(level=logging.WARNING,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("codifier-mcp")
-log.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+# Resolved in preflight.log_level_from_env for the same reason as the IP filter:
+# one expression, so the service and the preflight cannot disagree. The list is
+# closed to INFO and WARNING there — and closed in the CODE, not only in the
+# template's dropdown, because a container built by hand has no template.
+_LEVEL, _REJECTED = log_level_from_env()
+log.setLevel(_LEVEL)
+if _REJECTED:
+    # Said out loud, and at WARNING so it survives the level it is reporting on.
+    log.warning("LOG_LEVEL=%r is not INFO or WARNING — using INFO", _REJECTED)
 
 # uvicorn's access log is one line per request. Left on, it slowly becomes a
 # record of who asked what and when — and the arguments here are project codes.
@@ -168,16 +182,60 @@ def tool(fn):
 
 class Gate(Middleware):
     """Two filters, before anything else: the GitHub identity and the source IP.
-    The XFF header is filled in by the Funnel, which is the trusted proxy."""
+    The XFF header is filled in by the Funnel, which is the trusted proxy.
+
+    It hooks `on_request`, which covers the MCP requests FastMCP routes —
+    `initialize` and `tools/list` as much as `tools/call`, and the resource and
+    prompt listings with them. Until v1.2 it hooked `on_call_tool`, and the hole
+    that left was narrow but real: OAuth stops
+    whoever is not authenticated, not whoever authenticates with their OWN
+    GitHub account. Such a stranger got a valid token, and with it `tools/list`:
+    every `rules_*` tool with its description. Each call was refused, so no rule
+    and no project code ever left — but the SHAPE of the surface did, and a
+    surface that can be enumerated is one that can be studied.
+
+    Not `on_message`, which is one level wider: it also covers NOTIFICATIONS —
+    `initialized`, `cancelled`, `progress`. Those are fire-and-forget, they carry
+    no id and expect no answer, so raising there has no channel to deliver the
+    refusal on. It buys undefined behaviour in exchange for no surface at all,
+    because a notification returns nothing. The right level is the narrowest one
+    with DEFINED behaviour, which is not the narrowest one there is.
+
+    Two things it does NOT cover, established by experiment on 3.4.5 rather than
+    assumed, and worth knowing before anyone concludes from the log that the
+    door is wider than it is. `ping` and `logging/setLevel` are answered by the
+    SDK's own default handlers and never reach a middleware at all: a stranger
+    refused at `initialize` still receives a session id and can keep those two
+    alive, silently — they read nothing, which is why this is a note and not a
+    hole. And a `tools/call` on a fresh session is refused while FastMCP is
+    resolving the tool, so the line that comes out says `tools/list`: the method
+    names the message the gate saw, which is not always the one the caller sent.
+
+    The refusals are LOGGED, with the method, and that is not decoration. Once
+    the gate covers the handshake, a refused stranger and a broken deployment
+    produce the same symptom at the client: "the connector will not connect".
+    The log line is the only thing that tells the two apart.
+
+    The refusal itself is still a plain ValueError, which FastMCP does not turn
+    into a designed refusal at handshake time: the client sees `-32602 Invalid
+    request parameters`. It is the same defect the tool decorator above exists
+    to fix, one layer down, and it is not fixed here because the twin's gate is
+    identical and the two must not drift. See `Decisioni aperte`."""
+
+    HOOK = "on_request"   # pinned by a static check in test_surface.py: a typo
+                          # here does not fail, it disables the gate in silence,
+                          # because the base class ships a pass-through default
+                          # for every hook name that does exist.
 
     def __init__(self) -> None:
         self.nets = [ipaddress.ip_network(c) for c, _ in ALLOWED_CIDRS]
 
-    async def on_call_tool(self, ctx: MiddlewareContext, call_next):
+    async def on_request(self, ctx: MiddlewareContext, call_next):
         tok = get_access_token()
         login = (tok.claims.get("login") if tok and tok.claims else None)
         if login != ALLOWED_LOGIN:
-            log.warning("refused: GitHub login %r is not %r", login, ALLOWED_LOGIN)
+            log.warning("refused %s: GitHub login %r is not %r",
+                        ctx.method, login, ALLOWED_LOGIN)
             raise ValueError("user not authorised")
         if self.nets:
             req = get_http_request()
@@ -188,7 +246,8 @@ class Gate(Middleware):
                 if ip is None or not any(ip in n for n in self.nets):
                     raise ValueError("origin not allowed")
             except ValueError:
-                log.warning("refused: source %r outside the allowed ranges", src)
+                log.warning("refused %s: source %r outside the allowed ranges",
+                            ctx.method, src)
                 raise ValueError("origin not allowed")
         return await call_next(ctx)
 
@@ -704,10 +763,15 @@ def rules_backup(code: str) -> dict:
 
 
 if __name__ == "__main__":
-    log.info("codifier-mcp %s — starting on 127.0.0.1:%s — base_url %s — allowed user: %s "
+    # The host is READ, not spelled out again: this line is what you look at to
+    # confirm an update took, and BIND_HOST is the one field on it where being
+    # wrong matters — 0.0.0.0 exposes the service to the LAN, and a startup line
+    # that keeps saying 127.0.0.1 would be lying about exactly that.
+    _HOST = os.environ.get("BIND_HOST", "127.0.0.1")
+    log.info("codifier-mcp %s — starting on %s:%s — base_url %s — allowed user: %s "
              "— IP filter: %s — token store: %s — db: %s (process uid %s) — web UI: %s",
-             VERSION, PORT, BASE_URL, ALLOWED_LOGIN, describe_cidrs(ALLOWED_CIDRS),
+             VERSION, _HOST, PORT, BASE_URL, ALLOWED_LOGIN, describe_cidrs(ALLOWED_CIDRS),
              os.environ.get("FASTMCP_HOME", "(default — NOT persistent!)"),
              DB_PATH, os.geteuid(),
              os.environ.get("WEB_PORT") or "off (not built yet)")
-    mcp.run(transport="http", host=os.environ.get("BIND_HOST", "127.0.0.1"), port=PORT)
+    mcp.run(transport="http", host=_HOST, port=PORT)

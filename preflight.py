@@ -9,7 +9,9 @@ and three of them were wrong. Where the count needs mentioning, the true thing
 to say is that they are all blocking.
 
 Shared with the twin (archivist-mcp): oauth · token_store · funnel · node_key ·
-cidrs · public_dns, and the placeholder and CIDR helpers.
+cidrs · public_dns, and the placeholder, CIDR and log-level helpers. The helpers
+live here rather than in server.py because they must be readable without
+importing FastMCP — which is what lets the suites exercise them.
 
 Its own, because this service keeps a database instead of files:
   db          it opens, it is whole, it is in WAL
@@ -121,6 +123,52 @@ def cidrs_from_env() -> list[tuple[str, str]]:
     if raw is None:
         raw = DEFAULT_CIDRS
     return parse_cidrs(raw)
+
+
+LOG_LEVELS = ("INFO", "WARNING")
+# WARN is not a typo: Python's logging module defines it as an alias of WARNING
+# and setLevel("WARN") does not raise. Whoever writes it wants LESS noise, so
+# falling back to INFO would give them MORE — the one value outside the list
+# where the intention is unambiguous and the fallback would go the wrong way.
+_ALIASES = {"WARN": "WARNING"}
+
+
+def log_level_from_env() -> tuple[str, str | None]:
+    """The log level as configured, resolved in ONE place only, so the service
+    and anything else that needs to know read the same expression rather than
+    two that agree today. (Unlike cidrs_from_env, which is also reported by a
+    preflight check, this one currently has a single caller: server.py. It lives
+    here because it is the same KIND of thing, not because the preflight prints
+    it — it does not.)
+
+    Returns the level to use and, when the value had to be corrected, the value
+    that was given, so the caller can say so out loud. A knob that ignores you
+    in silence is how you get accused of having broken it. An ABSENT or empty
+    value is not a correction and is not reported: not choosing is not the same
+    gesture as choosing wrong.
+
+    Why correct instead of raising: logging.setLevel() raises on an unknown
+    level, and it runs at IMPORT — that is, AFTER the preflight has printed a
+    clean sheet. It is the worst place in the whole startup for a typo to land:
+    every check says fine and the container dies immediately afterwards. The
+    template offers a closed dropdown, but a container built by hand has no
+    template at all, and the field is optional — "defined and empty" is a
+    gesture people actually make.
+
+    The list is closed at INFO and WARNING because the two ends are closed for
+    different reasons. Below INFO there is nothing to switch on: this code
+    contains no debug-level call at all, so DEBUG behaves exactly like INFO,
+    and a knob that does nothing gets read as a knob that is broken. Above
+    WARNING the gate's refusals disappear, and since v1.2 the gate covers the
+    handshake — that line is the only thing separating a stranger turned away
+    from a broken deployment."""
+    given = os.environ.get("LOG_LEVEL", "").strip().upper()
+    if not given:
+        return "INFO", None
+    resolved = _ALIASES.get(given, given)
+    if resolved in LOG_LEVELS:
+        return resolved, None
+    return "INFO", given
 
 
 def describe_cidrs(parsed: list[tuple[str, str]]) -> str:

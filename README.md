@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-1.1.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-30%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-1.2.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-30%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -177,7 +177,14 @@ and warns is a service whose warnings nobody reads.
 ## Security
 
 - **OAuth 2.1 with GitHub, restricted to one username.** That is the front door.
-- **Source IP filter** on every call, on top of OAuth, not instead of it.
+- **Source IP filter**, on top of OAuth and not instead of it. Both checks run
+  on every MCP request, the handshake included — not only on tool calls. OAuth
+  stops whoever is not authenticated; it does not stop whoever authenticates
+  with their own GitHub account, and up to and including v1.1 such a stranger
+  could still list every tool with its description. No rule ever left, but the
+  shape of the surface did. Note that neither check covers the OAuth routes
+  themselves: a stranger outside the allowed ranges can still complete a login.
+  What they cannot do is speak MCP.
 - **The maintenance code travels on every call** that writes: no session, so no
   mode is left open by accident. Reading your own rules and filing a proposal
   are both free — a working chat never needs the code.

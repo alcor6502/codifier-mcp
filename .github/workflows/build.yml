@@ -33,6 +33,30 @@ jobs:
       - run: python3 test_surface.py
       - run: python3 test_crash.py
 
+      # This repository paid for it in v1.0.2: the tag said one thing and the
+      # constant another, so the service came up, answered, and reported the
+      # previous version. Nothing was broken — but the single line a deployment
+      # is verified by was a lie, which is worse than a fault that announces
+      # itself. The twin wrote this step because of us, and it took until v1.2
+      # to come back here. From v1.2 the line matters more: it is what the Log
+      # Level field points at as the proof that an update actually took.
+      #
+      # VERSION lives in rules.py, not in server.py as it does in the twin: the
+      # engine is what the suites import, and the server is what imports the
+      # engine.
+      #
+      # Only on a tag: workflow_dispatch has no version to compare against.
+      - name: the version constant matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          code=$(python3 -c "import re,pathlib; print(re.search(r'^VERSION = \"([^\"]+)\"', pathlib.Path('rules.py').read_text(), re.M).group(1))")
+          echo "tag: $tag — rules.py: $code"
+          if [ "$tag" != "$code" ]; then
+            echo "::error::tag $tag but rules.py says $code — bump VERSION before tagging"
+            exit 1
+          fi
+
   image:
     needs: test
     runs-on: ubuntu-latest

@@ -297,6 +297,105 @@ for tool in TOOLS:
     doc = ast.get_docstring(tool) or ""
     ok(len(doc.strip()) >= 40, f"{tool.name} has a docstring worth reading", f"{len(doc)} chars")
 
+print("\n== the Gate is wired to the hook it says it is ==")
+
+# The Gate is wired by NAMING a hook, and that is the whole danger: the
+# Middleware base class ships a pass-through default for every hook it knows,
+# so `on_requst` — one letter short — is not an error. It is a method nobody
+# ever calls, and the gate is OFF. Nothing fails, nothing logs, and the server
+# answers a stranger. No runtime test would notice, because the suites never
+# build a FastMCP server — which is exactly the property that lets them run
+# without network, Docker or OAuth, and it is not one to give up. So this reads
+# the source.
+#
+# Two different things are pinned here. HOOK pins the DECISION: `on_request`,
+# chosen in v1.2 over the narrower `on_call_tool` (which left the handshake
+# open, so a stranger with their own GitHub account could enumerate the tools)
+# and over the wider `on_message` (which also covers notifications, where
+# raising has no channel to answer on). The method set pins the WIRING, and it
+# is the one that catches the typo. Changing the decision means changing this
+# test too, deliberately — which is the point.
+GATE = next((n for n in SERVER_TREE.body
+             if isinstance(n, ast.ClassDef) and n.name == "Gate"), None)
+ok(GATE is not None, "server.py defines the Gate middleware")
+
+if GATE is not None:
+    # Without the base class there is no __call__ and no dispatch, so no hook
+    # is ever invoked whatever it is called. The failure is loud rather than
+    # silent, but it is one line of AST away from being caught here.
+    ok(any(ast.unparse(b) == "Middleware" for b in GATE.bases),
+       "the Gate subclasses Middleware, which is what makes a hook a hook",
+       [ast.unparse(b) for b in GATE.bases])
+
+    # ALL the assignments, not the first one. A second `HOOK = ...` underneath
+    # is what wins at runtime, and reading only the first would report the one
+    # that does not.
+    _assigned = [s.value.value for s in GATE.body
+                 if isinstance(s, ast.Assign)
+                 and any(getattr(t, "id", "") == "HOOK" for t in s.targets)
+                 and isinstance(s.value, ast.Constant)]
+    _declared = _assigned[-1] if _assigned else None
+    ok(_assigned == ["on_request"],
+       "Gate.HOOK pins the decision: on_request, assigned exactly once", _assigned)
+
+    _hooks = {n.name for n in GATE.body
+              if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+              and n.name.startswith("on_")}
+    ok(_hooks == {_declared}, "the Gate hooks exactly what HOOK names", sorted(_hooks))
+
+    # The wiring can be perfect and the gate still open: one `return await
+    # call_next(ctx)` moved to the top of the hook lets everything through and
+    # leaves the rest of the body unreachable. That is precisely the shape of
+    # an edit made while chasing something else. So: call_next appears once,
+    # and it is the LAST statement of the hook.
+    _hook_fn = next((n for n in GATE.body
+                     if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+                     and n.name == _declared), None)
+    if _hook_fn is None:
+        ok(False, "the hook the Gate names is a method of the Gate", _declared)
+    else:
+        _passes = [n for n in ast.walk(_hook_fn) if isinstance(n, ast.Call)
+                   and ast.unparse(n.func) == "call_next"]
+        ok(len(_passes) == 1, "the hook lets a request through in ONE place",
+           len(_passes))
+        _last = _hook_fn.body[-1]
+        ok(isinstance(_last, ast.Return) and any(
+            isinstance(n, ast.Call) and ast.unparse(n.func) == "call_next"
+            for n in ast.walk(_last)),
+           "and it is the last thing it does — an early return is an open gate",
+           ast.unparse(_last)[:60])
+
+    # Read from the AST, not by searching the text. A substring search is
+    # satisfied by `#mcp.add_middleware(Gate())` — the check would go on passing
+    # over a gate that somebody had commented out while chasing something else,
+    # which is the single most likely way for this line to disappear. The AST
+    # does not see comments at all. (Found by injecting exactly that defect: the
+    # first version of this check, copied from the twin, stayed green.)
+    ok(any(isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+           and ast.unparse(n.value.func) == "mcp.add_middleware"
+           and any(isinstance(a, ast.Call) and ast.unparse(a.func) == "Gate"
+                   for a in n.value.args)
+           for n in SERVER_TREE.body),
+       "the Gate is actually registered, at module level")
+
+    # A refused stranger and a broken deployment look identical at the client:
+    # "the connector will not connect". The log line is the only thing that
+    # tells them apart, so it is part of the contract, not of the comfort — and
+    # the method is what says which message was turned away.
+    #
+    # From the AST, for the third time in this section and for the same reason.
+    # Counting "log.warning" in the source text is satisfied by a comment
+    # saying `# TODO restore the log.warning lines`: both calls can be deleted
+    # and the check stays green. That was demonstrated, not imagined.
+    _warns = [n for n in ast.walk(GATE) if isinstance(n, ast.Call)
+              and ast.unparse(n.func) == "log.warning"]
+    ok(len(_warns) >= 2, "both refusals are logged, identity and origin", len(_warns))
+    _named = [w for w in _warns
+              if any(ast.unparse(a) == "ctx.method" for a in w.args)]
+    ok(len(_named) == len(_warns) and _named,
+       "and each refusal names the method it turned away",
+       f"{len(_named)} of {len(_warns)}")
+
 print("\n== the Dockerfile carries the cures that live in the environment ==")
 
 # These four settings are read when fastmcp is IMPORTED, so they cannot live in
@@ -324,6 +423,20 @@ for f in ("rules.py", "server.py", "preflight.py", "entrypoint.sh", "reference-g
     ok(any(re.search(rf"\b{re.escape(f)}\b", l) for l in DOCKER_COPIES),
        f"Dockerfile: {f} is copied in")
 ok(not any("test_" in l for l in DOCKER_COPIES), "Dockerfile: no test file is copied in")
+
+# What starts the container, and it is checked in two files at once because it
+# only works if the two agree. The Dockerfile has a CMD and no ENTRYPOINT; the
+# template's Post Arguments field is EMPTY, because Unraid appends that field
+# after the image name — as the command — and it would replace the CMD with a
+# bare `entrypoint.sh` that PATH cannot resolve, since /app is WORKDIR and not
+# PATH. The template carried `entrypoint.sh` there until v1.2. The one road
+# that would have met it is a fresh install from the template, which is the
+# least travelled road there is, and the one you take on the day you are
+# rebuilding after losing something.
+ok(re.search(r"^CMD \[", DOCKERFILE, re.MULTILINE) is not None,
+   "Dockerfile: a CMD is what starts the container")
+ok(re.search(r"^ENTRYPOINT", DOCKERFILE, re.MULTILINE) is None,
+   "Dockerfile: and no ENTRYPOINT, so the CMD is the whole command line")
 
 # reference_guide is a tool that reads a file. Without the file it would answer
 # with an error, and the failure would surface in a chat rather than here.
@@ -456,6 +569,26 @@ except subprocess.TimeoutExpired:
     ok(False, "without cryptography it says how to fix it, in two commands",
        "it hung — the re-exec is looping")
 
+print("\n== the version is written in one place and copied nowhere ==")
+
+# VERSION lives in rules.py and the CI compares it with the tag. The badges in
+# the two READMEs are hand copies of it, and nothing tied them to anything:
+# setting VERSION to 9.9.9 left the whole suite green. The number that appears
+# in the startup line is now what the Log Level field points at as the proof
+# that an update took, so a README claiming a different one is a second answer
+# to a question that must have one.
+from rules import VERSION as _V                                 # noqa: E402
+
+for _readme, _label in (("README.md", "version"), ("README.it.md", "versione")):
+    _txt = source(os.path.join(HERE, _readme))
+    _badges = re.findall(rf"badge/{_label}-([0-9]+\.[0-9]+\.[0-9]+)-", _txt)
+    ok(_badges == [_V], f"{_readme}: the version badge says {_V}", _badges)
+
+_STRAY = [f for f in ("server.py", "preflight.py", "sign.py", "Dockerfile",
+                      "entrypoint.sh", "codifier-mcp.xml")
+          if re.search(r"^VERSION\s*=", source(os.path.join(HERE, f)), re.MULTILINE)]
+ok(not _STRAY, "no second file declares a VERSION of its own", _STRAY)
+
 print("\n== the template is publishable ==")
 
 TEMPLATE_PATH = os.path.join(HERE, "codifier-mcp.xml")
@@ -474,6 +607,14 @@ ok("<Icon>" in TEMPLATE and os.path.exists(os.path.join(HERE, "codifier-icon.png
    "is the twin's oldest open item")
 ok("<WebUI/>" in TEMPLATE,
    "no WebUI: the service listens on 127.0.0.1 and has no web interface")
+
+# The empty ELEMENT, not the deleted element: <PostArgs/> is what Unraid writes
+# by itself for a field nobody filled in, every container in service has it,
+# and keeping the same shape stops the published template and one passed through
+# the interface from drifting apart. See the Dockerfile section for why the
+# field must stay empty.
+ok("<PostArgs/>" in TEMPLATE,
+   "Post Arguments is empty, and present: the CMD is enough on its own")
 
 # Unraid does not propagate new variables to containers already installed, so a
 # variable introduced later means editing every existing install by hand. These
@@ -541,6 +682,93 @@ ok(pf.cidrs_from_env() == [("10.0.0.0/8", "")],
 os.environ.pop("ANTHROPIC_CIDR")
 ok(pf.cidrs_from_env() == pf.parse_cidrs(pf.DEFAULT_CIDRS),
    "neither defined: the documented egress range")
+
+print("\n== LOG_LEVEL: a closed list, and it says what it rejected ==")
+
+# setLevel() raises on an unknown level, and it runs at IMPORT — after the
+# preflight has printed a clean sheet. So the one way to get a container that
+# dies in a loop with no useful message was to leave the optional LOG_LEVEL
+# field empty, which the dropdown does not prevent and a hand-built container
+# has no dropdown for at all.
+#
+# Both directions. The two real levels survive untouched, and everything else
+# falls back to INFO while REPORTING what it rejected. The reporting is the
+# half worth testing: a knob that ignores you in silence is how you get told
+# the feature is broken.
+for value, expect_level, expect_rejected in (
+        (None, "INFO", None),          # not defined at all
+        ("", "INFO", None),            # defined and empty: the crash case
+        ("   ", "INFO", None),         # whitespace only
+        ("INFO", "INFO", None),
+        ("WARNING", "WARNING", None),
+        ("warning", "WARNING", None),  # case is typography, not intent
+        (" info ", "INFO", None),
+        ("DEBUG", "INFO", "DEBUG"),    # inert here: there are no debug lines
+        ("ERROR", "INFO", "ERROR"),    # would silence the gate's refusals
+        ("CRITICAL", "INFO", "CRITICAL"),
+        ("NOTSET", "INFO", "NOTSET"),  # a real level, and it means "ask my parent"
+        ("50", "INFO", "50"),          # setLevel accepts ints, not their strings
+        ("WARN", "WARNING", None),     # Python's own alias, not a typo: honoured
+        ("warn", "WARNING", None),
+        ("INF0", "INFO", "INF0")):
+    _old = os.environ.pop("LOG_LEVEL", None)
+    try:
+        if value is not None:
+            os.environ["LOG_LEVEL"] = value
+        got = pf.log_level_from_env()
+        ok(got == (expect_level, expect_rejected),
+           f"LOG_LEVEL={value!r} -> {expect_level}"
+           + (f", rejecting {expect_rejected!r}" if expect_rejected else ""), got)
+    finally:
+        os.environ.pop("LOG_LEVEL", None)
+        if _old is not None:
+            os.environ["LOG_LEVEL"] = _old
+
+# DEBUG is listed as inert above, and that claim has to stay true: the day
+# somebody adds a .debug() line, the closed list silently starts hiding output
+# instead of merely not producing any.
+for _f in ("server.py", "rules.py", "preflight.py", "sign.py"):
+    _src = source(os.path.join(HERE, _f))
+    ok(".debug(" not in _src,
+       f"{_f} contains no .debug() — which is why DEBUG is inert, not offered")
+
+# The service must go through the helper and not read the variable itself: two
+# expressions that agree today are two expressions, and the one that used to be
+# here — setLevel(os.environ.get("LOG_LEVEL", "INFO").upper()) — is the crash
+# this version removes. From the AST, because a substring search for
+# 'os.environ.get("LOG_LEVEL"' is walked around by os.getenv, by single quotes,
+# or by a subscript. All three were tried, and all three stayed green.
+_READS = [n for n in ast.walk(SERVER_TREE)
+          if (isinstance(n, ast.Call)
+              and ast.unparse(n.func) in ("os.environ.get", "os.getenv")
+              and n.args and isinstance(n.args[0], ast.Constant)
+              and n.args[0].value == "LOG_LEVEL")
+          or (isinstance(n, ast.Subscript) and ast.unparse(n.value) == "os.environ"
+              and isinstance(n.slice, ast.Constant) and n.slice.value == "LOG_LEVEL")]
+ok(not _READS, "server.py does not read LOG_LEVEL on its own — it comes from the "
+   "helper", [ast.unparse(n) for n in _READS])
+
+# And it must USE what the helper returned. Both halves: the level, and the
+# report of what was rejected — the report is the half worth testing, because a
+# knob that ignores you in silence is how you get accused of having broken it.
+_SETS = [n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
+         and ast.unparse(n.func) == "log.setLevel"]
+ok(len(_SETS) == 1 and ast.unparse(_SETS[0]) == "log.setLevel(_LEVEL)",
+   "the level set on our logger is the one the helper resolved",
+   [ast.unparse(n) for n in _SETS])
+ok(any(isinstance(n, ast.If) and ast.unparse(n.test) == "_REJECTED"
+       and any(isinstance(c, ast.Call) and ast.unparse(c.func) == "log.warning"
+               for c in ast.walk(n))
+       for n in SERVER_TREE.body),
+   "and a rejected value is said out loud, at WARNING so it survives itself")
+
+# The dropdown is the other half of closing the list, and it is the half a
+# person actually sees. Unraid renders a pipe-separated Default as a menu.
+ok('Target="LOG_LEVEL"' in TEMPLATE and 'Default="INFO|WARNING"' in TEMPLATE,
+   "the template offers the closed list as a dropdown, not free text")
+for _dead in ("DEBUG, INFO, WARNING, ERROR", "DEBUG, INFO, WARNING and ERROR"):
+    ok(_dead not in TEMPLATE,
+       f"the template no longer offers the inert value: {_dead!r}")
 
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
