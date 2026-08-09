@@ -39,6 +39,7 @@ Configuration, all through environment variables:
 """
 from __future__ import annotations
 
+import functools
 import ipaddress
 import logging
 import os
@@ -112,37 +113,50 @@ auth = GitHubProvider(
 mcp = FastMCP("codifier-mcp", auth=auth)
 
 
-class TalkingErrors(Middleware):
-    """A refusal is not a fault, and the log has to be able to tell them apart.
+def tool(fn):
+    """Register a tool, and turn its refusals into something the log can tell
+    apart from a fault.
 
     Every error this engine raises is a RulesError, and every RulesError is
     DESIGNED: a wrong project code, a stale version, a signature that does not
     match. Left as a plain exception, FastMCP logs each one through
     logger.exception — thirty lines of traceback through anyio and pydantic,
-    identical in shape to a real fault. After a week of that, nobody reads the
-    tracebacks, and the day something genuinely breaks the message looks like
-    all the others.
+    shaped exactly like a real fault. After a week of those, nobody reads
+    tracebacks any more, and the next genuine fault arrives disguised as
+    routine. The thread-pool defect was caught precisely because its traceback
+    stood out.
 
-    Re-raised as ToolError it becomes ONE line at INFO, because FastMCP logs
-    FastMCPError with exc_info=False and at the level the exception carries.
-    What still arrives as a traceback at ERROR is what deserves one: a bug.
-    That is how the thread-pool defect announced itself, and it should stay
-    that loud.
+    Raised as ToolError it becomes ONE line, at the level the exception
+    carries: FastMCP logs FastMCPError with exc_info=False. A bug still gets
+    the full traceback at ERROR, which is what a bug deserves.
 
-    There is a second reason, and it is not cosmetic. A plain exception is
-    subject to FastMCP's error masking, so the day that default flips, every
-    talking error this project spent its care on would reach the chat as "an
-    error occurred". ToolError messages are passed through by contract.
+    THE TRAP, and it cost an hour: doing this in a Middleware does not work.
+    call_tool applies the middleware chain OUTSIDE and logs INSIDE — the outer
+    call delegates to itself with run_middleware=False, and that inner call is
+    where the try/except lives. By the time a middleware sees the exception,
+    logger.exception has already run. The conversion has to happen inside the
+    tool function, which is here.
 
-    The conversion lives HERE and not in rules.py on purpose: the engine must
-    stay importable without FastMCP, which is what lets the suites run with no
-    network, no server and no OAuth provider."""
+    A second reason, not cosmetic: a plain exception is subject to FastMCP's
+    error masking, so the day that default flips, every talking error this
+    project spent its care on would reach the chat as "an error occurred".
+    ToolError messages are passed through by contract.
 
-    async def on_call_tool(self, ctx: MiddlewareContext, call_next):
+    functools.wraps is what keeps the MCP contract intact — name, docstring and
+    signature are what FastMCP builds the schema from, and it follows
+    __wrapped__. Verified against fastmcp 3.4.5: the parameter types, defaults
+    and required list come out identical.
+
+    The conversion lives HERE and never in rules.py: the engine must stay
+    importable without FastMCP, which is what lets the suites run with no
+    network, no server and no OAuth provider. test_surface checks that."""
+    @functools.wraps(fn)
+    def guarded(*args, **kwargs):
         try:
-            return await call_next(ctx)
+            return fn(*args, **kwargs)
         except RulesError as e:
             raise ToolError(str(e), log_level=logging.INFO) from None
+    return mcp.tool(guarded)
 
 
 class Gate(Middleware):
@@ -172,7 +186,6 @@ class Gate(Middleware):
         return await call_next(ctx)
 
 
-mcp.add_middleware(TalkingErrors())
 mcp.add_middleware(Gate())
 
 _GUIDE = Path(__file__).with_name("reference-guide.md")
@@ -199,7 +212,7 @@ def _admin(code: str) -> None:
 # Reading — open to every consumer
 # =====================================================================
 
-@mcp.tool
+@tool
 def rules_project_info(project: str) -> dict:
     """What is inside the project whose code you hold: the CONSUMERS that exist,
     the SCOPES with who is in them, and the DOMAINS of the IDs. Call this first
@@ -212,7 +225,7 @@ def rules_project_info(project: str) -> dict:
     return registry.project_info(project)
 
 
-@mcp.tool
+@tool
 def reference_guide() -> dict:
     """The manual for this registry: the model, what a consumer and a scope are,
     the life of a rule from proposal to retirement, which tool for which job, and
@@ -223,7 +236,7 @@ def reference_guide() -> dict:
         raise RulesError(f"guide not available in the image: {e}")
 
 
-@mcp.tool
+@tool
 def rules_list(project: str, consumer: str) -> dict:
     """EVERY rule in force for you, in ONE call: pass the project CODE and your
     own consumer name, and you get them whole, ordered from the most widespread
@@ -246,7 +259,7 @@ def rules_list(project: str, consumer: str) -> dict:
     return registry.list_rules(project, consumer)
 
 
-@mcp.tool
+@tool
 def rules_get(project: str, ids: list[str], consumer: str) -> dict:
     """One or MANY rules by ID (e.g. ["VA-02","ST-11"]; the type suffix is
     tolerated, but the correct citation is bare).
@@ -262,7 +275,7 @@ def rules_get(project: str, ids: list[str], consumer: str) -> dict:
     return registry.get_rules(project, ids, consumer)
 
 
-@mcp.tool
+@tool
 def rules_search(project: str, text: str, consumer: str) -> dict:
     """Search a string in the title and body of the rules in force within your
     perimeter. It also says how many matches fell outside it, so you know they
@@ -270,7 +283,7 @@ def rules_search(project: str, text: str, consumer: str) -> dict:
     return registry.search(project, text, consumer)
 
 
-@mcp.tool
+@tool
 def rules_pending(project: str, consumer: str = "") -> dict:
     """Your noticeboard: the proposals of yours still waiting, the ones that were
     DENIED with the reason why, and your rules expiring within 30 days.
@@ -286,7 +299,7 @@ def rules_pending(project: str, consumer: str = "") -> dict:
 # Proposing — no admin code: a proposal reaches nobody
 # =====================================================================
 
-@mcp.tool
+@tool
 def rules_propose(project: str, id: str, type: str, title: str, body: str,
                   scopes: list[str], reason: str, proposed_by: str = "",
                   changelog: str = "", source: str = "") -> dict:
@@ -311,7 +324,7 @@ def rules_propose(project: str, id: str, type: str, title: str, body: str,
 # Approving — the admin code, and a signature over the batch
 # =====================================================================
 
-@mcp.tool
+@tool
 def rules_batch(project: str, code: str) -> dict:
     """MAINTENANCE. The pending proposals, whole, plus the DIGEST of the batch.
 
@@ -328,7 +341,7 @@ def rules_batch(project: str, code: str) -> dict:
     return registry.batch(project)
 
 
-@mcp.tool
+@tool
 def rules_approve(project: str, digest: str, code: str, signature: str = "") -> dict:
     """MAINTENANCE. Approve the whole batch: the proposals become ACTIVE and
     PROVISIONAL, with an expiry date.
@@ -344,7 +357,7 @@ def rules_approve(project: str, digest: str, code: str, signature: str = "") -> 
     return registry.approve(project, digest, signature)
 
 
-@mcp.tool
+@tool
 def rules_deny(project: str, ids: list[str], reason: str, code: str) -> dict:
     """MAINTENANCE. Refuse one or more proposals, with a reason. No signature is
     asked for: refusing cannot do harm.
@@ -357,7 +370,7 @@ def rules_deny(project: str, ids: list[str], reason: str, code: str) -> dict:
     return registry.deny(project, ids, reason)
 
 
-@mcp.tool
+@tool
 def rules_renew(project: str, ids: list[str], code: str,
                 signature: str = "", days: int = 0) -> dict:
     """MAINTENANCE. Push the expiry of provisional rules forward. Signed, because
@@ -369,7 +382,7 @@ def rules_renew(project: str, ids: list[str], code: str,
     return registry.renew(project, ids, signature, days)
 
 
-@mcp.tool
+@tool
 def rules_promote(project: str, ids: list[str], code: str, signature: str = "") -> dict:
     """MAINTENANCE. From provisional to PERMANENT: no expiry, it never leaves on
     its own again. Rare, deliberate, and signed.
@@ -384,7 +397,7 @@ def rules_promote(project: str, ids: list[str], code: str, signature: str = "") 
 # Maintaining rules
 # =====================================================================
 
-@mcp.tool
+@tool
 def rules_fix(project: str, id: str, expected_version: int, reason: str, code: str,
               title: str = "", body: str = "", type: str = "", changelog: str = "") -> dict:
     """MAINTENANCE. Fix a DEFECT in place: a wrong number, a broken pointer, a
@@ -403,7 +416,7 @@ def rules_fix(project: str, id: str, expected_version: int, reason: str, code: s
                           title or None, body or None, type or None, changelog or None)
 
 
-@mcp.tool
+@tool
 def rules_widen(project: str, id: str, scopes: list[str], code: str, reason: str = "") -> dict:
     """MAINTENANCE. Make a rule ALSO reach somebody else: one more row, and the
     scope it already belonged to is not touched — that scope has other tenants
@@ -416,7 +429,7 @@ def rules_widen(project: str, id: str, scopes: list[str], code: str, reason: str
     return registry.widen(project, id, scopes, reason)
 
 
-@mcp.tool
+@tool
 def rules_narrow(project: str, id: str, scopes: list[str], code: str) -> dict:
     """MAINTENANCE. Stop a rule reaching a scope. Symmetric to rules_widen: one
     row less. If it ends up with no scope at all the verdict says so — a rule
@@ -425,7 +438,7 @@ def rules_narrow(project: str, id: str, scopes: list[str], code: str) -> dict:
     return registry.narrow(project, id, scopes)
 
 
-@mcp.tool
+@tool
 def rules_retire(project: str, id: str, reason: str, code: str,
                  superseded_by: str = "", changelog: str = "") -> dict:
     """MAINTENANCE. Retire a rule: it leaves the consumers' lists, but the row
@@ -443,7 +456,7 @@ def rules_retire(project: str, id: str, reason: str, code: str,
 # Projects, consumers, scopes
 # =====================================================================
 
-@mcp.tool
+@tool
 def rules_registry(code: str) -> dict:
     """MAINTENANCE. The COMPLETE list of projects in the registry, CODES
     INCLUDED. This is the only door codes come out of, which is why it wants the
@@ -453,7 +466,7 @@ def rules_registry(code: str) -> dict:
     return registry.projects()
 
 
-@mcp.tool
+@tool
 def rules_status(project: str, code: str) -> dict:
     """MAINTENANCE. The verdict on the registry: database integrity, journal
     mode, file permissions, counts by domain and by consumer, how many rules
@@ -463,7 +476,7 @@ def rules_status(project: str, code: str) -> dict:
     return registry.status(project)
 
 
-@mcp.tool
+@tool
 def rules_check(project: str, code: str) -> dict:
     """MAINTENANCE. Audit of a project: broken pointers (IDs cited that do not
     exist), citations towards retired rules, rules with no perimeter, numbering
@@ -477,7 +490,7 @@ def rules_check(project: str, code: str) -> dict:
     return registry.check(project)
 
 
-@mcp.tool
+@tool
 def rules_history(project: str, id: str, code: str) -> dict:
     """MAINTENANCE. How that rule changed over time: one row per version, with
     date, action and REASON, plus the perimeter in two columns — `scopes` what
@@ -490,7 +503,7 @@ def rules_history(project: str, id: str, code: str) -> dict:
     return registry.history(project, id)
 
 
-@mcp.tool
+@tool
 def rules_diff(project: str, id: str, version_a: int, version_b: int, code: str) -> dict:
     """MAINTENANCE. What changed between two versions of ONE rule (the numbers
     come from rules_history). Whole versions are kept, not diffs: the comparison
@@ -499,7 +512,7 @@ def rules_diff(project: str, id: str, version_a: int, version_b: int, code: str)
     return registry.compare(project, id, version_a, version_b)
 
 
-@mcp.tool
+@tool
 def rules_export(project: str, code: str, consumer: str = "") -> dict:
     """MAINTENANCE. A Markdown snapshot, to be written into the vault with the
     archivist's write_file. Two uses:
@@ -513,7 +526,7 @@ def rules_export(project: str, code: str, consumer: str = "") -> dict:
     return registry.export(project, consumer)
 
 
-@mcp.tool
+@tool
 def rules_project_create(project_code: str, name: str, consumers: list, domains: dict,
                          code: str, description: str = "") -> dict:
     """MAINTENANCE. Create a new project. Needed before any rule.
@@ -533,7 +546,7 @@ def rules_project_create(project_code: str, name: str, consumers: list, domains:
     return registry.create_project(project_code, name, consumers, domains, description)
 
 
-@mcp.tool
+@tool
 def rules_project_rekey(project: str, new_project_code: str, code: str) -> dict:
     """MAINTENANCE. Change a project's access code (if it ended up somewhere it
     should not have). The rules are untouched: inside the registry a project is
@@ -545,7 +558,7 @@ def rules_project_rekey(project: str, new_project_code: str, code: str) -> dict:
     return registry.rekey_project(project, new_project_code)
 
 
-@mcp.tool
+@tool
 def rules_consumers_add(project: str, consumers: list, code: str) -> dict:
     """MAINTENANCE. Add consumers to a project — chats or skills. Each one gets
     a scope of its own name, made by the database.
@@ -558,7 +571,7 @@ def rules_consumers_add(project: str, consumers: list, code: str) -> dict:
     return registry.add_consumers(project, consumers)
 
 
-@mcp.tool
+@tool
 def rules_domains_add(project: str, domains: dict, code: str) -> dict:
     """MAINTENANCE. Add ID domains to a project: {"LQ":"liquidity"}. Two
     uppercase letters each. Only adding, for the same reason."""
@@ -566,7 +579,7 @@ def rules_domains_add(project: str, domains: dict, code: str) -> dict:
     return registry.add_domains(project, domains)
 
 
-@mcp.tool
+@tool
 def rules_scope_create(project: str, name: str, members: list[str], code: str) -> dict:
     """MAINTENANCE. Create a named group of consumers, e.g. "deliberativi" over
     the four chats that deliberate.
@@ -580,7 +593,7 @@ def rules_scope_create(project: str, name: str, members: list[str], code: str) -
     return registry.create_scope(project, name, members)
 
 
-@mcp.tool
+@tool
 def rules_scope_edit(project: str, name: str, code: str,
                      add: list[str] = None, remove: list[str] = None) -> dict:
     """MAINTENANCE. Change who is in a GROUP scope. Careful: this changes the
@@ -598,7 +611,7 @@ def rules_scope_edit(project: str, name: str, code: str,
 # Migration and service
 # =====================================================================
 
-@mcp.tool
+@tool
 def rules_import(project: str, rules: list[dict], reason: str, code: str,
                  permanent: bool = True) -> dict:
     """MAINTENANCE. Bulk import for the MIGRATION from the Markdown files. Only
@@ -613,7 +626,7 @@ def rules_import(project: str, rules: list[dict], reason: str, code: str,
     return registry.import_rules(project, rules, reason, permanent)
 
 
-@mcp.tool
+@tool
 def rules_backup(code: str) -> dict:
     """MAINTENANCE. A quiescent copy of the WHOLE database (VACUUM INTO) into
     the backup directory: it opens without recovery, and it is the one to take

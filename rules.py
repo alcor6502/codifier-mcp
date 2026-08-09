@@ -49,7 +49,7 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 TYPES = ("R", "M", "F")                 # R binding · M method · F technical fact
 ALL = "_ALL_"                           # reaches every consumer, present and future

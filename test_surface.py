@@ -168,9 +168,13 @@ print("\n== every write passes the maintenance gate ==")
 
 
 def is_tool(fn: ast.FunctionDef) -> bool:
+    """Registered either as @mcp.tool or through server.py's own @tool wrapper —
+    which is the one they all use, and the check below enforces it."""
     for d in fn.decorator_list:
         target = d.func if isinstance(d, ast.Call) else d
         if isinstance(target, ast.Attribute) and target.attr == "tool":
+            return True
+        if isinstance(target, ast.Name) and target.id == "tool":
             return True
     return False
 
@@ -263,23 +267,19 @@ print("\n== a designed refusal does not look like a fault in the log ==")
 # Without this, every wrong project code prints a thirty-line traceback at ERROR,
 # shaped exactly like a real bug. After a week of those nobody reads them, and
 # the next genuine fault arrives disguised as routine.
-MIDDLEWARES = [n for n in SERVER_TREE.body
-               if isinstance(n, ast.ClassDef)
-               and any(getattr(b, "id", "") == "Middleware" for b in n.bases)]
-ok(len(MIDDLEWARES) >= 2, f"{len(MIDDLEWARES)} middlewares declared")
-
-_converter = None
-for cls in MIDDLEWARES:
-    src = ast.dump(cls)
-    if "RulesError" in src and "ToolError" in src:
-        _converter = cls
-ok(_converter is not None,
-   "one of them turns RulesError into ToolError — one INFO line, no traceback")
+#
+# It has to be the DECORATOR and not a middleware: call_tool applies middleware
+# outside and logs inside, so a middleware sees the exception after
+# logger.exception has already run. That cost an hour, and it is the kind of
+# thing that gets undone by somebody tidying up — hence this check.
+_converter = next((n for n in SERVER_TREE.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "tool"), None)
+ok(_converter is not None, "server.py defines its own `tool` decorator")
 
 if _converter is not None:
     handlers = [h for h in ast.walk(_converter) if isinstance(h, ast.ExceptHandler)]
     caught = {getattr(h.type, "id", "") for h in handlers}
-    ok("RulesError" in caught, f"{_converter.name} catches RulesError")
+    ok("RulesError" in caught, "the decorator catches RulesError")
     raised = [n for h in handlers for n in ast.walk(h)
               if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "ToolError"]
     ok(raised, "and re-raises ToolError")
@@ -293,13 +293,21 @@ if _converter is not None:
     ok(any(isinstance(n, ast.Raise) and isinstance(n.cause, ast.Constant)
            and n.cause.value is None for n in ast.walk(_converter)),
        "with `from None`: the chained traceback is what we are removing")
+    # functools.wraps is what keeps the MCP schema intact: FastMCP reads the
+    # name, docstring and signature, and follows __wrapped__ to find them.
+    ok(any(ast.unparse(d) == "functools.wraps(fn)"
+           for f in ast.walk(_converter) if isinstance(f, ast.FunctionDef)
+           for d in f.decorator_list),
+       "and functools.wraps, or every tool would lose its schema")
+    ok(any(isinstance(n, ast.Call) and ast.unparse(n.func) == "mcp.tool"
+           for n in ast.walk(_converter)),
+       "and it still registers the tool with FastMCP")
 
-# Registered, or the class is decoration.
-ADDED = {ast.unparse(c.args[0].func) for c in ast.walk(SERVER_TREE)
-         if isinstance(c, ast.Call) and getattr(c.func, "attr", "") == "add_middleware"
-         and c.args and isinstance(c.args[0], ast.Call)}
-ok(_converter is not None and _converter.name in ADDED,
-   f"and it is actually registered: {sorted(ADDED)}")
+# Every tool must go through it. One @mcp.tool left behind is one tool whose
+# refusals still print a traceback — and it would be the one you never test.
+BARE = [n.name for n in SERVER_TREE.body if isinstance(n, ast.FunctionDef)
+        and any(ast.unparse(d) == "mcp.tool" for d in n.decorator_list)]
+ok(not BARE, "no tool is registered with a bare @mcp.tool", BARE)
 
 # The engine must not IMPORT FastMCP: that is what lets the suites run without
 # a server, and it is why the conversion lives in server.py. Naming it in a
