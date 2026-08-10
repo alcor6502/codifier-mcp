@@ -805,6 +805,23 @@ class Registry:
         return [r[0] for r in self.cx.execute(
             "SELECT domain FROM project_domains WHERE project=? ORDER BY domain", (project,))]
 
+    def _legend(self, project: str, ids) -> dict:
+        """The domains PRESENT in a list of IDs, each with its gloss, read
+        from the project's own declarations. Two letters age badly in human
+        memory — even the owner reads these lists, and in six months nobody
+        remembers what LQ was. Surfaced, not new state, and limited to what
+        the list actually contains so it never becomes a second registry."""
+        doms = {str(i).split("-", 1)[0] for i in ids}
+        if not doms:
+            return {}
+        return {r["domain"]: r["description"] or "" for r in self.cx.execute(
+            "SELECT domain, description FROM project_domains WHERE project=? "
+            "ORDER BY domain", (project,)) if r["domain"] in doms}
+
+    @staticmethod
+    def _legend_line(legend: dict) -> str:
+        return " · ".join(f"{d} — {g}" if g else d for d, g in legend.items())
+
     def projects(self) -> dict:
         rows = self.cx.execute("SELECT name, code, description, created FROM projects "
                                "ORDER BY name").fetchall()
@@ -1158,6 +1175,7 @@ class Registry:
         brief = self.cx.execute("SELECT brief FROM consumers WHERE project=? AND name=?",
                                 (p, c)).fetchone()[0]
         return {"project": p, "consumer": c, "brief": brief or "",
+                "domains": self._legend(p, [d["id"] for d in rules]),
                 "rules": rules, "count": len(rules),
                 "outside_your_scope": data["outside"],
                 "note": "ordered by breadth: what comes first binds everyone. If an ID you "
@@ -1260,7 +1278,11 @@ class Registry:
                 if row["permanence"] == "permanent" or not row["expires_at"]:
                     continue
                 if now < row["expires_at"] <= soon:
-                    expiring.append(self._dict(row, p))
+                    # The renewals queue carries the WHY, and only this queue
+                    # does: it is the one list read to decide, and the
+                    # decision is undecidable without the reason in front of
+                    # you. The waiting and denied lists keep their shape.
+                    expiring.append(self._dict(row, p, why=True))
         return {"project": p, "consumer": c or "(all)",
                 "waiting": waiting, "denied": denied, "expiring_within_30_days": expiring,
                 "note": "a denied proposal is kept on purpose, with its reason. The registry "
@@ -1918,12 +1940,18 @@ class Registry:
             row = self._row(p, rid)
             if row is None or row["status"] != "active":
                 raise RulesError(f"{rid}: not an active rule")
+        # The ORIGINAL reason, next to each rule: renewal is where the corpus
+        # is governed, and "would I file this today, for the reason it was
+        # filed for?" is undecidable without the reason in front of you. The
+        # manual used to patch this with a habit; the tool does it now.
+        reasons = {rid: self._row(p, rid)["reason"] for rid in ids}
         expires = _plus_days(int(days) or self.provisional_days)
         for rid in ids:
             self.cx.execute("UPDATE rules SET expires_at=?, event=?, updated_at=? "
                             "WHERE project=? AND id=?",
                             (expires, "renewed", _now(), p, rid))
-        return {"project": p, "renewed": ids, "expires_at": expires}
+        return {"project": p, "renewed": ids, "expires_at": expires,
+                "reasons": reasons}
 
     def promote(self, code: str, ids) -> dict:
         """From provisional to permanent. Rare and deliberate: a permanent rule
@@ -2101,6 +2129,9 @@ class Registry:
             c = self._consumer(p, consumer)
             data = self._rules_for(p, c, expand)
             lines[0] = f"# {p} — rules for {c}"
+            legend = self._legend(p, [r["id"] for r in data["rules"]])
+            if legend:
+                lines += [f"Domains: {self._legend_line(legend)}", ""]
             lines += [f"{len(data['rules'])} rules in force, widest first. "
                       f"{data['outside']} are outside your perimeter.", ""]
             groups: dict[int, list] = {}
@@ -2117,6 +2148,9 @@ class Registry:
             now = _now()
             rows = self.cx.execute("SELECT * FROM rules WHERE project=? ORDER BY domain, seq",
                                    (p,)).fetchall()
+            legend = self._legend(p, [r["id"] for r in rows])
+            if legend:
+                lines += [f"Domains: {self._legend_line(legend)}", ""]
             for d in self._domains(p):
                 block = [r for r in rows if r["domain"] == d]
                 if not block:

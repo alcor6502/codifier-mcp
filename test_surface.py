@@ -1570,5 +1570,23 @@ for _t in TOOLS:
 ok("limited number of pending proposals" in GUIDE_SRC,
    "the manual documents the pending ceiling")
 
+print("\n== the renewal reads the why, and the lists carry the legend ==")
+
+# F5 and F7: the reason where the deciding happens, the glosses where the IDs
+# are listed in bulk.
+for _t in TOOLS:
+    _doc = ast.get_docstring(_t) or ""
+    if _t.name == "rules_renew":
+        ok("ORIGINAL reason" in _doc,
+           "rules_renew promises the original reason in its verdict")
+    if _t.name == "rules_pending":
+        ok("expiring" in _doc and "reason" in _doc,
+           "rules_pending says the expiring queue carries the reason")
+    if _t.name == "rules_list":
+        ok("LEGEND" in _doc, "rules_list promises the domain legend")
+ok(GUIDE_SRC.count("legend of the domains present") == 1,
+   "the manual pins the legend, exactly once",
+   GUIDE_SRC.count("legend of the domains present"))
+
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

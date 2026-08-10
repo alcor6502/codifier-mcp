@@ -2283,6 +2283,83 @@ def the_ceiling_is_a_deployment_knob_with_a_working_default():
 case("the ceiling is configurable per deployment, and born with a default",
      the_ceiling_is_a_deployment_knob_with_a_working_default)
 
+
+# =====================================================================
+head("the renewal reads the why, and the lists carry the legend")
+# =====================================================================
+
+# F5 (residue after C1) and F7. Renewal is where the corpus is governed, and
+# the question there — "would I file this today, for the reason it was filed
+# for?" — is undecidable without the reason in front of you. The manual used
+# to patch that with a habit ("read the history before renewing") in the very
+# system built to eliminate prescribed habits: now the tool does it. And the
+# two-letter domains age badly in human memory, so wherever IDs are listed in
+# bulk the legend of the domains PRESENT rides along, from the project's own
+# declarations — surfaced, not new state.
+
+LEG = "Le7g3Nd88qq"
+LEG_NAME = "Legend bench"
+
+case("create the legend bench", lambda: R.create_project(
+    LEG, LEG_NAME, [("architect", "chat")],
+    {"VA": "vault and files", "VE": "verification", "ZZ": "never used"}))
+
+LEG_WHY = "because the aggregator misreports the closing price"
+LEG_R1 = R.propose(LEG, "VA", "R", "Legend rule", "Body.", ["*"],
+                   LEG_WHY, "architect")["id"]
+R.approve(LEG, R.batch(LEG)["digest"])
+
+
+def the_renew_verdict_carries_the_original_reason():
+    out = R.renew(LEG, [LEG_R1])
+    assert out.get("reasons") == {LEG_R1: LEG_WHY}, out
+    assert out["renewed"] == [LEG_R1]
+
+
+case("rules_renew hands back the original reason next to each rule",
+     the_renew_verdict_carries_the_original_reason)
+
+
+def the_expiring_queue_carries_the_reason_and_only_that_queue():
+    R.cx.execute("UPDATE rules SET expires_at=? WHERE project=? AND id=?",
+                 (_plus_days(10), LEG_NAME, LEG_R1))
+    p = R.pending(LEG, "architect")
+    soon = [x for x in p["expiring_within_30_days"] if x["id"] == LEG_R1]
+    assert soon and soon[0].get("reason") == LEG_WHY, soon
+    # Only the renewals queue: waiting stays the shape it was.
+    rid = R.propose(LEG, "VE", "R", "Still waiting", "Body.", ["*"],
+                    "a why the waiting list does not carry", "architect")["id"]
+    w = [x for x in R.pending(LEG, "architect")["waiting"] if x["id"] == rid]
+    assert w and "reason" not in w[0], sorted(w[0])
+    R.deny(LEG, [rid], "bench cleanup")
+
+
+case("expiring_within_30_days carries the reason — the other lists do not",
+     the_expiring_queue_carries_the_reason_and_only_that_queue)
+
+
+def the_list_leads_with_the_legend_of_present_domains():
+    out = R.list_rules(LEG, "architect")
+    assert out.get("domains") == {"VA": "vault and files"}, out.get("domains")
+    keys = list(out)
+    assert keys.index("domains") < keys.index("rules"), keys
+
+
+case("rules_list carries the legend, limited to the domains present",
+     the_list_leads_with_the_legend_of_present_domains)
+
+
+def the_export_carries_the_legend_too():
+    md = R.export(LEG)["markdown"]
+    assert "VA — vault and files" in md, md[:400]
+    assert "ZZ" not in md, "a domain with no rules does not enter the legend"
+    per = R.export(LEG, "architect")["markdown"]
+    assert "VA — vault and files" in per, per[:400]
+
+
+case("the export leads with the legend of the domains present",
+     the_export_carries_the_legend_too)
+
 print(f"\n{OK} passed, {FAIL} failed")
 if FAILURES:
     print("failed: " + "; ".join(FAILURES))

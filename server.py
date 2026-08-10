@@ -241,7 +241,10 @@ def rules_list(project: str, consumer: str) -> dict:
 
     The answer LEADS with your `brief` — your mandate, who you are — before
     the rules: identity and law in one round trip. A consumer without a brief
-    gets an empty field, not an error; skills leave it empty on purpose.
+    gets an empty field, not an error; skills leave it empty on purpose. Next
+    to it rides the LEGEND of the domains present in your list, each with its
+    gloss — two letters age badly in human memory, and the glosses already
+    live in the project's declarations.
 
     The order is the BREADTH of the scope a rule reaches you through: what comes
     first binds everyone, what comes last is yours alone. Each rule arrives as
@@ -303,7 +306,11 @@ def rules_pending(project: str, consumer: str = "") -> dict:
     This is what replaces the note a chat used to keep in its own memory. You
     filed a proposal three weeks ago and you do not remember what became of it:
     ask here rather than proposing it again. Without `consumer` it shows the
-    whole project, which is the maintainer's view."""
+    whole project, which is the maintainer's view.
+
+    The expiring list — and only that one — carries each rule's original
+    `reason`: it is the renewals queue, read to decide, and the decision
+    needs the why in front of it."""
     return registry.pending(project, consumer)
 
 
@@ -430,7 +437,12 @@ def rules_deny(project: str, ids: list[str], reason: str, code: str) -> dict:
 def rules_renew(project: str, ids: list[str], code: str, days: int = 0) -> dict:
     """MAINTENANCE. Push the expiry of provisional rules forward: keeping a
     rule alive is letting it in again, which is why this is behind the admin
-    code and why renewal is where the corpus is governed."""
+    code and why renewal is where the corpus is governed.
+
+    The verdict hands back each rule's ORIGINAL reason: the question at
+    renewal — would I file this today, for the reason it was filed for? — is
+    undecidable without the reason in front of you, and the tool puts it
+    there instead of prescribing a habit."""
     _admin(code)
     return registry.renew(project, ids, days)
 
@@ -605,6 +617,8 @@ def rules_export(project: str, code: str, consumer: str = "", expand: bool = Fal
 
     Every rule carries its `reason`, and the whole-project export the last
     `event` too: this is the maintenance reading, where the why is on the page.
+    The legend of the domains present leads the page, glosses from the
+    project's own declarations.
 
     `expand` decides how citations read: compact `(VA-0002)` by default, or
     carrying the current title of what they point at. This is the only reader

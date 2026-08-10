@@ -57,6 +57,12 @@ written by maintenance (through `rules_consumers_add`) and versioned by the
 database like everything else here: a silent change to a role's identity is
 exactly the class of change this registry exists to record.
 
+Next to the brief rides the **legend of the domains present** in your list,
+each two-letter domain with its gloss (`VA — vault and files · VE —
+verification`): two letters age badly in human memory, and the glosses
+already live in the project's declarations — surfaced, not new state. The
+same legend leads `rules_export`, wherever IDs are listed in bulk.
+
 Then the rules, in the CONSUMER reading: each rule as
 **the ID and the body, and nothing else** — the citations expanded.
 The title, the dates, the perimeter and
@@ -311,10 +317,13 @@ because refusing cannot do harm. The row stays, the ID is burnt, and
 `rules_pending` shows the refusal to whoever filed it.
 
 **`rules_renew`** pushes the expiry forward: keeping a rule alive is letting it
-in again, which is why renewal is where the corpus is governed.
-**`rules_promote`** makes a rule permanent — rare and deliberate: a permanent
-rule is one you promise to notice when it goes stale, because nothing else
-will notice for you.
+in again, which is why renewal is where the corpus is governed. Its verdict
+hands back each rule's ORIGINAL reason, and `rules_pending` carries the same
+reason on the expiring list — the renewal question is undecidable without the
+why in front of you, and the tool puts it there instead of prescribing a
+habit. **`rules_promote`** makes a rule permanent — rare and deliberate: a
+permanent rule is one you promise to notice when it goes stale, because
+nothing else will notice for you.
 
 ## WHERE THE WHY LIVES
 
