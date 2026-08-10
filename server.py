@@ -47,8 +47,6 @@ Configuration, all through environment variables:
 """
 from __future__ import annotations
 
-import functools
-import ipaddress
 import logging
 import os
 import secrets
@@ -56,12 +54,17 @@ import sys
 from pathlib import Path
 
 from fastmcp import FastMCP
-from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.github import GitHubProvider
-from fastmcp.server.dependencies import get_access_token, get_http_request
-from fastmcp.server.middleware import Middleware, MiddlewareContext
 
-from preflight import cidrs_from_env, describe_cidrs, log_level_from_env
+# The common engine: the gate, the refusal conversion and the config helpers
+# live there since the adoption, pinned to a TAG in requirements.txt. The
+# reasoning each piece carries stays in its module's docstring, next to the
+# code it describes. What stays HERE is everything the engine cannot know:
+# which login, which filter, which error class is a refusal and which a fault.
+from mcp_common_engine import (VERSION as ENGINE_VERSION, cidrs_from_env,
+                               describe_cidrs, log_level_from_env)
+from mcp_common_engine.gate import Gate
+from mcp_common_engine.refusals import make_tool
 from rules import Registry, RulesError, RulesFault, VERSION
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
@@ -70,10 +73,11 @@ from rules import Registry, RulesError, RulesFault, VERSION
 logging.basicConfig(level=logging.WARNING,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("codifier-mcp")
-# Resolved in preflight.log_level_from_env for the same reason as the IP filter:
-# one expression, so the service and the preflight cannot disagree. The list is
-# closed to INFO and WARNING there — and closed in the CODE, not only in the
-# template's dropdown, because a container built by hand has no template.
+# Resolved in the engine's log_level_from_env for the same reason as the IP
+# filter: one expression, so the service and the preflight cannot disagree.
+# The list is closed to INFO and WARNING there — and closed in the CODE, not
+# only in the template's dropdown, because a container built by hand has no
+# template.
 _LEVEL, _REJECTED = log_level_from_env()
 log.setLevel(_LEVEL)
 if _REJECTED:
@@ -103,7 +107,7 @@ ALLOWED_LOGIN = env("ALLOWED_GITHUB_LOGIN")
 ADMIN_CODE = env("ADMIN_ACCESS_CODE")
 PORT = int(env("PORT", "3001"))
 BACKUP_DIR = os.environ.get("BACKUP_DIR") or os.path.join(os.path.dirname(DB_PATH), "backup")
-# Resolved in preflight.cidrs_from_env so the service and the preflight can
+# Resolved in the engine's cidrs_from_env so the service and the preflight can
 # never disagree about what the filter is.
 ALLOWED_CIDRS = cidrs_from_env()
 
@@ -136,174 +140,23 @@ auth = GitHubProvider(
 mcp = FastMCP("codifier-mcp", auth=auth)
 
 
-def tool(fn):
-    """Register a tool, and turn its refusals into something the log can tell
-    apart from a fault.
-
-    A RulesError is a DESIGNED refusal: a wrong project code, a stale version,
-    a signature that does not match. Not every error the engine raises is one —
-    the signature library missing from the image is a FAULT, and it carries
-    RulesFault, which is caught first and left alone. That distinction is not
-    decoration: without it this decorator would take a broken image and make it
-    a line beginning with the word "refused", which is the defect it exists to
-    close, inverted. Anything sqlite raises on its own never becomes a
-    RulesError at all, so it keeps its traceback without help from here.
-
-    Left as a plain exception, a refusal is logged by FastMCP through
-    logger.exception — thirty lines of traceback through anyio and pydantic,
-    shaped exactly like a real fault. After a week of those, nobody reads
-    tracebacks any more, and the next genuine fault arrives disguised as
-    routine. The thread-pool defect was caught precisely because its traceback
-    stood out.
-
-    Raised as ToolError the traceback goes away: FastMCP logs FastMCPError with
-    exc_info=False, at the level the exception carries. A bug still gets the
-    full traceback at ERROR, which is what a bug deserves.
-
-    But FastMCP's own line does not survive the container, and this was
-    MEASURED rather than assumed: the Dockerfile sets FASTMCP_LOG_LEVEL=WARNING
-    — for the noise, and rightly — so an INFO record from fastmcp.server.server
-    is dropped before it is printed. Converting alone therefore does not turn
-    thirty lines into one: it turns them into NONE, and a refusal that leaves
-    no trace at all is a different bargain from the one being made here — the
-    day somebody says "the registry refuses my calls" there would be nothing to
-    read. So the line is OURS. It goes on the codifier-mcp logger, which
-    follows LOG_LEVEL, and it says more than FastMCP's ever did — which tool,
-    and why:
-
-        INFO codifier-mcp: refused rules_propose: citation that does not resolve: …
-
-    Deliberately INFO and not WARNING. WARNING is where the Gate logs a
-    stranger turned away, and that line is contractual precisely because it is
-    the only thing that tells a refused stranger from a broken deployment. A
-    wrong project code — the system working — must not sit at the same height.
-
-    What the line carries was CHECKED rather than assumed, because the twin's
-    version of this paragraph says "which carries paths" and is true there.
-    Here the messages carry consumer names, domains, malformed IDs and
-    constants — no project code, and not the text that was searched for. So
-    this is not an access log even by accident: an access log records
-    everything that was READ and becomes a register of what was consulted and
-    when; this records only what was REFUSED, which is rare, useless as a
-    register because it is precisely the calls that did not happen, and exactly
-    what you are trying to diagnose. Anyone who disagrees has one knob, and it
-    is documented: LOG_LEVEL=WARNING takes the line away.
-
-    Where project codes DO reach the log is not here: FastMCP logs invalid
-    arguments itself, at WARNING, on its own logger, with the arguments in the
-    line — before this decorator is ever entered. LOG_LEVEL does not reach it.
-    Worth knowing, and not fixable from here.
-
-    THE TRAP, and it cost an hour: doing this in a Middleware does not work.
-    call_tool applies the middleware chain OUTSIDE and logs INSIDE — the outer
-    call delegates to itself with run_middleware=False, and that inner call is
-    where the try/except lives. By the time a middleware sees the exception,
-    logger.exception has already run. The conversion has to happen inside the
-    tool function, which is here.
-
-    A second reason, not cosmetic: a plain exception is subject to FastMCP's
-    error masking, so the day that default flips, every talking error this
-    project spent its care on would reach the chat as "an error occurred".
-    ToolError messages are passed through by contract.
-
-    functools.wraps is what keeps the MCP contract intact — name, docstring and
-    signature are what FastMCP builds the schema from, and it follows
-    __wrapped__. Verified against fastmcp 3.4.5: the parameter types, defaults
-    and required list come out identical.
-
-    The conversion lives HERE and never in rules.py: the engine must stay
-    importable without FastMCP, which is what lets the suites run with no
-    network, no server and no OAuth provider. test_surface checks that."""
-    @functools.wraps(fn)
-    def guarded(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except RulesFault:
-            # A fault is not a refusal, and the ORDER of these two branches is
-            # the whole distinction: RulesFault subclasses RulesError, so
-            # swapping them would swallow every fault into the quiet path and
-            # nothing would look wrong. Python does not warn; the static check
-            # is the warning. Left to rise, it keeps its traceback at ERROR.
-            raise
-        except RulesError as e:
-            log.info("refused %s: %s", fn.__name__, e)
-            raise ToolError(str(e), log_level=logging.INFO) from None
-    return mcp.tool(guarded)
+# The refusal-to-ToolError conversion and its one log line live in the
+# engine's make_tool (mcp_common_engine/refusals.py) — where the trap, the
+# fault-first order and the reason the line must be our own are reasoned at
+# length, next to the code. The behaviour was measured on BOTH twins before
+# the move. What this line decides is the binding the engine cannot: a
+# RulesError is a designed refusal, a RulesFault is a genuine fault, caught
+# first and left to rise with its traceback.
+tool = make_tool(mcp, log, refusal=RulesError, fault=RulesFault)
 
 
-class Gate(Middleware):
-    """Two filters, before anything else: the GitHub identity and the source IP.
-    The XFF header is filled in by the Funnel, which is the trusted proxy.
-
-    It hooks `on_request`, which covers the MCP requests FastMCP routes —
-    `initialize` and `tools/list` as much as `tools/call`, and the resource and
-    prompt listings with them. Until v1.2 it hooked `on_call_tool`, and the hole
-    that left was narrow but real: OAuth stops
-    whoever is not authenticated, not whoever authenticates with their OWN
-    GitHub account. Such a stranger got a valid token, and with it `tools/list`:
-    every `rules_*` tool with its description. Each call was refused, so no rule
-    and no project code ever left — but the SHAPE of the surface did, and a
-    surface that can be enumerated is one that can be studied.
-
-    Not `on_message`, which is one level wider: it also covers NOTIFICATIONS —
-    `initialized`, `cancelled`, `progress`. Those are fire-and-forget, they carry
-    no id and expect no answer, so raising there has no channel to deliver the
-    refusal on. It buys undefined behaviour in exchange for no surface at all,
-    because a notification returns nothing. The right level is the narrowest one
-    with DEFINED behaviour, which is not the narrowest one there is.
-
-    Two things it does NOT cover, established by experiment on 3.4.5 rather than
-    assumed, and worth knowing before anyone concludes from the log that the
-    door is wider than it is. `ping` and `logging/setLevel` are answered by the
-    SDK's own default handlers and never reach a middleware at all: a stranger
-    refused at `initialize` still receives a session id and can keep those two
-    alive, silently — they read nothing, which is why this is a note and not a
-    hole. And a `tools/call` on a fresh session is refused while FastMCP is
-    resolving the tool, so the line that comes out says `tools/list`: the method
-    names the message the gate saw, which is not always the one the caller sent.
-
-    The refusals are LOGGED, with the method, and that is not decoration. Once
-    the gate covers the handshake, a refused stranger and a broken deployment
-    produce the same symptom at the client: "the connector will not connect".
-    The log line is the only thing that tells the two apart.
-
-    The refusal itself is still a plain ValueError, which FastMCP does not turn
-    into a designed refusal at handshake time: the client sees `-32602 Invalid
-    request parameters`. It is the same defect the tool decorator above exists
-    to fix, one layer down, and it is not fixed here because the twin's gate is
-    identical and the two must not drift. See `Decisioni aperte`."""
-
-    HOOK = "on_request"   # pinned by a static check in test_surface.py: a typo
-                          # here does not fail, it disables the gate in silence,
-                          # because the base class ships a pass-through default
-                          # for every hook name that does exist.
-
-    def __init__(self) -> None:
-        self.nets = [ipaddress.ip_network(c) for c, _ in ALLOWED_CIDRS]
-
-    async def on_request(self, ctx: MiddlewareContext, call_next):
-        tok = get_access_token()
-        login = (tok.claims.get("login") if tok and tok.claims else None)
-        if login != ALLOWED_LOGIN:
-            log.warning("refused %s: GitHub login %r is not %r",
-                        ctx.method, login, ALLOWED_LOGIN)
-            raise ValueError("user not authorised")
-        if self.nets:
-            req = get_http_request()
-            src = (req.headers.get("x-forwarded-for", "").split(",")[0].strip()
-                   or (req.client.host if req.client else ""))
-            try:
-                ip = ipaddress.ip_address(src) if src else None
-                if ip is None or not any(ip in n for n in self.nets):
-                    raise ValueError("origin not allowed")
-            except ValueError:
-                log.warning("refused %s: source %r outside the allowed ranges",
-                            ctx.method, src)
-                raise ValueError("origin not allowed")
-        return await call_next(ctx)
-
-
-mcp.add_middleware(Gate())
+# The Gate — GitHub identity plus source-IP filter, hooked on `on_request` —
+# lives in the engine (mcp_common_engine/gate.py), with the reasoning about
+# where it hooks, what it deliberately does not cover, and why its refusals
+# are logged at WARNING. What this call decides is who is allowed in and from
+# where; handed nothing, a gate would let nobody in and say nothing about it.
+mcp.add_middleware(Gate(log=log, allowed_login=ALLOWED_LOGIN,
+                        allowed_cidrs=ALLOWED_CIDRS))
 
 # The two manuals. Both ship inside the image, which is the whole reason they
 # are files here and not documents in the vault: a manual that travels with the
@@ -884,9 +737,9 @@ if __name__ == "__main__":
     # wrong matters — 0.0.0.0 exposes the service to the LAN, and a startup line
     # that keeps saying 127.0.0.1 would be lying about exactly that.
     _HOST = os.environ.get("BIND_HOST", "127.0.0.1")
-    log.info("codifier-mcp %s — starting on %s:%s — base_url %s — allowed user: %s "
+    log.info("codifier-mcp %s — engine %s — starting on %s:%s — base_url %s — allowed user: %s "
              "— IP filter: %s — token store: %s — db: %s (process uid %s) — web UI: %s",
-             VERSION, _HOST, PORT, BASE_URL, ALLOWED_LOGIN, describe_cidrs(ALLOWED_CIDRS),
+             VERSION, ENGINE_VERSION, _HOST, PORT, BASE_URL, ALLOWED_LOGIN, describe_cidrs(ALLOWED_CIDRS),
              os.environ.get("FASTMCP_HOME", "(default — NOT persistent!)"),
              DB_PATH, os.geteuid(),
              os.environ.get("WEB_PORT") or "off (not built yet)")
