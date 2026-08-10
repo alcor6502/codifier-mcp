@@ -1838,8 +1838,33 @@ class Registry:
             h.update(b"\x00")
             h.update((r["body"] or "").encode())
         digest = h.hexdigest()
+        proposals = [self._dict(r, p, why=True) for r in rows]
+        # The supersede arrives EXPANDED, like a citation in reading: the
+        # batch is where the approver decides, and deciding to retire a rule
+        # requires reading WHICH rule, not going to look an ID up. The state
+        # mark matters most when it is bad news: a victim that vanished while
+        # the proposal was pending is announced here, before the approval —
+        # the no-op verdict after it is the receipt, not the warning.
+        # `approve` does NOT read this field: it takes its (heir, victim)
+        # pairs from the table, so the display can serve the person without
+        # the machine parsing its own prose back.
+        now = _now()
+        for d in proposals:
+            sup = d.get("supersedes")
+            if not sup:
+                continue
+            victim = self._row(p, sup)
+            mark = ""
+            if victim["status"] == "retired" and victim["superseded_by"]:
+                mark = f" · retired → superseded by {victim['superseded_by']}"
+            elif victim["status"] != "active":
+                mark = f" · {victim['status']}"
+            elif (victim["permanence"] != "permanent" and victim["expires_at"]
+                  and victim["expires_at"] <= now):
+                mark = " · expired"
+            d["supersedes"] = f"{sup}{GLOSS_SEP}{self._gloss(victim)}{mark}"
         return {"project": p, "count": len(ids), "ids": ids,
-                "proposals": [self._dict(r, p, why=True) for r in rows],
+                "proposals": proposals,
                 "digest": digest,
                 "note": "pass this digest to approve: it proves you approve the batch you "
                         "READ. If a proposal arrives after this call the digest changes "
@@ -1870,25 +1895,30 @@ class Registry:
         superseded, skipped = [], []
         self.cx.execute("BEGIN IMMEDIATE")
         try:
+            # (heir, victim) from the TABLE, before the status flips: the
+            # batch decorates its `supersedes` for the person reading it, and
+            # a machine that parsed that prose back would break the day the
+            # gloss changes shape.
+            sup_pairs = [(r["id"], r["supersedes"]) for r in self.cx.execute(
+                "SELECT id, supersedes FROM rules WHERE project=? AND "
+                "status='proposed' AND supersedes IS NOT NULL ORDER BY id",
+                (p,))]
             self._record_approval(p, current["digest"], current["ids"])
             for rid in current["ids"]:
                 self.cx.execute(
                     "UPDATE rules SET status='active', permanence='provisional', "
                     "expires_at=?, event=?, updated_at=? WHERE project=? AND id=?",
                     (expires, "approved", _now(), p, rid))
-            for pr in current["proposals"]:
-                sup = pr.get("supersedes")
-                if not sup:
-                    continue
+            for heir, sup in sup_pairs:
                 target = self._row(p, sup)
                 if target is not None and self._in_force(target):
                     self.cx.execute(
                         "UPDATE rules SET status='retired', superseded_by=?, event=?, "
                         "updated_at=? WHERE project=? AND id=?",
-                        (pr["id"], f"superseded by {pr['id']}", _now(), p, sup))
-                    superseded.append({"retired": sup, "by": pr["id"]})
+                        (heir, f"superseded by {heir}", _now(), p, sup))
+                    superseded.append({"retired": sup, "by": heir})
                 else:
-                    skipped.append({"id": pr["id"], "target": sup,
+                    skipped.append({"id": heir, "target": sup,
                                     "why": "no longer in force"})
             self.cx.execute("COMMIT")
         except Exception:

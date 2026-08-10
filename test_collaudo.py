@@ -2101,8 +2101,14 @@ def approve_swaps_the_two_in_one_transaction():
                      supersedes=OLD_RULE)["id"]
     b = R.batch(SUP)
     mine = [p for p in b["proposals"] if p["id"] == heir]
-    assert mine and mine[0].get("supersedes") == OLD_RULE, \
-        "the batch does not SHOW the supersede: whoever approves must see the retirement"
+    # The GATE of 2026-08-10 stopped exactly here, from the connector: the
+    # batch is where the approver decides, so the supersede must arrive
+    # EXPANDED — the victim's current title next to the ID, like a citation
+    # in reading — not as a bare pointer to go and look up.
+    assert mine and mine[0].get("supersedes") == \
+        f"{OLD_RULE} — The rule to be replaced", \
+        "the batch does not SHOW the supersede expanded: whoever approves " \
+        f"must READ what they are retiring, got {mine[0].get('supersedes')!r}"
     out = R.approve(SUP, b["digest"])
     assert out["superseded"] == [{"retired": OLD_RULE, "by": heir}], out
     old = _sup(OLD_RULE)
@@ -2134,7 +2140,14 @@ def a_victim_retired_in_the_meantime_is_a_declared_noop():
     heir = R.propose(SUP, "VA", "R", "Late heir", "Body.", ["*"], "m",
                      "architect", supersedes=target)["id"]
     R.retire(SUP, target, reason="retired while the heir was pending")
-    out = R.approve(SUP, R.batch(SUP)["digest"])
+    b = R.batch(SUP)
+    # The victim vanished while the proposal was pending: the batch says so
+    # BEFORE the approval, where the decision happens — the no-op verdict
+    # after it is the receipt, not the warning.
+    shown = [p for p in b["proposals"] if p["id"] == heir][0]["supersedes"]
+    assert shown.startswith(f"{target} — ") and "retired" in shown, \
+        f"a dead victim must be marked in the batch, got {shown!r}"
+    out = R.approve(SUP, b["digest"])
     assert out["supersede_skipped"] == [
         {"id": heir, "target": target, "why": "no longer in force"}], out
     assert _sup(target)["superseded_by"] is None, \
