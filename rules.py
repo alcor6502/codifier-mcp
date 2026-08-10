@@ -291,12 +291,35 @@ CREATE TABLE IF NOT EXISTS project_domains (
 
 -- Whoever downloads rules. A skill is not a chat, but it acts, and what acts
 -- is under rules: calling list_rules is the only requirement.
+-- `brief` is the consumer's IDENTITY — its mandate, in Markdown — returned at
+-- the head of list_rules so "who you are" and "what binds you" arrive in one
+-- round trip. It is not a rule: a mandate is not violable and not shared, and
+-- modelling it as one would fatten the corpus the expiry mechanism exists to
+-- keep small. For skills it stays empty by editorial discipline — a skill
+-- describes itself in its own file, and a copy here would be verified by
+-- nobody. That is a discipline, not a branch in the code.
 CREATE TABLE IF NOT EXISTS consumers (
   project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
   name    TEXT NOT NULL,
   kind    TEXT NOT NULL CHECK (kind IN ('chat','skill')),
+  brief   TEXT,
   created TEXT NOT NULL,
   PRIMARY KEY (project, name)
+);
+
+-- A brief is identity, and a silent change to a role's identity is exactly
+-- the class of change this registry exists to record: the history IS the
+-- protection. Whole versions, written by triggers — a change made by hand
+-- with sqlite3 is recorded too, same doctrine as the rules.
+CREATE TABLE IF NOT EXISTS consumer_versions (
+  project  TEXT NOT NULL,
+  consumer TEXT NOT NULL,
+  version  INTEGER NOT NULL,
+  kind     TEXT,
+  brief    TEXT,
+  ts       TEXT NOT NULL,
+  action   TEXT NOT NULL,
+  PRIMARY KEY (project, consumer, version)
 );
 
 -- Named sets of consumers. managed=1 means the row was generated (a consumer's
@@ -479,6 +502,22 @@ CREATE TRIGGER IF NOT EXISTS trg_consumer_scope AFTER INSERT ON consumers BEGIN
        VALUES (NEW.project, NEW.name, NEW.name);
 END;
 
+CREATE TRIGGER IF NOT EXISTS trg_consumers_ins AFTER INSERT ON consumers BEGIN
+  INSERT INTO consumer_versions (project, consumer, version, kind, brief, ts, action)
+  VALUES (NEW.project, NEW.name,
+          (SELECT IFNULL(MAX(version),0)+1 FROM consumer_versions
+            WHERE project = NEW.project AND consumer = NEW.name),
+          NEW.kind, NEW.brief, strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'created');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_consumers_upd AFTER UPDATE ON consumers BEGIN
+  INSERT INTO consumer_versions (project, consumer, version, kind, brief, ts, action)
+  VALUES (NEW.project, NEW.name,
+          (SELECT IFNULL(MAX(version),0)+1 FROM consumer_versions
+            WHERE project = NEW.project AND consumer = NEW.name),
+          NEW.kind, NEW.brief, strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'amended');
+END;
+
 -- A managed scope must keep telling the truth about its own name.
 CREATE TRIGGER IF NOT EXISTS trg_managed_no_extra_member
 BEFORE INSERT ON scope_members
@@ -514,7 +553,8 @@ BEGIN
 END;
 """
 
-TABLES = ("projects", "project_domains", "consumers", "scopes", "scope_members",
+TABLES = ("projects", "project_domains", "consumers", "consumer_versions",
+          "scopes", "scope_members",
           "rules", "rule_scopes", "rule_refs", "rule_versions", "approvals")
 # Indexes the preflight has to see: only the ones that carry a GUARANTEE, never
 # the ones that carry speed. ux_rules_supersedes is what stops two pending
@@ -523,6 +563,7 @@ TABLES = ("projects", "project_domains", "consumers", "scopes", "scope_members",
 INDEXES = ("ux_rules_supersedes",)
 TRIGGERS = ("trg_rules_ins", "trg_rules_upd", "trg_rules_del",
             "trg_scope_link_ins", "trg_scope_link_del", "trg_consumer_scope",
+            "trg_consumers_ins", "trg_consumers_upd",
             "trg_managed_no_extra_member", "trg_managed_no_member_update",
             "trg_managed_no_rename", "trg_consumer_no_rename")
 
@@ -600,8 +641,12 @@ class Registry:
         # something to worry about — and an upgrade arriving is not that. The
         # supersedes index rides in with its column, so it is new exactly when
         # the column is.
-        _upgrade = ({"ux_rules_supersedes"}
-                    if "rules.supersedes" in self.migrated else set())
+        _upgrade = set()
+        if "rules.supersedes" in self.migrated:
+            _upgrade |= {"ux_rules_supersedes"}
+        if "consumers.brief" in self.migrated:
+            _upgrade |= {"consumer_versions", "trg_consumers_ins",
+                         "trg_consumers_upd"}
         self.repaired = [] if fresh else sorted((after - before) - _upgrade)
         self._fix_modes()
 
@@ -648,6 +693,19 @@ class Registry:
                         raise
                 else:
                     self.migrated.append(f"rules.{name}")
+        # The consumer gains its brief: identity next to the rules it binds.
+        # The versions table and its two triggers ride in through the
+        # executescript right after this, subtracted from `repaired` above.
+        if "consumers" in have:
+            ccols = {r[1] for r in self.cx.execute("PRAGMA table_info(consumers)")}
+            if "brief" not in ccols:
+                try:
+                    self.cx.execute("ALTER TABLE consumers ADD COLUMN brief TEXT")
+                except sqlite3.OperationalError as e:
+                    if "duplicate column" not in str(e).lower():
+                        raise
+                else:
+                    self.migrated.append("consumers.brief")
         # legacy_id leaves with the import: the index first, because a column
         # under a partial index cannot be dropped while the index stands.
         if "legacy_id" in cols:
@@ -802,35 +860,48 @@ class Registry:
                                 "VALUES (?,?,?)", (name, d, desc or None))
             self.cx.execute("INSERT INTO scopes (project, name, managed) VALUES (?,?,1)",
                             (name, ALL))
-            for cname, kind in cons:
-                self.cx.execute("INSERT INTO consumers (project, name, kind, created) "
-                                "VALUES (?,?,?,?)", (name, cname, kind, _now()))
+            for cname, kind, brief in cons:
+                self.cx.execute("INSERT INTO consumers (project, name, kind, brief, "
+                                "created) VALUES (?,?,?,?,?)",
+                                (name, cname, kind, brief or None, _now()))
             self.cx.execute("COMMIT")
         except Exception:
             self.cx.execute("ROLLBACK")
             raise
-        return {"created": name, "code": code, "consumers": [c for c, _ in cons],
+        return {"created": name, "code": code, "consumers": [c for c, _, _ in cons],
                 "domains": sorted(domains), "note": "put the code at the top of the "
                 "project instructions: it is the only way to reach this registry"}
 
     @staticmethod
-    def _normalise_consumers(consumers) -> list[tuple[str, str]]:
-        out: list[tuple[str, str]] = []
+    def _normalise_consumers(consumers) -> list[tuple[str, str, str]]:
+        """Each item may carry its BRIEF too — creating a consumer and giving
+        it its identity is one gesture, not two calls."""
+        out: list[tuple[str, str, str]] = []
         for item in consumers or []:
+            brief = ""
             if isinstance(item, str):
                 cname, kind = item, "chat"
             elif isinstance(item, dict):
                 cname, kind = item.get("name", ""), item.get("kind", "chat")
+                brief = item.get("brief") or ""
             else:
-                cname, kind = (list(item) + ["chat"])[:2]
+                vals = list(item)
+                cname = vals[0] if vals else ""
+                kind = vals[1] if len(vals) > 1 else "chat"
+                brief = vals[2] if len(vals) > 2 else ""
             cname = _norm_name(cname, "consumer")
             kind = (kind or "chat").strip().lower()
             if kind not in KINDS:
                 raise RulesError(f"kind {kind!r}: it must be one of {', '.join(KINDS)}")
             if cname == ALL.lower() or cname == ALL:
                 raise RulesError(f"{ALL} is reserved and is not a consumer name")
-            if cname not in [c for c, _ in out]:
-                out.append((cname, kind))
+            brief = (brief or "").strip()
+            if len(brief.encode()) > MAX_BODY_BYTES:
+                raise RulesError(
+                    f"the brief of {cname!r} is over {MAX_BODY_BYTES} bytes: split it — "
+                    "same discipline as a rule's body")
+            if cname not in [c for c, _, _ in out]:
+                out.append((cname, kind, brief))
         return out
 
     def rekey_project(self, code: str, new_code: str) -> dict:
@@ -846,24 +917,31 @@ class Registry:
                         "the old code no longer reaches anything"}
 
     def add_consumers(self, code: str, consumers) -> dict:
-        """Only adds. Removing a consumer would orphan the rules aimed at it."""
+        """Adds consumers — and writes BRIEFS. On a consumer that already
+        exists, an item carrying a brief updates it: the brief is written
+        through the door that already exists, not through a new one. Removing
+        a consumer stays impossible — it would orphan the rules aimed at it."""
         p = self._project(code)
         cons = self._normalise_consumers(consumers)
-        added = []
-        for cname, kind in cons:
+        added, brief_set = [], []
+        for cname, kind, brief in cons:
             if self.cx.execute("SELECT 1 FROM consumers WHERE project=? AND name=?",
                                (p, cname)).fetchone():
+                if brief:
+                    self.cx.execute("UPDATE consumers SET brief=? WHERE project=? "
+                                    "AND name=?", (brief, p, cname))
+                    brief_set.append(cname)
                 continue
             if self.cx.execute("SELECT 1 FROM scopes WHERE project=? AND name=?",
                                (p, cname)).fetchone():
                 raise RulesError(
                     f"a scope named {cname!r} already exists: a consumer and a scope share "
                     "one namespace, because every consumer gets a scope with its own name")
-            self.cx.execute("INSERT INTO consumers (project, name, kind, created) VALUES (?,?,?,?)",
-                            (p, cname, kind, _now()))
+            self.cx.execute("INSERT INTO consumers (project, name, kind, brief, created) "
+                            "VALUES (?,?,?,?,?)", (p, cname, kind, brief or None, _now()))
             added.append(cname)
-        return {"project": p, "added": added,
-                "note": "each one also got a scope of its own, made by the database"}
+        return {"project": p, "added": added, "brief_set": brief_set,
+                "note": "each new one also got a scope of its own, made by the database"}
 
     def add_domains(self, code: str, domains) -> dict:
         p = self._project(code)
@@ -1065,7 +1143,14 @@ class Registry:
         c = self._consumer(p, consumer)
         data = self._rules_for(p, c, expand)
         rules = [{"id": d["id"], "body": d["body"]} for d in data["rules"]]
-        return {"project": p, "consumer": c, "rules": rules, "count": len(rules),
+        # The BRIEF leads: "you are so-and-so, and these are your rules" is one
+        # round trip, which is the reason the field exists. Empty is not an
+        # error — a consumer without a mandate written down is still a
+        # consumer, and skills leave it empty on purpose.
+        brief = self.cx.execute("SELECT brief FROM consumers WHERE project=? AND name=?",
+                                (p, c)).fetchone()[0]
+        return {"project": p, "consumer": c, "brief": brief or "",
+                "rules": rules, "count": len(rules),
                 "outside_your_scope": data["outside"],
                 "note": "ordered by breadth: what comes first binds everyone. If an ID you "
                         "need is missing it is not undefined — it belongs to someone else"}

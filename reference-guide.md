@@ -50,7 +50,14 @@ anything.
 Read it that way too. The first lines are the foundations, the last are the
 particulars, and the position tells you the weight.
 
-What arrives is the CONSUMER reading: each rule as
+The answer LEADS with your **brief** — your mandate, who you are — before the
+rules: identity and law in one round trip. A consumer without a brief gets an
+empty field, not an error; skills leave it empty on purpose. The brief is
+written by maintenance (through `rules_consumers_add`) and versioned by the
+database like everything else here: a silent change to a role's identity is
+exactly the class of change this registry exists to record.
+
+Then the rules, in the CONSUMER reading: each rule as
 **the ID and the body, and nothing else** — the citations expanded.
 The title, the dates, the perimeter and
 the why are administration; they live in the maintenance reading
@@ -368,7 +375,12 @@ still where the truth survives.
   come out of. **`rules_project_create` · `rules_project_rekey` ·
   `rules_consumers_add` · `rules_domains_add` · `rules_scope_create`** —
   creation and custody. Consumers and domains are data: a new project does not
-  need a new container.
+  need a new container. A consumer may be born WITH its `brief` — its
+  mandate, returned at the head of its `rules_list` — and on a consumer that
+  already exists, `rules_consumers_add` with a brief updates it: that is the
+  door briefs are written through. Versioned by trigger, hand edits included;
+  a mandate is not a rule — it is not violable and not shared, and modelling
+  it as one would fatten the corpus the expiry mechanism keeps small.
 - **`rules_backup`** — a quiescent copy of the whole database (`VACUUM INTO`):
   it opens without recovery, and it is the one to take off-site. In WAL the
   database is three files, so copying one by hand is a corrupt backup.

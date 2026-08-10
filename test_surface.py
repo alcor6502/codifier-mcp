@@ -1533,5 +1533,23 @@ ok("ux_rules_supersedes" in _rules.INDEXES,
 ok(GUIDE_SRC.count("`supersedes`") >= 1,
    "the manual documents the supersede field")
 
+print("\n== the brief leads the list, and is versioned like everything else ==")
+
+# F1: the mandate that used to live in a role's memory file. One round trip —
+# who you are, then what binds you — and the history IS the protection.
+for _t in TOOLS:
+    if _t.name == "rules_list":
+        ok("brief" in (ast.get_docstring(_t) or ""),
+           "rules_list promises the brief at the head of the answer")
+    if _t.name == "rules_consumers_add":
+        ok("brief" in (ast.get_docstring(_t) or ""),
+           "rules_consumers_add documents the brief it writes")
+ok("consumer_versions" in _rules.TABLES
+   and {"trg_consumers_ins", "trg_consumers_upd"} <= set(_rules.TRIGGERS),
+   "the versions table and its triggers are declared, so the preflight sees them")
+ok(GUIDE_SRC.count("your **brief**") == 1,
+   "the manual pins the brief at the head of the list, exactly once",
+   GUIDE_SRC.count("your **brief**"))
+
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

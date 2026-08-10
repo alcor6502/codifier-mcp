@@ -2144,6 +2144,81 @@ def a_victim_retired_in_the_meantime_is_a_declared_noop():
 case("a victim already retired at approval: declared no-op, nothing rewritten",
      a_victim_retired_in_the_meantime_is_a_declared_noop)
 
+
+# =====================================================================
+head("the consumer brief: identity travels with the rules, versioned")
+# =====================================================================
+
+# F1: the mandate that used to live in a role's memory file. rules_list
+# returns it FIRST, before the rules, in the same call — "you are so-and-so,
+# and these are your rules" in one round trip. Empty is not an error. It is
+# written behind the admin code (an extension of consumers_add, not a new
+# door), versioned by the same trigger mechanism as the rules, and for
+# skills it stays empty by editorial discipline, not by a branch in the code.
+
+BRF = "Br7f2Xk44mm"
+BRF_NAME = "Brief bench"
+
+case("create the brief bench, one consumer born WITH its brief", lambda: R.create_project(
+    BRF, BRF_NAME,
+    [{"name": "architect", "kind": "chat",
+      "brief": "# Architect\n\nYou maintain the corpus."},
+     ("worker", "skill")],
+    {"VA": "vault"}))
+
+
+def the_brief_arrives_first_and_empty_is_not_an_error():
+    out = R.list_rules(BRF, "architect")
+    assert out["brief"] == "# Architect\n\nYou maintain the corpus.", out.get("brief")
+    keys = list(out)
+    assert keys.index("brief") < keys.index("rules"), \
+        f"the brief must come BEFORE the rules: {keys}"
+    bare = R.list_rules(BRF, "worker")
+    assert bare["brief"] == "", \
+        f"a consumer without a brief gets an empty field, not an error: {bare.get('brief')!r}"
+
+
+case("rules_list leads with the brief, and empty is not an error",
+     the_brief_arrives_first_and_empty_is_not_an_error)
+
+
+def the_brief_is_written_through_consumers_add_and_versioned():
+    # On an EXISTING consumer, add_consumers with a brief updates it: the
+    # extension of the door that already exists, not a new one.
+    R.add_consumers(BRF, [{"name": "worker", "kind": "skill",
+                           "brief": "worker now has a mandate"}])
+    assert R.list_rules(BRF, "worker")["brief"] == "worker now has a mandate"
+    rows = R.cx.execute(
+        "SELECT version, action, brief FROM consumer_versions "
+        "WHERE project=? AND consumer='worker' ORDER BY version",
+        (BRF_NAME,)).fetchall()
+    assert [r["action"] for r in rows] == ["created", "amended"], \
+        [dict(r) for r in rows]
+    assert rows[0]["brief"] is None and rows[-1]["brief"] == "worker now has a mandate"
+
+
+case("the brief writes through consumers_add, and the triggers keep versions",
+     the_brief_is_written_through_consumers_add_and_versioned)
+
+
+def a_hand_edit_of_the_brief_still_lands_in_history():
+    R.cx.execute("UPDATE consumers SET brief='edited by hand' "
+                 "WHERE project=? AND name='worker'", (BRF_NAME,))
+    last = R.cx.execute(
+        "SELECT brief, action FROM consumer_versions "
+        "WHERE project=? AND consumer='worker' ORDER BY version DESC LIMIT 1",
+        (BRF_NAME,)).fetchone()
+    assert last["brief"] == "edited by hand" and last["action"] == "amended", dict(last)
+
+
+case("a brief edited by hand with sqlite3 is versioned too: the trigger writes",
+     a_hand_edit_of_the_brief_still_lands_in_history)
+
+refuses("a brief over the body ceiling",
+        lambda: R.add_consumers(BRF, [{"name": "worker", "kind": "skill",
+                                       "brief": "z" * (MAX_BODY_BYTES + 1)}]),
+        "split", RulesError)
+
 print(f"\n{OK} passed, {FAIL} failed")
 if FAILURES:
     print("failed: " + "; ".join(FAILURES))

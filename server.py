@@ -234,6 +234,10 @@ def rules_list(project: str, consumer: str) -> dict:
     to the most specific. This replaces opening the rule files — there is
     nothing else to read.
 
+    The answer LEADS with your `brief` — your mandate, who you are — before
+    the rules: identity and law in one round trip. A consumer without a brief
+    gets an empty field, not an error; skills leave it empty on purpose.
+
     The order is the BREADTH of the scope a rule reaches you through: what comes
     first binds everyone, what comes last is yours alone. Each rule arrives as
     its ID and its BODY, citations expanded — and nothing else. That is the
@@ -638,6 +642,15 @@ def rules_project_rekey(project: str, new_project_code: str, code: str) -> dict:
 def rules_consumers_add(project: str, consumers: list, code: str) -> dict:
     """MAINTENANCE. Add consumers to a project — chats or skills. Each one gets
     a scope of its own name, made by the database.
+
+    An item may carry a `brief` — the consumer's mandate, in Markdown,
+    returned at the head of its rules_list: creating a consumer and giving it
+    its identity is one gesture. On a consumer that already EXISTS, an item
+    with a brief updates it — this is the door briefs are written through,
+    and the database versions every change by trigger, hand edits included.
+    Same size discipline as a rule's body. For skills leave it empty: a skill
+    describes itself in its own file, and a copy here would be verified by
+    nobody.
 
     Only adding: removing a consumer would orphan the rules aimed at it. And a
     consumer is never RENAMED — a renamed consumer is a different consumer, and
