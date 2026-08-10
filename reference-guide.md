@@ -66,10 +66,10 @@ burns numbers even while only twenty are alive. Older text may still say
 `VA-02`; wherever an ID is read it is padded, so `VA-02` and `VA-0002` are the
 same rule.
 
-If a rule had an identifier in the old Markdown, pass it as `legacy_id`. It is
-recorded next to the new one so the citations can be mapped afterwards, and no
-two rules may claim the same one. It is **read only**: there is no way to fetch
-a rule by it, because one thing must have one name.
+The identifiers of the old Markdown do not enter the registry at all: the
+old->new mapping is kept in the migration files, outside, because one thing
+must have one name and a relic conserved in the clean system is how the old
+corpus grows back.
 
 ## CITATIONS: `(VA-0002)`
 
@@ -124,7 +124,7 @@ deliberate: nobody rewrites prose by pattern. Such a rule can still be renamed,
 retyped and retired — **`rules_fix` checks the body only if you pass one**.
 Read that literally: what is exempt is the body you leave alone, not the body
 that has not changed. A `body` you pass is checked before anything compares it
-with what is stored, so handing back the old text of a legacy rule to change
+with what is stored, so handing back the old text of a rule born before this format to change
 only its title is refused for the pointers that text always had. Omit the
 field and the same edit goes through. What is already stored is reported by
 `rules_check`, which is a report and not a door slammed on unrelated work.
@@ -229,7 +229,6 @@ the `.db` in hand. Every approval records whether it was signed, so the question
 | snapshot to Markdown | `rules_export` | yes |
 | create a project, consumer, domain, group | `rules_project_create` · `rules_consumers_add` · `rules_domains_add` · `rules_scope_create` | yes |
 | change who is in a group | `rules_scope_edit` | yes |
-| seed a project from the old Markdown | `rules_import` | yes |
 | copy the database off-site | `rules_backup` | yes |
 
 `rules_get` takes a **list**, and asking for the batch at once is what turns a
@@ -254,15 +253,12 @@ not tell you that, by design.
 |---|---|---|
 | IDs per `rules_get` | 50 | ask in batches; the answer is a dict you can merge |
 | body of one rule | 64000 bytes | it is two rules: split it |
-| rules per `rules_import` | 500 | more than this is a seeding pass, not an import |
 | numbers in one domain | 9999 | a domain that burns these needs splitting, not widening |
 
 A ceiling refuses before it writes anything, and says which one it was. None of
 them truncates: there is no call here that silently gives you part of an answer.
-One exception, and it is in the tool that is on its way out: `rules_import` does
-not check the size of a body, and it files what it imports **permanent**, so
-nothing it brings in ever expires. That is the practical reason a corpus is
-seeded by hand, one rule at a time.
+There is no bulk import: a corpus is seeded by hand, one rule at a time,
+through the same propose/approve door as any other rule.
 
 The expiry term is not a ceiling and is not written here: it is set by the
 deployment, and `rules_project_info` reports it in `approval.provisional_days`.

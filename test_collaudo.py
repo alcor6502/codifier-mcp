@@ -28,7 +28,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from rules import (ALL, FILE_MODE, MAX_BODY_BYTES, MAX_GET_IDS, MAX_IMPORT,
+from rules import (ALL, FILE_MODE, MAX_BODY_BYTES, MAX_GET_IDS,
                    Registry, RulesError, VERSION, _plus_days)
 
 # =====================================================================
@@ -230,10 +230,10 @@ head("proposing: a proposal reaches nobody, and the NUMBER is not yours")
 VA1 = R.propose(
     FP, "VA", "R", "Re-read the sources",
     "SOURCE data is re-read right before writing the derivative.",
-    ["*"], "initial import", "architect", legacy_id="VA-02")["id"]
+    ["*"], "initial import", "architect")["id"]
 PE1 = R.propose(
     FP, "PE", "M", "The method of the four", "The four deliberative chats agree first.",
-    ["deliberativi"], "initial import", "architect", legacy_id="PE-01")["id"]
+    ["deliberativi"], "initial import", "architect")["id"]
 FI1 = R.propose(
     FP, "FI", "M", "Estimating the bracket",
     "The bracket is estimated from the rollup by character.",
@@ -263,25 +263,6 @@ def the_number_cannot_be_asked_for():
 case("propose() has no way to receive a number", the_number_cannot_be_asked_for)
 
 
-def legacy_id_comes_back_but_is_not_a_door():
-    """It is recorded, it is readable, and it is NOT a second way to address a
-    rule: two names for one thing is the ambiguity this project keeps out."""
-    d = [x for x in R.pending(FP)["waiting"] if x["id"] == VA1][0]
-    assert d["legacy_id"] == "VA-02", d
-    assert R.history(FP, VA1)["legacy_id"] == "VA-02"
-    assert "legacy_id" not in inspect_get_params(R.get_rules)
-
-
-def inspect_get_params(fn):
-    import inspect
-    return list(inspect.signature(fn).parameters)
-
-
-case("legacy_id is recorded and read back", legacy_id_comes_back_but_is_not_a_door)
-
-refuses("two rules cannot claim the same old identifier",
-        lambda: R.propose(FP, "ST", "R", "x", "y", ["*"], "m", legacy_id="VA-02"),
-        "was already filed", RulesError)
 refuses("an undeclared domain",
         lambda: R.propose(FP, "ZZ", "R", "x", "y", ["*"], "m"), "not declared", RulesError)
 refuses("another project's domain",
@@ -1325,61 +1306,33 @@ refuses("rekey onto a malformed code",
         lambda: R.rekey_project(HT, "short"), "8 to 32", RulesError)
 
 # =====================================================================
-head("import: once, on an empty project")
+head("a third project, seeded the only way left: one rule at a time")
 # =====================================================================
 
-refuses("import onto a project that already holds rules",
-        lambda: R.import_rules(FP, [{"id": "VA-0008", "title": "x", "body": "y"}], "m"),
-        "only on an empty project", RulesError)
+# There is no bulk door any more. What a migration used to get from
+# import_rules — active rules in a fresh project — now takes the same three
+# calls as any other rule: propose, batch, approve. That is the point, not a
+# regression: the pass over the corpus IS the migration.
 
 
-def import_reports_what_it_refused():
+def a_project_is_seeded_by_proposing():
     R.create_project(CASA, NAME_CASA, [("architect", "chat")], {"CA": "house"})
-    out = R.import_rules(CASA, [
-        # A body written the OLD way: the acronym bare, which is what the old
-        # parser read as a citation. If import only saw (...) the whole
-        # reference graph would vanish silently and the audit in its wake would
-        # call a broken project clean — worse than not auditing at all.
-        {"id": "CA-01", "type": "R", "title": "First", "body": "See CA-02.",
-         "scopes": ["architect"]},
-        {"id": "CA-01", "type": "R", "title": "duplicate", "body": "z", "scopes": ["*"]},
-        {"id": "CA-03", "type": "X", "title": "bad type", "body": "z", "scopes": ["*"]},
-        {"id": "CA-04", "type": "R", "title": "no body", "body": "", "scopes": ["*"]},
-    ], reason="migration from the Markdown files")
-    assert out["imported"] == 1 and out["ids"] == ["CA-0001"], out
-    assert len(out["rejected"]) == 3, out["rejected"]
-    assert out["audit"]["broken_pointers"] == [{"from": "CA-0001", "cites": "CA-0002"}], \
-        "import does NOT validate, but it does RECORD: the bare acronym is a reference"
-    assert R._row(NAME_CASA, "CA-0001")["legacy_id"] == "CA-01", \
-        "the ID given to import IS the old identifier: it is kept as the mapping"
-
-
-case("import: what goes in, what is refused, and the audit in its wake",
-     import_reports_what_it_refused)
-
-
-def imported_rules_are_active_and_permanent():
-    row = R._row(NAME_CASA, "CA-0001")
-    assert row["status"] == "active" and row["permanence"] == "permanent"
-    assert row["expires_at"] is None
+    rid = R.propose(CASA, "CA", "R", "First of the house", "Body of the house.",
+                    ["architect"], "seeded by hand", "architect")["id"]
+    assert rid == "CA-0001", rid
+    R.approve(CASA, R.batch(CASA)["digest"])
+    row = R._row(NAME_CASA, rid)
+    assert row["status"] == "active" and row["permanence"] == "provisional"
+    assert row["expires_at"], "a seeded rule expires like any other: rule five applies"
     assert R.list_rules(CASA, "architect")["count"] == 1
 
 
-case("seeded rules are active and permanent: a migration is not a proposal",
-     imported_rules_are_active_and_permanent)
+case("a fresh project fills through propose/approve, and rule five applies",
+     a_project_is_seeded_by_proposing)
 
 EMPTY = "Ee11Ff22Gg33"
-case("an empty project to try the refusals on", lambda: R.create_project(
+case("an empty project stays possible, and empty", lambda: R.create_project(
     EMPTY, "Empty", [("architect", "chat")], {"CA": "house"}))
-refuses("import over the ceiling",
-        lambda: R.import_rules(EMPTY, [{"id": "CA-01"}] * (MAX_IMPORT + 1), "m"),
-        "the ceiling is", RulesError)
-refuses("import without a reason",
-        lambda: R.import_rules(EMPTY, [{"id": "CA-01", "type": "R", "title": "x",
-                                        "body": "y", "scopes": ["*"]}], ""),
-        "reason is mandatory", RulesError)
-refuses("import of nothing at all",
-        lambda: R.import_rules(EMPTY, [], "m"), "nothing to import", RulesError)
 
 # =====================================================================
 head("the signature is gone, and the digest stays")
@@ -1443,7 +1396,6 @@ head("derivatives: export and backup")
 def export_full_and_per_consumer():
     e = R.export(FP)
     assert VA1 in e["markdown"] and "_retired_" in e["markdown"]
-    assert "was VA-02" in e["markdown"], "the maintenance export carries the old identifier"
     assert "Health Tracking" not in e["markdown"], "only its own project"
     ex = R.export(FP, "tax")
     assert ex["consumer"] == "tax"
@@ -1546,17 +1498,16 @@ case("reopen: WAL, whole, three projects, history and lists intact",
      reopen_finds_everything_where_it_was)
 
 # =====================================================================
-head("the upgrade: a database written before the counter existed")
+head("the upgrade: a database shaped like the versions before this one")
 # =====================================================================
 
-# The migration is ONE COLUMN, and that is the whole of it. An earlier version
-# widened every old two-digit ID across every table and rewrote the bodies to
-# match; it was deleted. A regex sweep over prose invents citations that were
-# never citations — a ticket number became a pointer, a URL was corrupted — and
-# moving IDs behind the author's back moves the very pointers the seeding pass
-# exists to re-decide. A migration is not code, it is the work: the rules go
-# back in one at a time, and the only thing the engine owes that pass is
-# somewhere to write down which old identifier a new rule replaces.
+# The migration DROPS the relic columns and converts nothing. legacy_id was
+# the ledger of a bulk-import world: with the import gone the old->new
+# mapping lives in the migration files, outside the registry, and the column
+# would be a relic conserved in the clean system — the exact thing the
+# seeding pass exists to kill. The signature columns went with the signature.
+# Bodies, IDs, versions and refs are untouched: a migration is not code, it
+# is the work, and this method's whole job is to leave the work alone.
 
 OLD_DB = os.path.join(D, "legacy.db")
 
@@ -1578,7 +1529,7 @@ CREATE TRIGGER trg_rules_upd AFTER UPDATE ON rules BEGIN
 END"""
 
 
-def an_old_database_gains_a_column_and_nothing_else():
+def a_v16_database_loses_the_relic_columns_and_nothing_else():
     o = Registry(OLD_DB)
     o.create_project("Ll11Mm22Nn33", "Legacy", [("architect", "chat")],
                      {"PE": "perimeter", "VA": "vault"})
@@ -1597,31 +1548,28 @@ def an_old_database_gains_a_column_and_nothing_else():
             ("Legacy", rid, dom, seq, rid, body))
         o.cx.execute("COMMIT")
     o.cx.execute("INSERT INTO rule_refs (project, src, dst) VALUES ('Legacy','PE-99','VA-07')")
+    # Shape the file like a v1.6.0 database: the legacy_id column WITH data in
+    # it and its partial unique index, and the signature columns on approvals.
+    o.cx.execute("ALTER TABLE rules ADD COLUMN legacy_id TEXT")
+    o.cx.execute("UPDATE rules SET legacy_id='OLD-99' "
+                 "WHERE project='Legacy' AND id='PE-99'")
+    o.cx.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_rules_legacy "
+                 "ON rules(project, legacy_id) WHERE legacy_id IS NOT NULL")
+    o.cx.execute("ALTER TABLE approvals ADD COLUMN signature TEXT")
+    o.cx.execute("ALTER TABLE approvals ADD COLUMN signed INTEGER NOT NULL DEFAULT 1")
+    # Photographed AFTER the reshape: the reshape itself writes history (the
+    # UPDATE above goes through the trigger, as it must), the migration none.
     before = {r[0]: r[1] for r in o.cx.execute(
         "SELECT id, body FROM rules WHERE project='Legacy'")}
     versions = o.cx.execute("SELECT COUNT(*) FROM rule_versions WHERE project='Legacy'"
                             ).fetchone()[0]
-    # Take the additions back off, so what is on disk is shaped like a v1.0.4
-    # database and the reopen has something real to migrate: no legacy_id, no
-    # event, the update trigger of that day copying NEW.reason — and the
-    # approvals table still carrying the signature columns of its day.
-    o.cx.execute("DROP INDEX ux_rules_legacy")
-    o.cx.execute("ALTER TABLE rules DROP COLUMN legacy_id")
-    if "event" in {r[1] for r in o.cx.execute("PRAGMA table_info(rules)")}:
-        o.cx.execute("DROP TRIGGER trg_rules_upd")
-        o.cx.execute("ALTER TABLE rules DROP COLUMN event")
-        o.cx.execute(_OLD_TRG_UPD)
-    o.cx.execute("ALTER TABLE approvals ADD COLUMN signature TEXT")
-    o.cx.execute("ALTER TABLE approvals ADD COLUMN signed INTEGER NOT NULL DEFAULT 1")
     o.close()
 
     n = Registry(OLD_DB)
     assert n.repaired == [], f"an upgrade is not a repair: {n.repaired}"
-    assert n.migrated == ["rules.legacy_id", "rules.event", "trg_rules_upd",
+    assert n.migrated == ["rules.legacy_id dropped",
                           "approvals.signature dropped",
                           "approvals.signed dropped"], n.migrated
-    acols = {r[1] for r in n.cx.execute("PRAGMA table_info(approvals)")}
-    assert "signature" not in acols and "signed" not in acols, sorted(acols)
     after = {r[0]: r[1] for r in n.cx.execute(
         "SELECT id, body FROM rules WHERE project='Legacy'")}
     assert after == before, "not one ID and not one body moved"
@@ -1629,43 +1577,26 @@ def an_old_database_gains_a_column_and_nothing_else():
                         ).fetchone()[0] == versions, "and no version was invented"
     assert n.cx.execute("SELECT src, dst FROM rule_refs WHERE project='Legacy'"
                         ).fetchone()[0:2] == ("PE-99", "VA-07")
-    # The column is there, empty, waiting for the seeding pass to fill it.
-    assert "legacy_id" in {r[1] for r in n.cx.execute("PRAGMA table_info(rules)")}
-    assert n.cx.execute("SELECT COUNT(*) FROM rules WHERE project='Legacy' "
-                        "AND legacy_id IS NOT NULL").fetchone()[0] == 0
-    # A rule filed from here on takes a four-digit number from the counter, and
-    # records which old identifier it replaces. That mapping IS the migration.
+    cols = {r[1] for r in n.cx.execute("PRAGMA table_info(rules)")}
+    assert "legacy_id" not in cols, sorted(cols)
+    idx = {r[0] for r in n.cx.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "ux_rules_legacy" not in idx, sorted(idx)
+    # The counter still walks past the old numbers: nothing about the drop
+    # touched the sequence.
     out = n.propose("Ll11Mm22Nn33", "VA", "R", "The first rule of the new corpus",
-                    "Body.", ["*"], "the seeding starts", "architect", legacy_id="VA-07")
-    assert out["id"] == "VA-0008", out          # the counter walks past the old 7
-    assert out["legacy_id"] == "VA-07"
+                    "Body.", ["*"], "the seeding starts", "architect")
+    assert out["id"] == "VA-0008", out
     n.close()
 
     again = Registry(OLD_DB)
-    assert again.migrated == [], f"the column is added once: {again.migrated}"
+    assert again.migrated == [], f"the migration ran twice: {again.migrated}"
     assert again.repaired == []
     again.close()
 
 
-case("an old database gains one column, and nothing else moves",
-     an_old_database_gains_a_column_and_nothing_else)
-
-
-def the_old_identifier_is_a_mapping_and_not_a_door():
-    """legacy_id is read-only by design. A rules_get(legacy_id=…) would be a
-    second name for one thing, which is the ambiguity this project keeps out
-    everywhere else. It is a note for the conversion pass, and when the pass is
-    over it goes."""
-    n = Registry(OLD_DB)
-    got = n.pending("Ll11Mm22Nn33")["waiting"]
-    assert [x["legacy_id"] for x in got if x["id"] == "VA-0008"] == ["VA-07"]
-    assert "legacy_id" not in inspect_get_params(n.get_rules)
-    assert "legacy_id" not in inspect_get_params(n.search)
-    n.close()
-
-
-case("the old identifier comes back in the views, and opens nothing",
-     the_old_identifier_is_a_mapping_and_not_a_door)
+case("a v1.6.0-shaped database loses the relic columns, and nothing else moves",
+     a_v16_database_loses_the_relic_columns_and_nothing_else)
 
 # =====================================================================
 head("the engine is used from a THREAD POOL, not from here")
@@ -1986,13 +1917,16 @@ def an_old_database_gains_the_event_column_and_the_new_trigger():
         "the rules table has no `event` column: the events still live in `reason`"
     # Reshape the file the way v1.5.0 left it: no `event` column, the update
     # trigger copying NEW.reason into the history, `reason` already
-    # overwritten by the last event, and the signature columns still on
-    # approvals. The dirt is PART of the shape.
+    # overwritten by the last event, the legacy_id column with its index, and
+    # the signature columns still on approvals. The dirt is PART of the shape.
     o.cx.execute("DROP TRIGGER trg_rules_upd")
     o.cx.execute("UPDATE rules SET reason='approved' "
                  "WHERE project='Migration bench'")
     o.cx.execute("ALTER TABLE rules DROP COLUMN event")
     o.cx.execute(_OLD_TRG_UPD)
+    o.cx.execute("ALTER TABLE rules ADD COLUMN legacy_id TEXT")
+    o.cx.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_rules_legacy "
+                 "ON rules(project, legacy_id) WHERE legacy_id IS NOT NULL")
     o.cx.execute("ALTER TABLE approvals ADD COLUMN signature TEXT")
     o.cx.execute("ALTER TABLE approvals ADD COLUMN signed INTEGER NOT NULL DEFAULT 1")
     versions = o.cx.execute("SELECT COUNT(*) FROM rule_versions "
@@ -2001,7 +1935,8 @@ def an_old_database_gains_the_event_column_and_the_new_trigger():
 
     n = Registry(C1M_DB)
     assert n.repaired == [], f"an upgrade is not a repair: {n.repaired}"
-    assert n.migrated == ["rules.event", "trg_rules_upd",
+    assert n.migrated == ["rules.event", "rules.legacy_id dropped",
+                          "trg_rules_upd",
                           "approvals.signature dropped",
                           "approvals.signed dropped"], n.migrated
     # NOTHING was converted: the reason v1.5.0 dirtied stays dirty. It is
@@ -2036,6 +1971,45 @@ def an_old_database_gains_the_event_column_and_the_new_trigger():
 case("an old database gains the event column and the rebuilt trigger, "
      "and nothing else moves",
      an_old_database_gains_the_event_column_and_the_new_trigger)
+
+
+# =====================================================================
+head("the bulk import is gone, and legacy_id with it")
+# =====================================================================
+
+# Decided 2026-08-10, and executed here: an import stamps one reason across
+# the batch, files everything permanent so rule five never starts, and asks
+# no questions — the seeding pass is not the price of the migration, it is
+# its content. The old->new mapping lives in the migration files, outside
+# the registry: relics do not enter the clean system.
+
+
+def the_import_door_is_bricked():
+    import rules as _r
+    assert not hasattr(R, "import_rules"), "import_rules is still on the Registry"
+    assert not hasattr(_r, "MAX_IMPORT"), "MAX_IMPORT is still declared"
+    assert not hasattr(_r, "RE_BARE_LEGACY"), "the legacy citation parser survives"
+    assert not hasattr(_r, "RE_LEGACY"), "the legacy_id validator survives"
+    assert not hasattr(_r.Registry, "_legacy_cites"), "_legacy_cites survives"
+
+
+case("the import door is bricked: no method, no ceiling, no legacy parser",
+     the_import_door_is_bricked)
+
+
+def no_rule_carries_a_legacy_id():
+    import inspect
+    params = list(inspect.signature(R.propose).parameters)
+    assert "legacy_id" not in params, f"propose still takes legacy_id: {params}"
+    cols = {r[1] for r in R.cx.execute("PRAGMA table_info(rules)")}
+    assert "legacy_id" not in cols, f"the rules table still has legacy_id: {sorted(cols)}"
+    idx = {r[0] for r in R.cx.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "ux_rules_legacy" not in idx, "the legacy unique index survives"
+
+
+case("no rule carries a legacy identifier: no column, no index, no parameter",
+     no_rule_carries_a_legacy_id)
 
 print(f"\n{OK} passed, {FAIL} failed")
 if FAILURES:

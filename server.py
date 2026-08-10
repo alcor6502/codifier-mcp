@@ -119,7 +119,7 @@ if registry.repaired:
                 ", ".join(registry.repaired))
 # A schema change on a database in service happens once and cannot be undone, so
 # the boot that does it says so. It is deliberately a short list: the migration
-# adds a column and converts NOTHING — the rules go back in by hand, one at a
+# moves columns and converts NOTHING — the rules go back in by hand, one at a
 # time, and an engine that rewrote them behind the author's back would be moving
 # the very pointers that pass exists to re-decide.
 if registry.migrated:
@@ -299,7 +299,7 @@ def rules_pending(project: str, consumer: str = "") -> dict:
 @tool
 def rules_propose(project: str, domain: str, type: str, title: str, body: str,
                   scopes: list[str], reason: str, proposed_by: str = "",
-                  changelog: str = "", source: str = "", legacy_id: str = "") -> dict:
+                  changelog: str = "", source: str = "") -> dict:
     """File a proposal for a new rule. It needs ONLY the project code, because a
     proposal reaches nobody until its batch is approved: it cannot do harm, and
     a chat that deposits one can stop keeping a note about it.
@@ -315,9 +315,7 @@ def rules_propose(project: str, domain: str, type: str, title: str, body: str,
     everyone present and future. `reason` is mandatory: without the why a rule
     cannot be defended, and at the first opportunity it gets reopened.
     `proposed_by` is your own consumer name — it is what makes rules_pending
-    able to show you your own. `legacy_id` is the old markdown identifier, if
-    this rule had one: it is recorded so the citations can be mapped afterwards,
-    and no two rules may claim the same one.
+    able to show you your own.
 
     CITATIONS IN THE BODY are an ID in ROUND BRACKETS, `(VA-0002)`. An ordinary
     parenthesis is ordinary prose — what makes a token a citation is the shape
@@ -337,7 +335,7 @@ def rules_propose(project: str, domain: str, type: str, title: str, body: str,
     into a state where its own pointers were right only while it was being
     written."""
     return registry.propose(project, domain, type, title, body, scopes, reason,
-                            proposed_by, changelog, source, legacy_id)
+                            proposed_by, changelog, source)
 
 
 # =====================================================================
@@ -666,23 +664,8 @@ def rules_scope_edit(project: str, name: str, code: str,
 
 
 # =====================================================================
-# Migration and service
+# Service
 # =====================================================================
-
-@tool
-def rules_import(project: str, rules: list[dict], reason: str, code: str,
-                 permanent: bool = True) -> dict:
-    """MAINTENANCE. Bulk import for the MIGRATION from the Markdown files. Only
-    on an EMPTY project: a migration happens once, on a clean table.
-
-    Each item: {"id","type","title","body","scopes",["changelog"],["source"]}.
-    Rejected rules are listed with the reason and the others go through; fix
-    them and file them with rules_propose. rules_check runs in its wake, and the
-    broken pointers it finds were already in the Markdown — they were just not
-    visible."""
-    _admin(code)
-    return registry.import_rules(project, rules, reason, permanent)
-
 
 @tool
 def rules_backup(code: str) -> dict:

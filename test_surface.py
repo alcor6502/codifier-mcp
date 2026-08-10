@@ -236,7 +236,7 @@ UNGATED_ON_PURPOSE = {
 
 print("\n== the engine, as the seam sees it ==")
 ok(len(METHODS) > 30, f"Registry parsed: {len(METHODS)} methods")
-ok({"propose", "approve", "retire", "import_rules"} <= MUTATING,
+ok({"propose", "approve", "retire", "amend"} <= MUTATING,
    f"the mutating set is derived, not typed: {len(MUTATING)} methods")
 ok("list_rules" not in MUTATING and "check" not in MUTATING,
    "and it does not sweep the read-only ones in with them")
@@ -526,8 +526,6 @@ if _PROPOSE is not None:
        "rules_propose takes NO id: the number is not a choice, it is a position",
        f"parameters: {params}")
     ok("domain" in params, "rules_propose takes the domain instead", f"parameters: {params}")
-    ok("legacy_id" in params,
-       "rules_propose takes legacy_id: the mapping is built while the work happens")
 
 _ENGINE_PROPOSE = METHODS.get("propose")
 if _ENGINE_PROPOSE is not None:
@@ -566,7 +564,6 @@ ok("_widen_ids" not in RULES_SRC and "_widen_bodies" not in RULES_SRC,
    "no ID or body conversion survives in the engine")
 ok("no `id` parameter" in GUIDE_SRC,
    "the manual says the number is not a parameter")
-ok("legacy_id" in GUIDE_SRC, "the manual documents legacy_id")
 
 # The two readings. The consumer reading is the ID and the body; the why is
 # readable where a person decides. Each sentence is pinned in the manual that
@@ -611,7 +608,6 @@ import rules as _rules                                          # noqa: E402
 
 for _label, _attr, _unit in (("IDs per `rules_get`", "MAX_GET_IDS", ""),
                              ("body of one rule", "MAX_BODY_BYTES", " bytes"),
-                             ("rules per `rules_import`", "MAX_IMPORT", ""),
                              ("numbers in one domain", "MAX_SEQ", "")):
     _v = getattr(_rules, _attr, None)
     ok(_v is not None, f"the engine still declares {_attr}")
@@ -1508,6 +1504,28 @@ if _APPR is not None:
 ok("cryptography" not in source(os.path.join(HERE, "requirements.txt"))
    and "cryptography" not in DOCKERFILE,
    "no cryptography dependency survives outside the engine's own")
+
+print("\n== the import door is bricked, and legacy_id went with it ==")
+
+# The seeding pass is not the price of the migration, it is its content: the
+# rules go back in one at a time, through rules_propose, each one read and
+# decided. The old->new mapping lives in the migration files, outside the
+# registry — relics do not enter the clean system.
+ok("rules_import" not in TOOL_NAMES, "rules_import is no longer a tool")
+ok("import_rules" not in METHODS, "import_rules is no longer a method of the engine")
+_MOD_CONSTS = {t.id for n in ENGINE_TREE.body if isinstance(n, ast.Assign)
+               for t in n.targets if isinstance(t, ast.Name)}
+ok("MAX_IMPORT" not in _MOD_CONSTS, "MAX_IMPORT is no longer declared")
+ok("RE_BARE_LEGACY" not in _MOD_CONSTS and "RE_LEGACY" not in _MOD_CONSTS,
+   "the legacy parser and validator are gone")
+if _PROPOSE is not None:
+    _pp = [a.arg for a in _PROPOSE.args.posonlyargs + _PROPOSE.args.args]
+    ok("legacy_id" not in _pp, "rules_propose no longer takes legacy_id", _pp)
+if _ENGINE_PROPOSE is not None:
+    _ep = [a.arg for a in _ENGINE_PROPOSE.args.posonlyargs + _ENGINE_PROPOSE.args.args]
+    ok("legacy_id" not in _ep, "the engine's propose() agrees: no legacy_id", _ep)
+ok("ux_rules_legacy" not in _rules.INDEXES and "ux_rules_legacy" not in _rules.SCHEMA,
+   "the legacy unique index is out of the schema and out of INDEXES")
 
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

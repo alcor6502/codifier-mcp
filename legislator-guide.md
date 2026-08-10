@@ -269,13 +269,12 @@ thing renewal has to work with.
 
 ### Why the corpus goes back in by hand
 
-`rules_import` exists and it is the wrong door, for reasons that are worth
-having in front of you while the temptation is live. It writes one identical
-`reason` across every rule in the batch — the field is decorative from birth,
-and the first renewal has nothing to decide on. It files them **permanent** by
-default, so nothing expires and rule five never starts. And it asks you
-nothing: not whether the rule is still needed, not whether another one already
-says it, not whether that cross-reference survives gate three.
+There is no bulk door, and that is a decision, not a gap. An import writes
+one identical `reason` across every rule in the batch — the field is
+decorative from birth, and the first renewal has nothing to decide on. It
+files everything without asking whether the rule is still needed, whether
+another one already says it, whether that cross-reference survives gate
+three. The engine used to have one; it was removed rather than guarded.
 
 The passage by hand is not the *price* of the migration. It is its
 **content** — it is the only moment at which every line of the corpus gets

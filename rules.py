@@ -116,10 +116,6 @@ RE_CITE = re.compile(
 # `va-0001`, `Va-0001`, `vA-0001` are the same mistake, not three different ones,
 # and everywhere else an ID is read case does not matter either.
 RE_BARE = re.compile(r"\b([A-Za-z]{2})-(\d{2,})")
-# What the engine looked for BEFORE this change: uppercase, two or three digits.
-# Kept because import_rules has to read a legacy body exactly as the engine that
-# wrote it would have, and not one token more.
-RE_BARE_LEGACY = re.compile(r"\b[A-Z]{2}-\d{2,3}\b")
 # Reading expands a citation with the current title; this lets that expanded
 # form come back in through rules_fix without the gloss having to be stripped
 # by hand. Only the pointer is ever stored, so the gloss cannot go stale.
@@ -131,13 +127,11 @@ GLOSS_SEP = " — "
 
 RE_CODE = re.compile(r"^[A-Za-z0-9]{8,32}$")
 RE_NAME = re.compile(r"^[a-z0-9][a-z0-9 _-]{0,40}$")
-RE_LEGACY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,31}$")
 
 FILE_MODE = 0o644                       # root writes, everyone else reads
 DIR_MODE = 0o755
 DEFAULT_PROVISIONAL_DAYS = 90
 MAX_BODY_BYTES = 64_000
-MAX_IMPORT = 500
 MAX_GET_IDS = 50
 
 # Identical answer for a missing code and a wrong one: a message that told them
@@ -217,21 +211,6 @@ def _norm_id(rid: str) -> str:
     if not m:
         raise RulesError(f"malformed ID {rid!r}: it must be DOMAIN-NNNN, e.g. VA-0002")
     return f"{m.group(1)}-{int(m.group(2)):0{ID_DIGITS}d}"
-
-
-def _norm_legacy(v: str) -> str:
-    """The old markdown identifier of a rule. It is normalised but NOT parsed:
-    it is a label from another world, and pretending it has our grammar would
-    be the first step towards addressing a rule by it."""
-    s = (v or "").strip().upper()
-    if not s:
-        return ""
-    if not RE_LEGACY.match(s):
-        raise RulesError(
-            f"invalid legacy_id {v!r}: letters, digits, '.', '_', '-' and '/', max 32 "
-            "characters. It is the OLD markdown identifier, recorded only so the "
-            "citations can be mapped afterwards.")
-    return s
 
 
 def _norm_name(name: str, what: str) -> str:
@@ -362,20 +341,10 @@ CREATE TABLE IF NOT EXISTS rules (
                                         -- denied, renewed... written by the
                                         -- lifecycle, never at the proposal
   proposed_by   TEXT,
-  legacy_id     TEXT,                   -- the old markdown identifier. READ ONLY:
-                                        -- never a second way to address a rule
   updated_at    TEXT NOT NULL,
   PRIMARY KEY (project, id),
   UNIQUE (project, domain, seq)
 );
-
--- Two rules cannot claim the same old identifier. It costs one line and it
--- catches the OPPOSITE error to the one feared: in a long seeding pass
--- forgetting a rule is possible, but entering one TWICE is likelier, and
--- without this nobody would notice. Partial, so the nulls of everything born
--- after the migration cost nothing.
-CREATE UNIQUE INDEX IF NOT EXISTS ux_rules_legacy
-    ON rules(project, legacy_id) WHERE legacy_id IS NOT NULL;
 
 -- A rule points to a SET of scopes: widening it is one more row, and the group
 -- it already belonged to is not touched.
@@ -537,11 +506,11 @@ END;
 
 TABLES = ("projects", "project_domains", "consumers", "scopes", "scope_members",
           "rules", "rule_scopes", "rule_refs", "rule_versions", "approvals")
-# Indexes the preflight has to see. Only the ones that carry a GUARANTEE, not
-# the ones that carry speed: ux_rules_legacy is what stops two rules claiming
-# the same old identifier, and a constraint nobody checks is a constraint that
-# is not there.
-INDEXES = ("ux_rules_legacy",)
+# Indexes the preflight has to see: only the ones that carry a GUARANTEE, never
+# the ones that carry speed. Empty since ux_rules_legacy left with legacy_id —
+# the tuple stays, because the preflight imports it and the day a constraining
+# index returns this is where it gets declared.
+INDEXES = ()
 TRIGGERS = ("trg_rules_ins", "trg_rules_upd", "trg_rules_del",
             "trg_scope_link_ins", "trg_scope_link_del", "trg_consumer_scope",
             "trg_managed_no_extra_member", "trg_managed_no_member_update",
@@ -616,42 +585,35 @@ class Registry:
         self._migrate()
         self.cx.executescript(SCHEMA)
         after = {r[0] for r in self.cx.execute("SELECT name FROM sqlite_master")}
-        self.repaired = ([] if fresh else
-                         sorted((after - before) - set(self._MIGRATION_OBJECTS)))
+        # Nothing the migration does ADDS an object any more — it drops, and
+        # the trigger it swaps keeps its name — so an upgrade cannot be
+        # mistaken for a repair: a repair means "a trigger vanished and
+        # history stopped being written", and it stays worth a warning.
+        self.repaired = [] if fresh else sorted(after - before)
         self._fix_modes()
 
     # ---------- housekeeping ----------
 
-    # Objects this version adds to a schema that already exists. They are
-    # subtracted from `repaired`, because a repair means "a trigger vanished and
-    # history stopped being written" — something to worry about. An upgrade
-    # arriving is not that, and a warning that cries wolf on every first open
-    # after a release is a warning nobody reads on the day it is right.
-    _MIGRATION_OBJECTS = ("ux_rules_legacy",)
-
     def _migrate(self) -> None:
-        """What has to change on an existing database: the new columns, and
-        the one trigger whose subject moved with them. Nothing else.
+        """What has to change on an existing database: the columns that moved
+        with this version, and the one trigger whose subject moved with them.
+        Nothing else.
 
         `CREATE TABLE IF NOT EXISTS` is a no-op on a table that is already
-        there, so a new column never appears on a database in service. This runs
-        BEFORE executescript because the index over legacy_id is in the schema
-        and would fail on a table with no such column. On a fresh database there
-        is nothing to migrate and the schema creates everything whole.
+        there, so a schema change never reaches a database in service through
+        executescript: it happens here, declared. On a fresh database there is
+        nothing to migrate and the schema creates everything whole.
 
         AND IT DOES NOT CONVERT ANYTHING. An earlier version of this method
         widened the old two-digit IDs across every table and rewrote the bodies
-        to match. It was deleted, and the reason is the same one that killed the
-        bulk import: A MIGRATION IS NOT CODE, IT IS THE WORK. The rules go back
-        in one at a time, by hand, each one read and decided; the only thing the
-        engine owes that pass is somewhere to write down which old identifier a
-        new rule replaces, which is `legacy_id` and nothing more. Converting
+        to match. It was deleted, and the reason is the same one that killed
+        the bulk import: A MIGRATION IS NOT CODE, IT IS THE WORK. The rules go
+        back in one at a time, by hand, each one read and decided. Converting
         prose by pattern invents citations that were never citations, and
-        converting IDs behind the author's back moves the very pointers the pass
-        exists to re-decide.
-
-        So this method has one job, and when the seeding is finished and the
-        mapping has been used, `legacy_id` goes too.
+        converting IDs behind the author's back moves the very pointers the
+        pass exists to re-decide. The `legacy_id` column this engine once
+        offered that pass went the way of the import that justified it: the
+        old->new mapping lives in the migration files, outside the registry.
 
         Kept declarative on purpose: whatever happens here must also be in
         SCHEMA, or a fresh install and an upgraded one stop being the same
@@ -662,7 +624,7 @@ class Registry:
         if "rules" not in have:
             return
         cols = {r[1] for r in self.cx.execute("PRAGMA table_info(rules)")}
-        for name, decl in (("legacy_id", "TEXT"), ("event", "TEXT")):
+        for name, decl in (("event", "TEXT"),):
             if name not in cols:
                 try:
                     self.cx.execute(f"ALTER TABLE rules ADD COLUMN {name} {decl}")
@@ -673,6 +635,18 @@ class Registry:
                         raise
                 else:
                     self.migrated.append(f"rules.{name}")
+        # legacy_id leaves with the import: the index first, because a column
+        # under a partial index cannot be dropped while the index stands.
+        if "legacy_id" in cols:
+            self.cx.execute("DROP INDEX IF EXISTS ux_rules_legacy")
+            try:
+                self.cx.execute("ALTER TABLE rules DROP COLUMN legacy_id")
+            except sqlite3.OperationalError as e:
+                # The same two-process race as the ADD above.
+                if "no such column" not in str(e).lower():
+                    raise
+            else:
+                self.migrated.append("rules.legacy_id dropped")
         if "rules.event" in self.migrated:
             # The history trigger changed subject with the column: it used to
             # copy NEW.reason into the version row, and from here on reason
@@ -996,8 +970,6 @@ class Registry:
             d["superseded_by"] = row["superseded_by"]
         if row["denied_reason"]:
             d["denied_reason"] = row["denied_reason"]
-        if row["legacy_id"]:
-            d["legacy_id"] = row["legacy_id"]
         if why:
             d["reason"] = row["reason"]
             if row["event"]:
@@ -1294,13 +1266,8 @@ class Registry:
             "  FROM rule_versions WHERE project=? AND rule_id=? ORDER BY version", (p, rid)).fetchall()
         if not rows:
             raise RulesError(f"{rid}: no history — this ID was never defined in this project")
-        out = {"project": p, "id": rid, "versions": [dict(r) for r in rows], "count": len(rows)}
-        # legacy_id is immutable, so it belongs to the rule and not to any one
-        # version: putting it in every row of the history would be noise.
-        cur = self._row(p, rid)
-        if cur is not None and cur["legacy_id"]:
-            out["legacy_id"] = cur["legacy_id"]
-        return out
+        return {"project": p, "id": rid, "versions": [dict(r) for r in rows],
+                "count": len(rows)}
 
     def compare(self, code: str, rid: str, va: int, vb: int) -> dict:
         p = self._project(code)
@@ -1440,31 +1407,6 @@ class Registry:
         return out
 
     @staticmethod
-    def _legacy_cites(body: str) -> list[str]:
-        """The citations a body HAPPENS to carry, without judging it: marked
-        ones AND bare IDs, because that is what the old parser counted.
-
-        Only import_rules uses this, and it uses the OLD engine's pattern on
-        purpose — uppercase, two or three digits — not the wider one the new
-        check hunts with. Its bodies come from a world where the acronyms were
-        bare, so reading only the marked ones would silently drop the whole
-        reference graph and the audit in its wake would call a broken project
-        clean. But reading MORE than the old parser did is just as wrong: it
-        would invent pointers that were never pointers, and a seeding pass would
-        go chasing them."""
-        out: list[str] = []
-        for raw in ([m.group(1) for m in RE_CITE.finditer(body or "")]
-                    + [m.group(0) for m in RE_BARE_LEGACY.finditer(
-                        RE_CITE.sub(" ", body or ""))]):
-            try:
-                dst = _norm_id(_strip_gloss(raw))
-            except RulesError:
-                continue
-            if dst not in out:
-                out.append(dst)
-        return out
-
-    @staticmethod
     def _compact(body: str) -> str:
         """Put a body back into its stored form: every citation reduced to the
         bare pointer.
@@ -1580,7 +1522,7 @@ class Registry:
 
     def propose(self, code: str, domain: str, rtype: str, title: str, body: str,
                 scopes, reason: str, proposed_by: str = "",
-                changelog: str = "", source: str = "", legacy_id: str = "") -> dict:
+                changelog: str = "", source: str = "") -> dict:
         """File a proposal. It reaches NOBODY until the batch is approved — which
         is why this needs only the project code: an unapproved proposal cannot
         do harm, and a chat that deposits one stops keeping a note about it.
@@ -1589,12 +1531,6 @@ class Registry:
         assigns the next number in it, four digits. A number is not a choice, it
         is a position in a sequence: whoever does not pass it cannot pick it,
         which is a structural guarantee and not a rule anybody has to remember.
-
-        `legacy_id` is the old markdown identifier, optional. Since the number is
-        no longer yours, recording the old one alongside the new one builds the
-        mapping WHILE the work happens, instead of reconstructing it afterwards:
-        the second pass over the citations becomes a substitution, not an
-        investigation.
 
         The ID assigned comes back in the verdict — without it you could not
         write the citations that point at this rule."""
@@ -1611,15 +1547,6 @@ class Registry:
         if not (reason or "").strip():
             raise RulesError("reason is mandatory: without the why a rule cannot be "
                              "defended, and at the first opportunity it gets reopened")
-        legacy = _norm_legacy(legacy_id)
-        if legacy:
-            twin = self.cx.execute("SELECT id FROM rules WHERE project=? AND legacy_id=?",
-                                   (p, legacy)).fetchone()
-            if twin:
-                raise RulesError(
-                    f"{legacy} was already filed, as {twin['id']}. Two rules cannot claim "
-                    "the same old identifier: in a long pass entering one twice is likelier "
-                    "than forgetting one, and this is what notices.")
         # Citations are validated BEFORE anything is written: a chat cannot
         # hallucinate a pointer, because the proposal does not go in.
         # VALIDATED ON WHAT ARRIVED, then compacted, then measured. The order is
@@ -1651,10 +1578,10 @@ class Registry:
                                 (p, rid, s))
             self.cx.execute(
                 "INSERT INTO rules (project, id, domain, seq, type, title, body, status, "
-                "permanence, changelog, source, reason, proposed_by, legacy_id, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,'proposed','provisional',?,?,?,?,?,?)",
+                "permanence, changelog, source, reason, proposed_by, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,'proposed','provisional',?,?,?,?,?)",
                 (p, rid, dom, seq, rtype, title.strip(), body, changelog or None,
-                 source or None, reason.strip(), by, legacy or None, _now()))
+                 source or None, reason.strip(), by, _now()))
             self._write_refs(p, rid, cites)
             self.cx.execute("COMMIT")
         except sqlite3.IntegrityError as e:
@@ -1682,15 +1609,12 @@ class Registry:
         except Exception:
             self.cx.execute("ROLLBACK")
             raise
-        out = {"project": p, "id": rid, "domain": dom, "seq": seq,
-               "status": "proposed", "scopes": scopes, "cites": cites,
-               "reaches_now": [],
-               "note": "the ID above was ASSIGNED by the registry: write it down, it is what "
-                       "other rules must cite. It reaches nobody until the batch is "
-                       "approved — check back with pending instead of keeping a note."}
-        if legacy:
-            out["legacy_id"] = legacy
-        return out
+        return {"project": p, "id": rid, "domain": dom, "seq": seq,
+                "status": "proposed", "scopes": scopes, "cites": cites,
+                "reaches_now": [],
+                "note": "the ID above was ASSIGNED by the registry: write it down, it is what "
+                        "other rules must cite. It reaches nobody until the batch is "
+                        "approved — check back with pending instead of keeping a note."}
 
     def batch(self, code: str) -> dict:
         """The pending batch plus its DIGEST — sha256 over the ordered list of
@@ -1944,112 +1868,6 @@ class Registry:
                 "note": "the row stays: the ID is never reused and citations must keep "
                         "resolving. Active rules still citing it need fixing."}
 
-    # ---------- migration ----------
-
-    def import_rules(self, code: str, rules, reason: str, permanent: bool = True) -> dict:
-        """Bulk import for the MIGRATION from the Markdown files. Runs only on an
-        EMPTY project: a migration happens once, on a clean table. This is the
-        door that is already designed to open a single time, which is why the
-        approval lock needs no global off switch.
-
-        It is the ONE path that still takes an explicit ID, and the one that does
-        not validate citations: its bodies come from another world, where the
-        acronyms are bare and point at a numbering that is about to change.
-        Recording what is there without judging it is the honest behaviour for a
-        door that is scheduled to be removed — but it does have to RECORD it, so
-        the bare IDs are read as references and the ID given becomes the
-        rule's legacy_id. Otherwise the audit that runs in its wake reports a
-        clean project that is not, which is worse than not auditing."""
-        p = self._project(code)
-        n = self.cx.execute("SELECT COUNT(*) FROM rules WHERE project=?", (p,)).fetchone()[0]
-        if n:
-            raise RulesError(f"this project already holds {n} rules: import runs only on an "
-                             "empty project. Use propose for one rule at a time.")
-        if not rules:
-            raise RulesError("nothing to import")
-        if len(rules) > MAX_IMPORT:
-            raise RulesError(f"{len(rules)} rules at once: the ceiling is {MAX_IMPORT}")
-        if not (reason or "").strip():
-            raise RulesError("reason is mandatory")
-        taken, rejected = [], []
-        for item in rules:
-            try:
-                rid = _norm_id(item.get("id", ""))
-                dom, seq = self._split_id(p, rid)
-                # Checked HERE, before the transaction: rule_scopes is written
-                # first (the deferred FK), so without this a duplicate is
-                # rejected by the perimeter's primary key and the message talks
-                # about a table the caller never mentioned.
-                if self._row(p, rid):
-                    raise RulesError(f"{rid} is already in this batch: two entries "
-                                     "normalise onto the same ID")
-                rtype = (item.get("type") or "").strip().upper()
-                if rtype not in TYPES:
-                    raise RulesError(f"type {rtype!r}: R, M or F")
-                scopes = self._check_scopes(p, _norm_scope_list(item.get("scopes")))
-                body = item.get("body") or ""
-                if not body.strip():
-                    raise RulesError("empty body")
-                self.cx.execute("BEGIN")
-                for s in scopes:
-                    self.cx.execute("INSERT INTO rule_scopes (project, rule_id, scope) "
-                                    "VALUES (?,?,?)", (p, rid, s))
-                self.cx.execute(
-                    "INSERT INTO rules (project, id, domain, seq, type, title, body, status, "
-                    "permanence, expires_at, changelog, source, reason, legacy_id, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?)",
-                    (p, rid, dom, seq, rtype, (item.get("title") or rid).strip(), body,
-                     "permanent" if permanent else "provisional",
-                     None if permanent else _plus_days(self.provisional_days),
-                     item.get("changelog"), item.get("source"), reason.strip(),
-                     _norm_legacy(item.get("id", "")) or None, _now()))
-                self._write_refs(p, rid, self._legacy_cites(body))
-                self.cx.execute("COMMIT")
-                taken.append(rid)
-            except RulesFault:
-                # A fault is not a rejected item. Swallowing it here would put
-                # a full disk, a locked database or a half-written page into
-                # the `rejected` list, return 200, and let the audit below
-                # declare the project clean — which is the defect RulesFault
-                # exists to close, on the door that writes the most. The ORDER
-                # matters for the same reason it matters in server.py: it
-                # subclasses RulesError.
-                try:
-                    self.cx.execute("ROLLBACK")
-                except sqlite3.Error:
-                    pass
-                raise
-            except RulesError as e:
-                # A rejected ITEM: this one is malformed, the others go on.
-                try:
-                    self.cx.execute("ROLLBACK")
-                except sqlite3.Error:
-                    pass
-                rejected.append({"id": item.get("id"), "why": str(e)})
-            except sqlite3.IntegrityError as e:
-                # The caller's data collided with a constraint — same shape as
-                # a malformed item, and it must not stop the rest.
-                try:
-                    self.cx.execute("ROLLBACK")
-                except sqlite3.Error:
-                    pass
-                rejected.append({"id": item.get("id"), "why": str(e)})
-            except Exception:
-                # Anything else is the machine: roll back so the connection is
-                # left usable, then let it RISE. It keeps its traceback, the
-                # import stops, and nobody is told that a half-written database
-                # imported cleanly.
-                try:
-                    self.cx.execute("ROLLBACK")
-                except sqlite3.Error:
-                    pass
-                raise
-        audit = self.check(code)
-        return {"project": p, "imported": len(taken), "ids": taken,
-                "rejected": rejected, "audit": audit,
-                "note": "the broken pointers listed by the audit were already in the "
-                        "Markdown files: they were just not visible."}
-
     # ---------- derivatives ----------
 
     def export(self, code: str, consumer: str = "", expand: bool = False) -> dict:
@@ -2099,7 +1917,6 @@ class Registry:
                               f"*scopes: {', '.join(self._scopes_of(p, r['id'])) or 'none'} · "
                               f"{r['permanence']}"
                               + (f" · expires {r['expires_at'][:10]}" if r["expires_at"] else "")
-                              + (f" · was {r['legacy_id']}" if r["legacy_id"] else "")
                               + "*", "",
                               f"*why: {r['reason']}*"
                               + (f" — *last event: {r['event']}*" if r["event"] else ""),

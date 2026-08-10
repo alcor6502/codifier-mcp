@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-1.6.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-31%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-1.6.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-30%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
