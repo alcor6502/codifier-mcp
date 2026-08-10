@@ -139,7 +139,13 @@ def c_approval():
     if days:
         if not days.isdigit() or int(days) < 1:
             raise RuntimeError(f"PROVISIONAL_DAYS={days!r}: a positive whole number of days")
-    return f"provisional {days or 90} days · admin code approves, no signature"
+    cap = os.environ.get("PENDING_CAP", "").strip()
+    if cap:
+        if not cap.isdigit() or int(cap) < 1:
+            raise RuntimeError(f"PENDING_CAP={cap!r}: a positive whole number of "
+                               "pending proposals")
+    return (f"provisional {days or 90} days · pending cap {cap or 5} · "
+            "admin code approves, no signature")
 
 
 @check("oauth")

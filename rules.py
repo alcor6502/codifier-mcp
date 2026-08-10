@@ -131,6 +131,12 @@ RE_NAME = re.compile(r"^[a-z0-9][a-z0-9 _-]{0,40}$")
 FILE_MODE = 0o644                       # root writes, everyone else reads
 DIR_MODE = 0o755
 DEFAULT_PROVISIONAL_DAYS = 90
+# The owner reads and decides in batches of 3-4: that rhythm is the
+# deliberate bottleneck of the whole approval flow, and this is the number
+# that imposes it. It used to be a rule (the dead AM domain) and died at gate
+# two, rightly: a machine-checkable constraint lives in the tool, not in the
+# corpus. Deliberately generous; a deployment can lower it.
+DEFAULT_PENDING_CAP = 5
 MAX_BODY_BYTES = 64_000
 MAX_GET_IDS = 50
 
@@ -612,9 +618,11 @@ def _serialised(cls):
 @_serialised
 class Registry:
     def __init__(self, db_path: str, *,
-                 provisional_days: int = DEFAULT_PROVISIONAL_DAYS) -> None:
+                 provisional_days: int = DEFAULT_PROVISIONAL_DAYS,
+                 pending_cap: int = DEFAULT_PENDING_CAP) -> None:
         self.path = db_path
         self.provisional_days = int(provisional_days or DEFAULT_PROVISIONAL_DAYS)
+        self.pending_cap = int(pending_cap or DEFAULT_PENDING_CAP)
         # Re-entrant, and it must exist before anything else: every public
         # method acquires it (see _serialised).
         self._lock = threading.RLock()
@@ -1698,9 +1706,14 @@ class Registry:
         if len(body.encode()) > MAX_BODY_BYTES:
             raise RulesError(f"body over {MAX_BODY_BYTES} bytes once stored: split the rule")
         scopes = self._check_scopes(p, _norm_scope_list(scopes))
-        by = _norm_name(proposed_by, "consumer") if proposed_by else None
-        if by:
-            self._consumer(p, by)
+        if not (proposed_by or "").strip():
+            raise RulesError(
+                "proposed_by is mandatory: it is your own consumer name, and it is what "
+                "makes the proposal YOURS. Omitted, the proposal would be an orphan — "
+                "rules_pending could never show it to whoever filed it — and a silent "
+                "orphan is exactly the class of error this registry refuses at the door.")
+        by = _norm_name(proposed_by, "consumer")
+        self._consumer(p, by)
         # IMMEDIATE, not the default deferred: the write lock is taken BEFORE
         # the counter is read, so nobody can read the same MAX(seq) in between.
         # A plain BEGIN would upgrade from read to write halfway through, and in
@@ -1708,6 +1721,23 @@ class Registry:
         # locked" no matter how long the busy timeout is.
         self.cx.execute("BEGIN IMMEDIATE")
         try:
+            # The ceiling on the pending queue, counted under the SAME write
+            # lock as the counter: two writers racing past a Python check
+            # would both see room where there is one slot. The owner reads
+            # and decides in batches of 3-4 — the ceiling is that rhythm as a
+            # number that refuses, and the refusal is the rhythm's whole
+            # enforcement: no override, because an override would be the
+            # extra proposal with extra steps. Approval and denial free the
+            # slots by themselves.
+            pend = self.cx.execute(
+                "SELECT title FROM rules WHERE project=? AND status='proposed' "
+                "ORDER BY id", (p,)).fetchall()
+            if len(pend) >= self.pending_cap:
+                queue = " · ".join(r[0] for r in pend)
+                raise RulesError(
+                    f"there are already {len(pend)} pending proposals in this project "
+                    f"and the ceiling is {self.pending_cap}: wait for them to be "
+                    f"approved or denied before filing more. In the queue: {queue}")
             # The number is read and taken in one go, and
             # UNIQUE(project, domain, seq) is the net underneath.
             seq = self._next_seq(p, dom)

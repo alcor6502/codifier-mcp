@@ -171,12 +171,18 @@ has to do anything for a rule to go; somebody has to decide for it to stay.
 
 `rules_propose` files a proposal, and needs no maintenance code: a proposal
 reaches nobody, so it cannot do harm. It takes the **domain**, not the number,
-and gives the number back. Six things are required: `domain`, `type` (`R`
-binding, `M` method, `F` technical fact), `title`, `body`, `scopes`, and
-`reason` — one sentence saying why the rule should exist, which is what
-somebody will have to decide on when it comes up for renewal. Pass
-`proposed_by` as well, your own consumer name: without it the registry does not
-know the proposal is yours, and `rules_pending` will never show it to you.
+and gives the number back. Seven things are required: `domain`, `type` (`R`
+binding, `M` method, `F` technical fact), `title`, `body`, `scopes`, `reason`
+— one sentence saying why the rule should exist, which is what somebody will
+have to decide on when it comes up for renewal — and `proposed_by`, your own
+consumer name: it is what makes the proposal YOURS. Omitted, the proposal
+would be an orphan `rules_pending` could never show you, so the door refuses
+it.
+
+The project holds a **limited number of pending proposals** — a deployment
+knob, default 5. Whoever approves reads in small batches, and that rhythm is
+enforced here: the refusal says the ceiling and lists what is in the queue.
+Approval and denial free the slots by themselves; there is no override.
 
 `supersedes` names the rule this proposal REPLACES — a dedicated field, never
 a citation in the body. The target must be **in force**, and only one pending

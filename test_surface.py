@@ -1551,5 +1551,24 @@ ok(GUIDE_SRC.count("your **brief**") == 1,
    "the manual pins the brief at the head of the list, exactly once",
    GUIDE_SRC.count("your **brief**"))
 
+print("\n== proposed_by is a door, and the queue has a ceiling ==")
+
+# F4: the owner's reading rhythm as a number that refuses, moved out of the
+# dead AM domain and into the tool, where a machine-checkable constraint
+# belongs. Born optional with a working default in the code, because Unraid
+# does not propagate new variables to installed containers.
+ok('Target="PENDING_CAP"' in TEMPLATE, "the template declares PENDING_CAP")
+ok(getattr(_rules, "DEFAULT_PENDING_CAP", None) == 5,
+   "the default lives in the code, and it is 5",
+   getattr(_rules, "DEFAULT_PENDING_CAP", None))
+for _t in TOOLS:
+    if _t.name == "rules_propose":
+        _doc = ast.get_docstring(_t) or ""
+        ok("proposed_by` is MANDATORY" in _doc,
+           "rules_propose says proposed_by is mandatory")
+        ok("default 5" in _doc, "and names the queue ceiling's default")
+ok("limited number of pending proposals" in GUIDE_SRC,
+   "the manual documents the pending ceiling")
+
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

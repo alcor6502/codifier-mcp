@@ -29,6 +29,10 @@ Configuration, all through environment variables:
   BACKUP_DIR              VACUUM INTO copies (default: <db dir>/backup)
   ADMIN_ACCESS_CODE       the maintenance code: it travels on every call
   PROVISIONAL_DAYS        how long an approved rule lives (default 90)
+  PENDING_CAP             pending proposals a project may hold (default 5).
+                          Born optional with a working default in the code:
+                          Unraid does not propagate new variables to
+                          containers already installed
   BASE_URL                public URL (e.g. https://host.tailnet.ts.net)
   GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET / ALLOWED_GITHUB_LOGIN / JWT_SIGNING_KEY
   PORT                    default 3001
@@ -113,7 +117,8 @@ BACKUP_DIR = os.environ.get("BACKUP_DIR") or os.path.join(os.path.dirname(DB_PAT
 ALLOWED_CIDRS = cidrs_from_env()
 
 registry = Registry(DB_PATH,
-                    provisional_days=int(os.environ.get("PROVISIONAL_DAYS") or 90))
+                    provisional_days=int(os.environ.get("PROVISIONAL_DAYS") or 90),
+                    pending_cap=int(os.environ.get("PENDING_CAP") or 5))
 if registry.repaired:
     log.warning("schema rebuilt at open: %s — somebody had removed these objects",
                 ", ".join(registry.repaired))
@@ -325,8 +330,14 @@ def rules_propose(project: str, domain: str, type: str, title: str, body: str,
     a type. `scopes`: consumer names, group scope names, or ["*"] if it binds
     everyone present and future. `reason` is mandatory: without the why a rule
     cannot be defended, and at the first opportunity it gets reopened.
-    `proposed_by` is your own consumer name — it is what makes rules_pending
-    able to show you your own. `supersedes` names the rule this proposal
+    `proposed_by` is MANDATORY too — your own consumer name, what makes the
+    proposal yours: omitted it would orphan the proposal in silence, so the
+    door refuses it.
+
+    The project holds a LIMITED number of pending proposals (a deployment
+    knob, default 5): whoever approves reads in small batches, and that
+    rhythm is enforced here, by a refusal that lists what is in the queue.
+    Approval and denial free the slots by themselves — there is no override. `supersedes` names the rule this proposal
     REPLACES — a dedicated field, never a citation in the body. The target
     must be in force, only one pending proposal may claim it, and at approval
     the swap is one transaction: the heir goes active and the named rule is

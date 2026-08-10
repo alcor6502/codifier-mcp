@@ -95,7 +95,7 @@ def refuses(label: str, fn, fragment: str = "", kind=Exception) -> None:
 
 D = tempfile.mkdtemp(prefix="collaudo-")
 DB = os.path.join(D, "rules.db")
-R = Registry(DB, provisional_days=90)
+R = Registry(DB, provisional_days=90, pending_cap=100)
 
 FP, HT, CASA = "Fp7m2Qx91Ab", "Ht4Rn8Wq02zz", "Ca6Hj3Lv77xy"
 NAME_FP, NAME_HT, NAME_CASA = "Financial Portfolio", "Health Tracking", "Casa"
@@ -264,29 +264,29 @@ case("propose() has no way to receive a number", the_number_cannot_be_asked_for)
 
 
 refuses("an undeclared domain",
-        lambda: R.propose(FP, "ZZ", "R", "x", "y", ["*"], "m"), "not declared", RulesError)
+        lambda: R.propose(FP, "ZZ", "R", "x", "y", ["*"], "m", "architect"), "not declared", RulesError)
 refuses("another project's domain",
-        lambda: R.propose(FP, "MS", "R", "x", "y", ["*"], "m"), "not declared", RulesError)
+        lambda: R.propose(FP, "MS", "R", "x", "y", ["*"], "m", "architect"), "not declared", RulesError)
 refuses("no domain at all",
-        lambda: R.propose(FP, "", "R", "x", "y", ["*"], "m"), "needs a DOMAIN", RulesError)
+        lambda: R.propose(FP, "", "R", "x", "y", ["*"], "m", "architect"), "needs a DOMAIN", RulesError)
 refuses("a whole ID passed where the domain goes",
-        lambda: R.propose(FP, "VA-0003", "R", "x", "y", ["*"], "m"), "not declared", RulesError)
+        lambda: R.propose(FP, "VA-0003", "R", "x", "y", ["*"], "m", "architect"), "not declared", RulesError)
 refuses("another project's consumer as a scope",
-        lambda: R.propose(FP, "VA", "R", "x", "y", ["coach"], "m"),
+        lambda: R.propose(FP, "VA", "R", "x", "y", ["coach"], "m", "architect"),
         "neither a consumer nor a scope", RulesError)
 refuses("type X",
-        lambda: R.propose(FP, "VA", "X", "x", "y", ["*"], "m"),
+        lambda: R.propose(FP, "VA", "X", "x", "y", ["*"], "m", "architect"),
         "R binding, M method", RulesError)
 refuses("no reason",
-        lambda: R.propose(FP, "VA", "R", "x", "y", ["*"], ""), "reason is mandatory", RulesError)
+        lambda: R.propose(FP, "VA", "R", "x", "y", ["*"], "", "architect"), "reason is mandatory", RulesError)
 refuses("no title",
-        lambda: R.propose(FP, "VA", "R", "", "y", ["*"], "m"), "needs a title", RulesError)
+        lambda: R.propose(FP, "VA", "R", "", "y", ["*"], "m", "architect"), "needs a title", RulesError)
 refuses("no body",
-        lambda: R.propose(FP, "VA", "R", "x", "", ["*"], "m"), "needs a body", RulesError)
+        lambda: R.propose(FP, "VA", "R", "x", "", ["*"], "m", "architect"), "needs a body", RulesError)
 refuses("empty perimeter",
-        lambda: R.propose(FP, "VA", "R", "x", "y", [], "m"), "reaches nobody", RulesError)
+        lambda: R.propose(FP, "VA", "R", "x", "y", [], "m", "architect"), "reaches nobody", RulesError)
 refuses("a body over the ceiling",
-        lambda: R.propose(FP, "VA", "R", "x", "z" * (MAX_BODY_BYTES + 1), ["*"], "m"),
+        lambda: R.propose(FP, "VA", "R", "x", "z" * (MAX_BODY_BYTES + 1), ["*"], "m", "architect"),
         "split the rule", RulesError)
 
 
@@ -302,27 +302,27 @@ R.create_project(CNT, "Counter", [("architect", "chat")], {"VA": "vault", "ZZ": 
 
 
 def the_counter_does_not_skip_and_does_not_go_back():
-    a = R.propose(CNT, "VA", "R", "One", "Body one.", ["*"], "m")["id"]
+    a = R.propose(CNT, "VA", "R", "One", "Body one.", ["*"], "m", "architect")["id"]
     assert a == "VA-0001", a
     # A refusal happens BEFORE the insert, so the counter does not move: if it
     # did, the numbering would carry a scar for every typo.
     try:
-        R.propose(CNT, "VA", "X", "Bad type", "Body.", ["*"], "m")
+        R.propose(CNT, "VA", "X", "Bad type", "Body.", ["*"], "m", "architect")
     except RulesError:
         pass
-    b = R.propose(CNT, "VA", "R", "Two", "Body two.", ["*"], "m")["id"]
+    b = R.propose(CNT, "VA", "R", "Two", "Body two.", ["*"], "m", "architect")["id"]
     assert b == "VA-0002", b
     # Denying is different from refusing: the row STAYS, the number is spent,
     # and the counter carries on past it. That is what "never reused" means.
     R.deny(CNT, [b], "spent on purpose")
-    c = R.propose(CNT, "VA", "R", "Three", "Body three.", ["*"], "m")["id"]
+    c = R.propose(CNT, "VA", "R", "Three", "Body three.", ["*"], "m", "architect")["id"]
     assert c == "VA-0003", c
     R.approve(CNT, R.batch(CNT)["digest"])
     R.retire(CNT, c, reason="retired to spend the number")
-    d = R.propose(CNT, "VA", "R", "Four", "Body four.", ["*"], "m")["id"]
+    d = R.propose(CNT, "VA", "R", "Four", "Body four.", ["*"], "m", "architect")["id"]
     assert d == "VA-0004", d
     # And the domains count separately.
-    assert R.propose(CNT, "ZZ", "R", "Elsewhere", "Body.", ["*"], "m")["id"] == "ZZ-0001"
+    assert R.propose(CNT, "ZZ", "R", "Elsewhere", "Body.", ["*"], "m", "architect")["id"] == "ZZ-0001"
 
 
 case("the counter: no skips, no reuse, one per domain",
@@ -335,7 +335,7 @@ def a_full_domain_says_so():
     day it happens there is no remedy left to invent."""
     R.cx.execute("UPDATE rules SET seq=9999 WHERE project='Counter' AND domain='ZZ'")
     try:
-        R.propose(CNT, "ZZ", "R", "One too many", "Body.", ["*"], "m")
+        R.propose(CNT, "ZZ", "R", "One too many", "Body.", ["*"], "m", "architect")
         raise AssertionError("it should have refused")
     except RulesError as e:
         assert "burned all" in str(e), e
@@ -387,7 +387,7 @@ case("approved is ACTIVE and PROVISIONAL, with an expiry", approved_means_provis
 
 def the_batch_changes_under_you():
     late = R.propose(FP, "VE", "R", "Late arrival", "Proposed after you read the batch.",
-                     ["*"], "test")["id"]
+                     ["*"], "test", "architect")["id"]
     assert late == "VE-0001", late
     b2 = R.batch(FP)
     assert b2["digest"] != B["digest"], "one more proposal must move the digest"
@@ -516,7 +516,7 @@ def a_citation_must_be_marked():
     looked like an acronym, so prose that merely NAMED one became a reference
     nobody wanted."""
     body = f"This one leans on ({PE1}) and nothing else."
-    rid = R.propose(FP, "VE", "R", "Cites the method", body, ["*"], "test")["id"]
+    rid = R.propose(FP, "VE", "R", "Cites the method", body, ["*"], "test", "architect")["id"]
     assert R.cx.execute("SELECT dst FROM rule_refs WHERE project=? AND src=?",
                         (NAME_FP, rid)).fetchall()[0][0] == PE1
     R.deny(FP, [rid], "it existed only to be parsed")
@@ -525,10 +525,10 @@ def a_citation_must_be_marked():
 case("a marked citation is recorded", a_citation_must_be_marked)
 
 refuses("a bare ID outside the brackets is a forgotten bracket",
-        lambda: R.propose(FP, "VE", "R", "x", f"See {PE1} for the method.", ["*"], "m"),
+        lambda: R.propose(FP, "VE", "R", "x", f"See {PE1} for the method.", ["*"], "m", "architect"),
         "bare ID", RulesError)
 refuses("and there is no escape hatch, not even backticks",
-        lambda: R.propose(FP, "VE", "R", "x", f"An ID looks like `{PE1}`.", ["*"], "m"),
+        lambda: R.propose(FP, "VE", "R", "x", f"An ID looks like `{PE1}`.", ["*"], "m", "architect"),
         "no exception", RulesError)
 
 
@@ -539,7 +539,7 @@ def an_ordinary_parenthesis_is_ordinary_prose():
     wanted for later."""
     body = ("Prose with (an aside), a [[vault note]], a (nested (one)) and "
             f"a real citation ({PE1}).")
-    rid = R.propose(FP, "VE", "R", "Brackets everywhere", body, ["*"], "test")["id"]
+    rid = R.propose(FP, "VE", "R", "Brackets everywhere", body, ["*"], "test", "architect")["id"]
     assert R.cx.execute("SELECT body FROM rules WHERE project=? AND id=?",
                         (NAME_FP, rid)).fetchone()[0] == body, "prose is left alone"
     got = [r[0] for r in R.cx.execute(
@@ -565,7 +565,7 @@ def the_registry_never_loses_a_word():
              f"Vedi ({PE1} — la regola\n\nSecondo paragrafo) fine."),
             ("a closing bracket inside the gloss", f"Vedi ({PE1} — a) trappola) fine.")):
         try:
-            R.propose(FP, "VE", "R", "x", body, ["*"], "m")
+            R.propose(FP, "VE", "R", "x", body, ["*"], "m", "architect")
             raise AssertionError(f"accepted, and would have eaten text: {label}")
         except RulesError:
             pass
@@ -582,7 +582,7 @@ def only_the_project_s_own_domains_are_hunted():
     body = (f"Guida [qui](https://example.com/en-2024/x), ticket PR-1234, "
             f"norma ISO-9001. Vedi ({PE1}).")
     rid = R.propose(FP, "VE", "R", "Prose that is not a citation", body,
-                    ["*"], "test")["id"]
+                    ["*"], "test", "architect")["id"]
     assert R.cx.execute("SELECT body FROM rules WHERE project=? AND id=?",
                         (NAME_FP, rid)).fetchone()[0] == body
     R.deny(FP, [rid], "parsed, done")
@@ -592,20 +592,20 @@ case("a URL, a ticket and a standard are not IDs of this project",
      only_the_project_s_own_domains_are_hunted)
 
 refuses("a mistyped ID of a real domain is still caught",
-        lambda: R.propose(FP, "VE", "R", "x", "Vedi VA-00001 in prosa.", ["*"], "m"),
+        lambda: R.propose(FP, "VE", "R", "x", "Vedi VA-00001 in prosa.", ["*"], "m", "architect"),
         "bare ID", RulesError)
 refuses("a citation that does not resolve: a chat cannot invent a pointer",
-        lambda: R.propose(FP, "VE", "R", "x", "See (VE-0099).", ["*"], "m"),
+        lambda: R.propose(FP, "VE", "R", "x", "See (VE-0099).", ["*"], "m", "architect"),
         "does not resolve", RulesError)
 refuses("a lower-cased bare ID is the same forgotten bracket",
         lambda: R.propose(FP, "VE", "R", "x", f"See {PE1.lower()} for the method.",
-                          ["*"], "m"),
+                          ["*"], "m", "architect"),
         "bare ID", RulesError)
 refuses("and so is a half-cased one",
-        lambda: R.propose(FP, "VE", "R", "x", "See Pe-0001 for the method.", ["*"], "m"),
+        lambda: R.propose(FP, "VE", "R", "x", "See Pe-0001 for the method.", ["*"], "m", "architect"),
         "bare ID", RulesError)
 refuses("brackets around a SENTENCE are not a citation",
-        lambda: R.propose(FP, "VE", "R", "x", f"(see {PE1} for the method)", ["*"], "m"),
+        lambda: R.propose(FP, "VE", "R", "x", f"(see {PE1} for the method)", ["*"], "m", "architect"),
         "ALONE inside round brackets", RulesError)
 
 
@@ -614,7 +614,7 @@ def the_two_doors_agree_on_what_an_ID_looks_like():
     tolerate exactly the same, or a tolerance documented in one place becomes a
     refusal in another."""
     rid = R.propose(FP, "VE", "R", "Suffixed citation",
-                    f"Leans on ({PE1}-M) and on (va-01).", ["*"], "test")["id"]
+                    f"Leans on ({PE1}-M) and on (va-01).", ["*"], "test", "architect")["id"]
     got = {r[0] for r in R.cx.execute(
         "SELECT dst FROM rule_refs WHERE project=? AND src=?", (NAME_FP, rid))}
     assert got == {PE1, "VA-0001"}, got
@@ -635,10 +635,10 @@ def you_may_only_cite_a_rule_ALREADY_APPROVED():
     So the order of work is forced — file the cited rule, get it approved, then
     file the one that cites it — and a rule that needs one that does not exist
     yet simply waits. Nobody is writing twelve thousand rules here."""
-    pending = R.propose(FP, "VE", "R", "Not approved yet", "Body.", ["*"], "test")["id"]
+    pending = R.propose(FP, "VE", "R", "Not approved yet", "Body.", ["*"], "test", "architect")["id"]
     for label, target in (("still proposed", pending),):
         try:
-            R.propose(FP, "VE", "R", "Leaning on it", f"Builds on ({target}).", ["*"], "m")
+            R.propose(FP, "VE", "R", "Leaning on it", f"Builds on ({target}).", ["*"], "m", "architect")
             raise AssertionError(f"it should have refused: {label}")
         except RulesError as e:
             assert "not in force yet" in str(e) and "ALREADY been approved" in str(e), e
@@ -646,15 +646,15 @@ def you_may_only_cite_a_rule_ALREADY_APPROVED():
     # not so a later rule can build on it.
     R.deny(FP, [pending], "the idea was refused")
     try:
-        R.propose(FP, "VE", "R", "Leaning on it", f"Builds on ({pending}).", ["*"], "m")
+        R.propose(FP, "VE", "R", "Leaning on it", f"Builds on ({pending}).", ["*"], "m", "architect")
         raise AssertionError("it should have refused: denied")
     except RulesError as e:
         assert "not in force yet" in str(e), e
     # And once the cited rule IS approved, the citing one goes in.
-    ok_target = R.propose(FP, "VE", "R", "Approved first", "Body.", ["*"], "test")["id"]
+    ok_target = R.propose(FP, "VE", "R", "Approved first", "Body.", ["*"], "test", "architect")["id"]
     R.approve(FP, R.batch(FP)["digest"])
     citer = R.propose(FP, "VE", "R", "Leans on an approved one",
-                      f"Builds on ({ok_target}).", ["*"], "test")["id"]
+                      f"Builds on ({ok_target}).", ["*"], "test", "architect")["id"]
     assert R.cx.execute("SELECT dst FROM rule_refs WHERE project=? AND src=?",
                         (NAME_FP, citer)).fetchall()[0][0] == ok_target
     R.deny(FP, [citer], "done")
@@ -675,9 +675,9 @@ def the_audit_watches_what_the_door_cannot():
     And the buckets count the SOURCE only when it is in force, or a batch would
     report the project as incoherent for citing rules that are on their way
     in."""
-    target = R.propose(FP, "VE", "R", "Never approved", "Body.", ["*"], "test")["id"]
+    target = R.propose(FP, "VE", "R", "Never approved", "Body.", ["*"], "test", "architect")["id"]
     citer = R.propose(FP, "VE", "R", "Points at it", "Body without a citation.",
-                      ["*"], "test")["id"]
+                      ["*"], "test", "architect")["id"]
     R.cx.execute("INSERT INTO rule_refs (project, src, dst) VALUES (?,?,?)",
                  (NAME_FP, citer, target))
     # Both are proposals: a batch on its way in is not a defect.
@@ -703,7 +703,7 @@ case("the audit reports what the door could not have known",
 def a_short_citation_still_resolves():
     """Older text says VA-02. Padding is what stops the change costing a rewrite
     of every body that was ever written."""
-    rid = R.propose(FP, "VE", "R", "Short form", "See (VA-01).", ["*"], "test")["id"]
+    rid = R.propose(FP, "VE", "R", "Short form", "See (VA-01).", ["*"], "test", "architect")["id"]
     assert R.cx.execute("SELECT dst FROM rule_refs WHERE project=? AND src=?",
                         (NAME_FP, rid)).fetchall()[0][0] == "VA-0001"
     R.deny(FP, [rid], "parsed, done")
@@ -717,7 +717,7 @@ def reading_expands_the_citation():
     """The gloss is GENERATED, never stored: it cannot go stale, and it carries
     the STATE of what it points at."""
     body = f"Leans on ({PE1})."
-    rid = R.propose(FP, "VE", "R", "Reads expanded", body, ["*"], "test")["id"]
+    rid = R.propose(FP, "VE", "R", "Reads expanded", body, ["*"], "test", "architect")["id"]
     stored = R.cx.execute("SELECT body FROM rules WHERE project=? AND id=?",
                           (NAME_FP, rid)).fetchone()[0]
     assert stored == body, "only the pointer is stored"
@@ -755,7 +755,7 @@ def reading_expands_the_citation():
     R.retire(FP, rid, reason="it had done its job")
     # A pointer at a retired rule arrives already marked as such, in the text.
     other = R.propose(FP, "VE", "R", "Points at the retired one",
-                      f"Still points at ({rid}).", ["*"], "test")["id"]
+                      f"Still points at ({rid}).", ["*"], "test", "architect")["id"]
     seen = [x for x in R.pending(FP)["waiting"] if x["id"] == other][0]["body"]
     assert "· retired" in seen, seen
     R.deny(FP, [other], "done")
@@ -778,7 +778,7 @@ def the_ceiling_is_measured_on_WHAT_IS_STORED():
         fat = unit * n
     assert len(fat.encode()) < MAX_BODY_BYTES < len(R._compact(fat).encode())
     try:
-        R.propose(FP, "VA", "R", "Fat once padded", fat, ["*"], "m")
+        R.propose(FP, "VA", "R", "Fat once padded", fat, ["*"], "m", "architect")
         raise AssertionError("it should have refused")
     except RulesError as e:
         assert "once stored" in str(e), e
@@ -1046,7 +1046,7 @@ head("retiring: out of the lists, still resolvable")
 
 
 FI_NEW = R.propose(FP, "FI", "M", "Estimating the bracket (rev)", "New method.",
-                   ["tax"], "superseded decision: the first one underestimated")["id"]
+                   ["tax"], "superseded decision: the first one underestimated", "architect")["id"]
 ok(FI_NEW == "FI-0004",
    "the successor takes the next number: the denied ones are spent", FI_NEW)
 
@@ -1069,7 +1069,7 @@ def a_retired_number_is_not_handed_out_again():
     """The old suite proved this by trying to re-file the ID. There is no such
     move any more, so the proof moved to where the decision now lives: the
     counter."""
-    nxt = R.propose(FP, "FI", "R", "After the retirement", "Body.", ["tax"], "m")["id"]
+    nxt = R.propose(FP, "FI", "R", "After the retirement", "Body.", ["tax"], "m", "architect")["id"]
     assert nxt == "FI-0005", nxt
     R.deny(FP, [nxt], "done")
 
@@ -1088,8 +1088,8 @@ def a_successor_must_be_approved_too():
     that was later denied, for good and in silence. Same rule as a citation,
     checked in the only place it can be."""
     unborn = R.propose(FP, "FI", "M", "Never approved successor", "Body.",
-                       ["tax"], "test")["id"]
-    victim = R.propose(FP, "FI", "M", "To be retired", "Body.", ["tax"], "test")["id"]
+                       ["tax"], "test", "architect")["id"]
+    victim = R.propose(FP, "FI", "M", "To be retired", "Body.", ["tax"], "test", "architect")["id"]
     R.approve(FP, R.batch(FP)["digest"])
     # (the batch above approved both; put one back to 'proposed' by hand so the
     # case is about the check and not about the batch)
@@ -1139,7 +1139,7 @@ head("narrowing, and a rule left with no perimeter")
 
 
 ORPHAN = R.propose(FP, "VE", "R", "Orphan to be", "Only here to be narrowed to nothing.",
-                   ["market-news"], "test")["id"]
+                   ["market-news"], "test", "architect")["id"]
 
 
 def narrow_to_nothing_is_reported():
@@ -1185,9 +1185,9 @@ TWIN_A = TWIN_B = ""
 def redundancy_is_a_suspicion_not_a_verdict():
     global TWIN_A, TWIN_B
     TWIN_A = R.propose(FP, "ST", "R", "One", f"Body one, see ({VA1}).",
-                       ["market-news"], "test")["id"]
+                       ["market-news"], "test", "architect")["id"]
     TWIN_B = R.propose(FP, "ST", "R", "Two", f"Body two, see ({VA1}).",
-                       ["market-news"], "test")["id"]
+                       ["market-news"], "test", "architect")["id"]
     b = R.batch(FP)
     R.approve(FP, b["digest"])
     pairs = [c["pair"] for c in R.check(FP)["redundancy_candidates"]]
@@ -1227,7 +1227,7 @@ def a_dropped_trigger_is_rebuilt_AND_declared():
 case("a trigger dropped by hand is rebuilt, and the repair is DECLARED",
      a_dropped_trigger_is_rebuilt_AND_declared)
 
-R = Registry(DB, provisional_days=90)
+R = Registry(DB, provisional_days=90, pending_cap=100)
 ok(R.repaired == [], "a clean reopen repairs nothing")
 
 # =====================================================================
@@ -1237,7 +1237,7 @@ head("projects stay apart")
 
 def same_id_two_projects_two_histories():
     twin = R.propose(HT, "VA", "R", "Namesake but different", "Body of Health Tracking.",
-                     ["*"], "initial import")["id"]
+                     ["*"], "initial import", "architect")["id"]
     assert twin == VA1, "each project counts on its own, from one"
     b = R.batch(HT)
     R.approve(HT, b["digest"])
@@ -1259,7 +1259,7 @@ refuses("a wrong code answers like a missing one",
 def new_domain_and_consumer_work_at_once():
     R.add_domains(HT, {"AL": "food"})
     R.add_consumers(HT, [("nutritionist", "chat")])
-    fresh = R.propose(HT, "AL", "R", "New domain", "Body.", ["nutritionist"], "test")["id"]
+    fresh = R.propose(HT, "AL", "R", "New domain", "Body.", ["nutritionist"], "test", "architect")["id"]
     assert fresh == "AL-0001", "a domain born later starts its own counter at one"
     b = R.batch(HT)
     R.approve(HT, b["digest"])
@@ -1277,7 +1277,7 @@ refuses("a malformed domain added later",
 def all_aliases_all_mean_all():
     for i, alias in enumerate(["_all_", "*", "all", "tutti", "chiunque"], start=1):
         rid = R.propose(HT, "MS", "F", f"Universal via {alias}", "Binds everyone.",
-                        [alias], "test")["id"]
+                        [alias], "test", "architect")["id"]
         assert rid == f"MS-{i:04d}", (alias, rid)
         assert R._scopes_of(NAME_HT, rid) == [ALL], alias
     b = R.batch(HT)
@@ -1609,7 +1609,7 @@ head("the engine is used from a THREAD POOL, not from here")
 # with "SQLite objects created in a thread can only be used in that same
 # thread", and no test here could have seen it. Now one can.
 
-R = Registry(DB, provisional_days=90)    # the reopen test closed the last one
+R = Registry(DB, provisional_days=90, pending_cap=100)    # the reopen test closed the last one
 
 
 def a_worker_thread_can_use_the_engine():
@@ -1651,7 +1651,7 @@ def many_threads_reading_and_writing():
             # — it would hand two rules the same number, and UNIQUE(project,
             # domain, seq) is the last net under that.
             rid = R.propose(FP, "ST", "F", f"Concurrent {n}", f"Body {n}.",
-                            ["market-news"], "thread safety")["id"]
+                            ["market-news"], "thread safety", "architect")["id"]
             R.list_rules(FP, "market-news")
             R.check(FP)
             R.history(FP, rid)
@@ -1691,7 +1691,7 @@ def two_connections_asking_the_same_counter():
     'database is locked' that no busy timeout can help, and it would reach the
     chat as a fault rather than as a refusal."""
     import threading
-    engines = [Registry(DB, provisional_days=90) for _ in range(4)]
+    engines = [Registry(DB, provisional_days=90, pending_cap=100) for _ in range(4)]
     got: list[str] = []
     errors: list[Exception] = []
     lock = threading.Lock()
@@ -1699,7 +1699,7 @@ def two_connections_asking_the_same_counter():
     def worker(e, n):
         try:
             rid = e.propose(FP, "RL", "F", f"Across connections {n}", f"Body {n}.",
-                            ["market-news"], "two connections")["id"]
+                            ["market-news"], "two connections", "architect")["id"]
             with lock:
                 got.append(rid)
         except Exception as exc:                                # noqa: BLE001
@@ -2218,6 +2218,70 @@ refuses("a brief over the body ceiling",
         lambda: R.add_consumers(BRF, [{"name": "worker", "kind": "skill",
                                        "brief": "z" * (MAX_BODY_BYTES + 1)}]),
         "split", RulesError)
+
+
+# =====================================================================
+head("proposed_by is a door, and the pending queue has a ceiling")
+# =====================================================================
+
+# F4 and the schema half of R. An omitted proposed_by used to orphan the
+# proposal in silence — it would never appear in rules_pending for whoever
+# filed it, which is exactly the class of error this registry refuses at the
+# door everywhere else. And the owner reads batches of 3-4: the ceiling on
+# pending proposals is that rhythm moved from a dead rule (the old AM domain)
+# into the tool, where a machine-checkable constraint belongs.
+
+refuses("a proposal without proposed_by is refused, not orphaned",
+        lambda: R.propose(FP, "VA", "R", "Orphan attempt", "Body.", ["*"], "m"),
+        "proposed_by", RulesError)
+
+
+def the_default_ceiling_is_five_and_the_refusal_lists_the_queue():
+    g = Registry(os.path.join(D, "cap.db"))
+    CAP = "Ca9p5Qw33nn"
+    g.create_project(CAP, "Cap bench", [("architect", "chat")], {"VA": "vault"})
+    for i in range(5):
+        g.propose(CAP, "VA", "R", f"Pending {i}", "Body.", ["*"], "m", "architect")
+    try:
+        g.propose(CAP, "VA", "R", "One too many", "Body.", ["*"], "m", "architect")
+        raise AssertionError("it should have refused")
+    except RulesError as e:
+        msg = str(e)
+        assert "5" in msg and "Pending 0" in msg and "Pending 4" in msg, \
+            f"the refusal must say the ceiling AND list the queue: {msg[:200]}"
+    # Denial frees a slot by itself: no override flag, the queue is the knob.
+    first = g.pending(CAP)["waiting"][0]["id"]
+    g.deny(CAP, [first], "make room")
+    g.propose(CAP, "VA", "R", "Fits again", "Body.", ["*"], "m", "architect")
+    # And approval frees the rest.
+    g.approve(CAP, g.batch(CAP)["digest"])
+    g.propose(CAP, "VA", "R", "After the batch", "Body.", ["*"], "m", "architect")
+    g.close()
+
+
+case("the default ceiling is 5, the refusal lists the titles, deny/approve free slots",
+     the_default_ceiling_is_five_and_the_refusal_lists_the_queue)
+
+
+def the_ceiling_is_a_deployment_knob_with_a_working_default():
+    import inspect
+    sig = inspect.signature(Registry.__init__)
+    assert "pending_cap" in sig.parameters, list(sig.parameters)
+    g = Registry(os.path.join(D, "cap2.db"), pending_cap=2)
+    C2 = "Ca9p5Qw33oo"
+    g.create_project(C2, "Cap two", [("architect", "chat")], {"VA": "vault"})
+    g.propose(C2, "VA", "R", "One", "Body.", ["*"], "m", "architect")
+    g.propose(C2, "VA", "R", "Two", "Body.", ["*"], "m", "architect")
+    try:
+        g.propose(C2, "VA", "R", "Three", "Body.", ["*"], "m", "architect")
+        raise AssertionError("it should have refused")
+    except RulesError as e:
+        assert "2" in str(e), e
+    g.close()
+
+
+case("the ceiling is configurable per deployment, and born with a default",
+     the_ceiling_is_a_deployment_knob_with_a_working_default)
 
 print(f"\n{OK} passed, {FAIL} failed")
 if FAILURES:
