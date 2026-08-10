@@ -305,7 +305,8 @@ def rules_pending(project: str, consumer: str = "") -> dict:
 @tool
 def rules_propose(project: str, domain: str, type: str, title: str, body: str,
                   scopes: list[str], reason: str, proposed_by: str = "",
-                  changelog: str = "", source: str = "") -> dict:
+                  changelog: str = "", source: str = "",
+                  supersedes: str = "") -> dict:
     """File a proposal for a new rule. It needs ONLY the project code, because a
     proposal reaches nobody until its batch is approved: it cannot do harm, and
     a chat that deposits one can stop keeping a note about it.
@@ -321,7 +322,12 @@ def rules_propose(project: str, domain: str, type: str, title: str, body: str,
     everyone present and future. `reason` is mandatory: without the why a rule
     cannot be defended, and at the first opportunity it gets reopened.
     `proposed_by` is your own consumer name — it is what makes rules_pending
-    able to show you your own.
+    able to show you your own. `supersedes` names the rule this proposal
+    REPLACES — a dedicated field, never a citation in the body. The target
+    must be in force, only one pending proposal may claim it, and at approval
+    the swap is one transaction: the heir goes active and the named rule is
+    retired pointing at it. Declare the heir's scopes yourself — the
+    supersede is the moment the perimeter gets re-decided, not inherited.
 
     CITATIONS IN THE BODY are an ID in ROUND BRACKETS, `(VA-0002)`. An ordinary
     parenthesis is ordinary prose — what makes a token a citation is the shape
@@ -360,7 +366,9 @@ def rules_batch(project: str, code: str) -> dict:
     the proof that what gets approved is the batch that was READ.
 
     Each proposal carries its `reason`: the why you are letting in is on the
-    table where the decision happens, not a history call away."""
+    table where the decision happens, not a history call away. A proposal
+    that SUPERSEDES a rule shows it here too — approving it also retires
+    that rule, and whoever approves must see both halves of the move."""
     _admin(code)
     return registry.batch(project)
 
@@ -376,9 +384,15 @@ def rules_approve(project: str, digest: str, code: str) -> dict:
     Expiry inverts that: staying costs a decision, going is free.
 
     `digest` must be the current one from rules_batch: it proves the approval
-    covers the batch that was read, not the batch that exists now. This tool
-    is the admin UI's placeholder — when the UI arrives it calls the same
-    engine method, and this door closes."""
+    covers the batch that was read, not the batch that exists now.
+
+    A proposal carrying `supersedes` does both its moves here, in ONE
+    transaction: the heir goes active and the named rule is retired pointing
+    at it — no window with both in force, no third step to forget. A victim
+    somebody retired in the meantime is a declared no-op in the verdict.
+
+    This tool is the admin UI's placeholder — when the UI arrives it calls
+    the same engine method, and this door closes."""
     _admin(code)
     return registry.approve(project, digest)
 

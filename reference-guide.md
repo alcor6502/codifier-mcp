@@ -171,6 +171,15 @@ somebody will have to decide on when it comes up for renewal. Pass
 `proposed_by` as well, your own consumer name: without it the registry does not
 know the proposal is yours, and `rules_pending` will never show it to you.
 
+`supersedes` names the rule this proposal REPLACES — a dedicated field, never
+a citation in the body. The target must be **in force**, and only one pending
+proposal may claim it. At approval the swap is one transaction: the heir goes
+active and the named rule is retired pointing at it — there is no window with
+both in force, and no third step anybody can forget. Declare the heir's
+scopes yourself: the supersede is the moment the perimeter gets re-decided,
+not inherited. In reading, the retired rule expands pointing forward:
+`(VA-0002 — its title · retired → superseded by VA-0009)`.
+
 `rules_pending` is your noticeboard: yours waiting, yours denied with the
 reason why, and your rules expiring within thirty days. A denial burns the ID
 and keeps the reason; since the counter assigns the numbers, the registry
@@ -320,11 +329,13 @@ still where the truth survives.
   can still be renamed or retyped — omit `body` and nothing about it is
   checked; what is already stored is reported by `rules_check`, which is a
   report and not a door slammed on unrelated work.
-- **A decision that WAS right and stopped being so is not a defect.** New rule,
-  and the old one is retired pointing at its successor (`rules_retire` with
-  `superseded_by` — the successor must already be approved). Collapse the two
-  and the history can no longer tell you which happened — the one thing it
-  was for.
+- **A decision that WAS right and stopped being so is not a defect.** Propose
+  the new rule with `supersedes` naming the old one: at approval the swap is
+  one transaction, heir active and victim retired pointing forward. Collapse
+  fix and supersede into one gesture and the history can no longer tell you
+  which happened — the one thing it was for. (`rules_retire` with
+  `superseded_by` remains the manual path for a retirement decided after the
+  heir was already in.)
 - **`rules_widen` / `rules_narrow`** — one rule, one more/one fewer scope.
   **`rules_scope_edit`** changes the perimeter of *every* rule pointing at that
   group: use it only when the group itself is wrong. A rule narrowed to no
@@ -617,12 +628,13 @@ looked at once, and that moment does not come round again.
 that says something false — things that were never right.
 
 A decision that **was** right and stopped being so is not a defect. It gets a
-new rule, and the old one is retired pointing at it. Collapse the two and the
-history can no longer tell you which of the two happened, which is the one thing
-the history was for.
+new rule proposed with `supersedes` naming the old one, and the approval does
+both moves in one transaction. Collapse the two and the history can no longer
+tell you which of the two happened, which is the one thing the history was
+for.
 
 > **Was this ever true?**
-> No → `rules_fix`. Yes → new rule, retire the old.
+> No → `rules_fix`. Yes → new rule with `supersedes`, and approval retires the old.
 
 ## WHAT DOES NOT GO IN THE REGISTRY AT ALL
 

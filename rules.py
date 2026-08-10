@@ -330,7 +330,9 @@ CREATE TABLE IF NOT EXISTS rules (
   permanence    TEXT NOT NULL DEFAULT 'provisional'
                 CHECK (permanence IN ('provisional','permanent')),
   expires_at    TEXT,                   -- NULL for permanent rules
-  superseded_by TEXT,
+  superseded_by TEXT,                   -- set on the RETIRED rule: its heir
+  supersedes    TEXT,                   -- set on a PROPOSAL: the rule it will
+                                        -- retire at approval, atomically
   denied_reason TEXT,
   changelog     TEXT,
   source        TEXT,                   -- where it came from: the renewal criterion
@@ -345,6 +347,14 @@ CREATE TABLE IF NOT EXISTS rules (
   PRIMARY KEY (project, id),
   UNIQUE (project, domain, seq)
 );
+
+-- Two PENDING proposals cannot claim the same victim: whoever approves would
+-- be retiring one rule towards two heirs, and which one wins would be batch
+-- order. Partial on status, so approval and denial free the slot by
+-- themselves — the index watches the door, not the corpus. An INDEX and not a
+-- Python check, so it holds no matter which door the write came through.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_rules_supersedes
+    ON rules(project, supersedes) WHERE supersedes IS NOT NULL AND status='proposed';
 
 -- A rule points to a SET of scopes: widening it is one more row, and the group
 -- it already belonged to is not touched.
@@ -507,10 +517,10 @@ END;
 TABLES = ("projects", "project_domains", "consumers", "scopes", "scope_members",
           "rules", "rule_scopes", "rule_refs", "rule_versions", "approvals")
 # Indexes the preflight has to see: only the ones that carry a GUARANTEE, never
-# the ones that carry speed. Empty since ux_rules_legacy left with legacy_id —
-# the tuple stays, because the preflight imports it and the day a constraining
-# index returns this is where it gets declared.
-INDEXES = ()
+# the ones that carry speed. ux_rules_supersedes is what stops two pending
+# proposals claiming the same victim, and a constraint nobody checks is a
+# constraint that is not there.
+INDEXES = ("ux_rules_supersedes",)
 TRIGGERS = ("trg_rules_ins", "trg_rules_upd", "trg_rules_del",
             "trg_scope_link_ins", "trg_scope_link_del", "trg_consumer_scope",
             "trg_managed_no_extra_member", "trg_managed_no_member_update",
@@ -585,11 +595,14 @@ class Registry:
         self._migrate()
         self.cx.executescript(SCHEMA)
         after = {r[0] for r in self.cx.execute("SELECT name FROM sqlite_master")}
-        # Nothing the migration does ADDS an object any more — it drops, and
-        # the trigger it swaps keeps its name — so an upgrade cannot be
-        # mistaken for a repair: a repair means "a trigger vanished and
-        # history stopped being written", and it stays worth a warning.
-        self.repaired = [] if fresh else sorted(after - before)
+        # What the migration itself caused to appear is subtracted: a repair
+        # means "a trigger vanished and history stopped being written" —
+        # something to worry about — and an upgrade arriving is not that. The
+        # supersedes index rides in with its column, so it is new exactly when
+        # the column is.
+        _upgrade = ({"ux_rules_supersedes"}
+                    if "rules.supersedes" in self.migrated else set())
+        self.repaired = [] if fresh else sorted((after - before) - _upgrade)
         self._fix_modes()
 
     # ---------- housekeeping ----------
@@ -624,7 +637,7 @@ class Registry:
         if "rules" not in have:
             return
         cols = {r[1] for r in self.cx.execute("PRAGMA table_info(rules)")}
-        for name, decl in (("event", "TEXT"),):
+        for name, decl in (("event", "TEXT"), ("supersedes", "TEXT")):
             if name not in cols:
                 try:
                     self.cx.execute(f"ALTER TABLE rules ADD COLUMN {name} {decl}")
@@ -968,6 +981,11 @@ class Registry:
              "source": row["source"], "updated_at": row["updated_at"]}
         if row["superseded_by"]:
             d["superseded_by"] = row["superseded_by"]
+        if row["supersedes"]:
+            # On a PROPOSAL: whoever approves must see that letting this in
+            # also retires that — a supersede invisible in the batch would be
+            # worse than the defect it cures.
+            d["supersedes"] = row["supersedes"]
         if row["denied_reason"]:
             d["denied_reason"] = row["denied_reason"]
         if why:
@@ -978,6 +996,14 @@ class Registry:
 
     _IN_FORCE = ("status = 'active' AND (permanence = 'permanent' "
                  "OR expires_at IS NULL OR expires_at > :now)")
+
+    @staticmethod
+    def _in_force(row, now: str = "") -> bool:
+        """The same predicate as _IN_FORCE, for a row already in hand: one
+        definition each side of the SQL boundary, held together by the suite."""
+        return (row["status"] == "active"
+                and (row["permanence"] == "permanent" or not row["expires_at"]
+                     or row["expires_at"] > (now or _now())))
 
     def _reaching(self, p: str, consumer: str) -> dict[str, tuple[int, list[str]]]:
         """rule_id -> (breadth of the widest scope it arrives through, scopes)."""
@@ -1071,6 +1097,8 @@ class Registry:
                 d = {"id": rid, "body": self._expand(p, row["body"])}
                 if row["status"] != "active":
                     d["status"] = row["status"]
+                    if row["status"] == "retired" and row["superseded_by"]:
+                        d["superseded_by"] = row["superseded_by"]
                 elif row["permanence"] != "permanent" and row["expires_at"] \
                         and row["expires_at"] <= _now():
                     d["status"] = "expired"
@@ -1455,7 +1483,11 @@ class Registry:
             if row is None:
                 return f"({rid}{GLOSS_SEP}⚠ never defined)"
             mark = ""
-            if row["status"] != "active":
+            if row["status"] == "retired" and row["superseded_by"]:
+                # The retired rule points forward, in the text, while the
+                # reader is reading: the heir is one ID away.
+                mark = f" · retired → superseded by {row['superseded_by']}"
+            elif row["status"] != "active":
                 mark = f" · {row['status']}"
             elif (row["permanence"] != "permanent" and row["expires_at"]
                   and row["expires_at"] <= now):
@@ -1522,7 +1554,7 @@ class Registry:
 
     def propose(self, code: str, domain: str, rtype: str, title: str, body: str,
                 scopes, reason: str, proposed_by: str = "",
-                changelog: str = "", source: str = "") -> dict:
+                changelog: str = "", source: str = "", supersedes: str = "") -> dict:
         """File a proposal. It reaches NOBODY until the batch is approved — which
         is why this needs only the project code: an unapproved proposal cannot
         do harm, and a chat that deposits one stops keeping a note about it.
@@ -1531,6 +1563,15 @@ class Registry:
         assigns the next number in it, four digits. A number is not a choice, it
         is a position in a sequence: whoever does not pass it cannot pick it,
         which is a structural guarantee and not a rule anybody has to remember.
+
+        `supersedes` names the rule this proposal REPLACES — a dedicated field,
+        never a citation in the body, so the registry can impose the atomicity:
+        at approval, in the same transaction, the heir goes active and the
+        named rule is retired pointing at it. The target must be IN FORCE, and
+        only one pending proposal may claim it (a partial unique index, so it
+        holds no matter which door the write came through). The heir DECLARES
+        its own scopes: the supersede is the moment the perimeter gets
+        re-decided, not inherited.
 
         The ID assigned comes back in the verdict — without it you could not
         write the citations that point at this rule."""
@@ -1547,6 +1588,19 @@ class Registry:
         if not (reason or "").strip():
             raise RulesError("reason is mandatory: without the why a rule cannot be "
                              "defended, and at the first opportunity it gets reopened")
+        sup = None
+        if (supersedes or "").strip():
+            sup = _norm_id(supersedes)
+            target = self._row(p, sup)
+            if target is None:
+                raise RulesError(
+                    f"{sup}: never defined in this project. `supersedes` must name a "
+                    "rule in force — the one this proposal replaces.")
+            if not self._in_force(target):
+                raise RulesError(
+                    f"{sup} is {target['status']} and not in force: only a rule in "
+                    "force can be superseded. A defect in a living rule is rules_fix; "
+                    "a rule already retired needs no heir declared after the fact.")
         # Citations are validated BEFORE anything is written: a chat cannot
         # hallucinate a pointer, because the proposal does not go in.
         # VALIDATED ON WHAT ARRIVED, then compacted, then measured. The order is
@@ -1578,10 +1632,11 @@ class Registry:
                                 (p, rid, s))
             self.cx.execute(
                 "INSERT INTO rules (project, id, domain, seq, type, title, body, status, "
-                "permanence, changelog, source, reason, proposed_by, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,'proposed','provisional',?,?,?,?,?)",
+                "permanence, changelog, source, reason, proposed_by, supersedes, "
+                "updated_at) "
+                "VALUES (?,?,?,?,?,?,?,'proposed','provisional',?,?,?,?,?,?)",
                 (p, rid, dom, seq, rtype, title.strip(), body, changelog or None,
-                 source or None, reason.strip(), by, _now()))
+                 source or None, reason.strip(), by, sup, _now()))
             self._write_refs(p, rid, cites)
             self.cx.execute("COMMIT")
         except sqlite3.IntegrityError as e:
@@ -1596,6 +1651,11 @@ class Registry:
             # this branch used to say "if it names the unique constraint …" and
             # classify unconditionally, which is a comment doing a condition's
             # job.
+            if "rules.project, rules.supersedes" in str(e):
+                raise RulesError(
+                    f"a pending proposal already supersedes {sup}: one victim, one "
+                    "heir. Have that batch approved or denied first — approval and "
+                    "denial free the slot by themselves.")
             if "rules.project, rules.domain, rules.seq" not in str(e).replace(
                     "UNIQUE constraint failed: ", ""):
                 raise RulesFault(
@@ -1609,12 +1669,17 @@ class Registry:
         except Exception:
             self.cx.execute("ROLLBACK")
             raise
-        return {"project": p, "id": rid, "domain": dom, "seq": seq,
-                "status": "proposed", "scopes": scopes, "cites": cites,
-                "reaches_now": [],
-                "note": "the ID above was ASSIGNED by the registry: write it down, it is what "
-                        "other rules must cite. It reaches nobody until the batch is "
-                        "approved — check back with pending instead of keeping a note."}
+        out = {"project": p, "id": rid, "domain": dom, "seq": seq,
+               "status": "proposed", "scopes": scopes, "cites": cites,
+               "reaches_now": [],
+               "note": "the ID above was ASSIGNED by the registry: write it down, it is what "
+                       "other rules must cite. It reaches nobody until the batch is "
+                       "approved — check back with pending instead of keeping a note."}
+        if sup:
+            out["supersedes"] = sup
+            out["note"] += (f" At approval {sup} is retired in the same "
+                            "transaction, pointing at this rule.")
+        return out
 
     def batch(self, code: str) -> dict:
         """The pending batch plus its DIGEST — sha256 over the ordered list of
@@ -1646,7 +1711,15 @@ class Registry:
     def approve(self, code: str, digest: str) -> dict:
         """Approve the whole pending batch. The DIGEST is the one check left on
         this door, and it is not ceremony: it proves the approval covers the
-        batch that was read, not the batch that exists now."""
+        batch that was read, not the batch that exists now.
+
+        A proposal that carries `supersedes` does BOTH ITS MOVES here, in the
+        same transaction: the heir goes active and the named rule is retired
+        pointing at it. There is no window in which both are in force, and no
+        third step anybody can forget. A victim that somebody else retired
+        while the proposal was pending is a DECLARED no-op: the approval goes
+        through, the verdict says which supersede was skipped, and the other
+        maintainer's retirement is not rewritten behind their back."""
         p = self._project(code)
         current = self.batch(code)
         if (digest or "").strip() != current["digest"]:
@@ -1656,17 +1729,40 @@ class Registry:
                 "re-read it. You cannot read one batch and have another approved.")
         if not current["ids"]:
             raise RulesError("nothing to approve: the batch is empty")
-        self._record_approval(p, current["digest"], current["ids"])
         expires = _plus_days(self.provisional_days)
-        for rid in current["ids"]:
-            self.cx.execute(
-                "UPDATE rules SET status='active', permanence='provisional', expires_at=?, "
-                "event=?, updated_at=? WHERE project=? AND id=?",
-                (expires, "approved", _now(), p, rid))
-        return {"project": p, "approved": current["ids"], "count": len(current["ids"]),
-                "expires_at": expires,
-                "note": ("they are PROVISIONAL: unless renewed they leave the lists by "
-                         "themselves. Staying costs a decision, going is free.")}
+        superseded, skipped = [], []
+        self.cx.execute("BEGIN IMMEDIATE")
+        try:
+            self._record_approval(p, current["digest"], current["ids"])
+            for rid in current["ids"]:
+                self.cx.execute(
+                    "UPDATE rules SET status='active', permanence='provisional', "
+                    "expires_at=?, event=?, updated_at=? WHERE project=? AND id=?",
+                    (expires, "approved", _now(), p, rid))
+            for pr in current["proposals"]:
+                sup = pr.get("supersedes")
+                if not sup:
+                    continue
+                target = self._row(p, sup)
+                if target is not None and self._in_force(target):
+                    self.cx.execute(
+                        "UPDATE rules SET status='retired', superseded_by=?, event=?, "
+                        "updated_at=? WHERE project=? AND id=?",
+                        (pr["id"], f"superseded by {pr['id']}", _now(), p, sup))
+                    superseded.append({"retired": sup, "by": pr["id"]})
+                else:
+                    skipped.append({"id": pr["id"], "target": sup,
+                                    "why": "no longer in force"})
+            self.cx.execute("COMMIT")
+        except Exception:
+            self.cx.execute("ROLLBACK")
+            raise
+        out = {"project": p, "approved": current["ids"], "count": len(current["ids"]),
+               "expires_at": expires, "superseded": superseded,
+               "supersede_skipped": skipped,
+               "note": ("they are PROVISIONAL: unless renewed they leave the lists by "
+                        "themselves. Staying costs a decision, going is free.")}
+        return out
 
     def deny(self, code: str, ids, reason: str) -> dict:
         """No digest: denying cannot do harm. And an explicit denial turns

@@ -1927,6 +1927,8 @@ def an_old_database_gains_the_event_column_and_the_new_trigger():
     o.cx.execute("ALTER TABLE rules ADD COLUMN legacy_id TEXT")
     o.cx.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_rules_legacy "
                  "ON rules(project, legacy_id) WHERE legacy_id IS NOT NULL")
+    o.cx.execute("DROP INDEX ux_rules_supersedes")
+    o.cx.execute("ALTER TABLE rules DROP COLUMN supersedes")
     o.cx.execute("ALTER TABLE approvals ADD COLUMN signature TEXT")
     o.cx.execute("ALTER TABLE approvals ADD COLUMN signed INTEGER NOT NULL DEFAULT 1")
     versions = o.cx.execute("SELECT COUNT(*) FROM rule_versions "
@@ -1934,11 +1936,17 @@ def an_old_database_gains_the_event_column_and_the_new_trigger():
     o.close()
 
     n = Registry(C1M_DB)
-    assert n.repaired == [], f"an upgrade is not a repair: {n.repaired}"
-    assert n.migrated == ["rules.event", "rules.legacy_id dropped",
+    assert n.repaired == [], \
+        f"an upgrade is not a repair — the supersedes index rode in with its " \
+        f"column and must not be reported: {n.repaired}"
+    assert n.migrated == ["rules.event", "rules.supersedes",
+                          "rules.legacy_id dropped",
                           "trg_rules_upd",
                           "approvals.signature dropped",
                           "approvals.signed dropped"], n.migrated
+    assert "supersedes" in {r[1] for r in n.cx.execute("PRAGMA table_info(rules)")}
+    assert "ux_rules_supersedes" in {r[0] for r in n.cx.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'")}
     # NOTHING was converted: the reason v1.5.0 dirtied stays dirty. It is
     # gym data and it dies with the reset — a migration that rewrote it would
     # be inventing a why nobody wrote.
@@ -2010,6 +2018,131 @@ def no_rule_carries_a_legacy_id():
 
 case("no rule carries a legacy identifier: no column, no index, no parameter",
      no_rule_carries_a_legacy_id)
+
+
+# =====================================================================
+head("the supersede is atomic: propose names the victim, approve does both")
+# =====================================================================
+
+# F6, decided 2026-08-10. A rule has three fates: it holds, it retires, or it
+# gets CHANGED — and the third used to be two separate steps, held together by
+# discipline. Now `supersedes` is a dedicated field on the proposal, never a
+# citation in the body: at approval, in the SAME transaction, the heir goes
+# active and the superseded rule is retired pointing forward. At denial the
+# old rule is not touched.
+
+SUP = "Su9p3Rc55dd"
+SUP_NAME = "Supersede bench"
+
+case("create the supersede bench", lambda: R.create_project(
+    SUP, SUP_NAME, [("architect", "chat"), ("advisory", "chat")],
+    {"VA": "vault"}))
+
+OLD_RULE = R.propose(SUP, "VA", "R", "The rule to be replaced", "Old body.",
+                     ["*"], "born to be superseded", "architect")["id"]
+R.approve(SUP, R.batch(SUP)["digest"])
+
+
+def _sup(rid):
+    return R.cx.execute("SELECT * FROM rules WHERE project=? AND id=?",
+                        (SUP_NAME, rid)).fetchone()
+
+
+refuses("supersedes towards a rule that was never defined",
+        lambda: R.propose(SUP, "VA", "R", "x", "y", ["*"], "m", "architect",
+                          supersedes="VA-0099"),
+        "never defined", RulesError)
+
+
+def a_proposal_cannot_supersede_a_proposal():
+    pending = R.propose(SUP, "VA", "R", "Still pending", "Body.", ["*"],
+                        "m", "architect")["id"]
+    try:
+        R.propose(SUP, "VA", "R", "x", "y", ["*"], "m", "architect",
+                  supersedes=pending)
+        raise AssertionError("it should have refused")
+    except RulesError as e:
+        assert "not in force" in str(e).lower(), e
+    R.deny(SUP, [pending], "bench cleanup")
+
+
+case("supersedes towards a rule not in force is refused at the door",
+     a_proposal_cannot_supersede_a_proposal)
+
+
+def the_second_pending_supersede_is_refused_by_the_database():
+    """A partial UNIQUE index, not a Python check: two pending proposals
+    superseding the same rule cannot coexist no matter which door they came
+    through."""
+    idx = {r[0] for r in R.cx.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "ux_rules_supersedes" in idx, sorted(idx)
+    first = R.propose(SUP, "VA", "R", "Heir one", "Body one.", ["*"],
+                      "the first heir", "architect", supersedes=OLD_RULE)["id"]
+    try:
+        R.propose(SUP, "VA", "R", "Heir two", "Body two.", ["*"],
+                  "the second heir", "architect", supersedes=OLD_RULE)
+        raise AssertionError("it should have refused")
+    except RulesError as e:
+        assert "already" in str(e).lower(), e
+    # Deny frees the slot: the index watches PENDING proposals only.
+    R.deny(SUP, [first], "make room")
+    assert _sup(OLD_RULE)["status"] == "active", \
+        "denying the heir must not touch the old rule"
+
+
+case("a second pending proposal on the same victim is refused by the database",
+     the_second_pending_supersede_is_refused_by_the_database)
+
+
+def approve_swaps_the_two_in_one_transaction():
+    heir = R.propose(SUP, "VA", "R", "The heir", "New body.", ["advisory"],
+                     "the decision changed", "architect",
+                     supersedes=OLD_RULE)["id"]
+    b = R.batch(SUP)
+    mine = [p for p in b["proposals"] if p["id"] == heir]
+    assert mine and mine[0].get("supersedes") == OLD_RULE, \
+        "the batch does not SHOW the supersede: whoever approves must see the retirement"
+    out = R.approve(SUP, b["digest"])
+    assert out["superseded"] == [{"retired": OLD_RULE, "by": heir}], out
+    old = _sup(OLD_RULE)
+    assert old["status"] == "retired" and old["superseded_by"] == heir, dict(old)
+    new = _sup(heir)
+    assert new["status"] == "active", dict(new)
+    # The heir DECLARES its scopes: nothing was inherited from the victim.
+    scopes = [r[0] for r in R.cx.execute(
+        "SELECT scope FROM rule_scopes WHERE project=? AND rule_id=?",
+        (SUP_NAME, heir))]
+    assert scopes == ["advisory"], scopes
+    # And the reading expands the retired rule pointing forward.
+    probe = R.propose(SUP, "VA", "R", "Probe", f"See ({OLD_RULE}).", ["*"],
+                      "m", "architect")["id"]
+    R.approve(SUP, R.batch(SUP)["digest"])
+    body = [d for d in R.list_rules(SUP, "architect")["rules"]
+            if d["id"] == probe][0]["body"]
+    assert f"superseded by {heir}" in body, body
+
+
+case("approve activates the heir AND retires the victim, one transaction",
+     approve_swaps_the_two_in_one_transaction)
+
+
+def a_victim_retired_in_the_meantime_is_a_declared_noop():
+    target = R.propose(SUP, "VA", "R", "To vanish early", "Body.", ["*"],
+                       "m", "architect")["id"]
+    R.approve(SUP, R.batch(SUP)["digest"])
+    heir = R.propose(SUP, "VA", "R", "Late heir", "Body.", ["*"], "m",
+                     "architect", supersedes=target)["id"]
+    R.retire(SUP, target, reason="retired while the heir was pending")
+    out = R.approve(SUP, R.batch(SUP)["digest"])
+    assert out["supersede_skipped"] == [
+        {"id": heir, "target": target, "why": "no longer in force"}], out
+    assert _sup(target)["superseded_by"] is None, \
+        "a rule somebody else retired is not rewritten behind their back"
+
+
+case("a victim already retired at approval: declared no-op, nothing rewritten",
+     a_victim_retired_in_the_meantime_is_a_declared_noop)
 
 print(f"\n{OK} passed, {FAIL} failed")
 if FAILURES:

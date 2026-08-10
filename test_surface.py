@@ -1516,5 +1516,22 @@ if _ENGINE_PROPOSE is not None:
 ok("ux_rules_legacy" not in _rules.INDEXES and "ux_rules_legacy" not in _rules.SCHEMA,
    "the legacy unique index is out of the schema and out of INDEXES")
 
+print("\n== the supersede is a field, and its uniqueness is an index ==")
+
+# F6: `supersedes` is a dedicated parameter — never a citation in the body —
+# so the registry can impose atomicity, and "retired pointing at the
+# successor" is born from the schema, not from prose.
+if _PROPOSE is not None:
+    _ps = [a.arg for a in _PROPOSE.args.posonlyargs + _PROPOSE.args.args]
+    ok("supersedes" in _ps, "rules_propose takes supersedes", _ps)
+if _ENGINE_PROPOSE is not None:
+    _es = [a.arg for a in _ENGINE_PROPOSE.args.posonlyargs + _ENGINE_PROPOSE.args.args]
+    ok("supersedes" in _es, "the engine's propose() agrees: supersedes is a field", _es)
+ok("ux_rules_supersedes" in _rules.INDEXES,
+   "the one-pending-heir guarantee is an INDEX the preflight verifies",
+   _rules.INDEXES)
+ok(GUIDE_SRC.count("`supersedes`") >= 1,
+   "the manual documents the supersede field")
+
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
