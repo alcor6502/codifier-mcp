@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-1.6.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-30%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-1.6.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-29%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -180,13 +180,12 @@ and warns is a service whose warnings nobody reads.
 - **The maintenance code travels on every call** that writes: no session, so no
   mode is left open by accident. Reading your own rules and filing a proposal
   are both free — a working chat never needs the code.
-- **Two manuals, and the second one needs the code.** `reference_guide` takes
-  no arguments at all — anyone the gate lets in can read how the registry is
-  used. `legislator_guide` is how rules are *decided*, and it sits behind the
-  maintenance code. Not because the text is sensitive — every word of it could
-  be published — but because a chat that has just read how rules are written is
-  one step from writing its own, which is the one thing the registry exists to
-  prevent.
+- **One manual, with a stop line.** `reference_guide` takes no arguments at
+  all — anyone the gate lets in reads it. The consumer part comes first and
+  ends at a stop line; the maintenance tools past it want the code on every
+  call. The separate legislator's manual of v1.4 was folded in: its door
+  protected an hygiene that had no readers, since the manual is read by three
+  chats and the skills do not read it at all.
 - **The process runs as root and the database is 0644.** This is the opposite of
   the vault twin, deliberately: from the share you read and you do not touch,
   because a write by hand would bypass the triggers and break history in

@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Explicit, never COPY *.py: with a wildcard the three test files end up inside
 # the image, and an image should carry what it runs and nothing else.
-COPY rules.py server.py preflight.py entrypoint.sh reference-guide.md legislator-guide.md ./
+COPY rules.py server.py preflight.py entrypoint.sh reference-guide.md ./
 RUN chmod +x entrypoint.sh
 
 # OAuth store (tokens, registrations) on a persistent volume: it survives

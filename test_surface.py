@@ -86,7 +86,6 @@ def source_or_none(path: str):
 
 
 GUIDE_SRC = source_or_none(os.path.join(HERE, "reference-guide.md")) or ""
-LEGISLATOR_SRC = source_or_none(os.path.join(HERE, "legislator-guide.md")) or ""
 
 # WHERE server.py keeps the files it serves: the module-level constants, with
 # the file each one names, read off the source and not listed by hand. It is
@@ -572,11 +571,11 @@ ok("no `id` parameter" in GUIDE_SRC,
 ok(GUIDE_SRC.count("the ID and the body, and nothing else") == 1,
    "the user manual pins the consumer reading, exactly once",
    GUIDE_SRC.count("the ID and the body, and nothing else"))
-ok(LEGISLATOR_SRC.count("`reason` is immutable") == 1,
-   "the legislator's manual pins the immutable reason, exactly once",
-   LEGISLATOR_SRC.count("`reason` is immutable"))
-ok("does not keep it" not in LEGISLATOR_SRC,
-   "the legislator's manual no longer says the reason column loses the why")
+ok(GUIDE_SRC.count("`reason` is immutable") == 1,
+   "the manual pins the immutable reason, exactly once",
+   GUIDE_SRC.count("`reason` is immutable"))
+ok("does not keep it" not in GUIDE_SRC,
+   "the manual no longer says the reason column loses the why")
 # And the consumer-facing docstrings stopped promising the fields that left: a
 # stale description does not fail, it advises badly, which is worse.
 for _t in TOOLS:
@@ -617,18 +616,18 @@ for _label, _attr, _unit in (("IDs per `rules_get`", "MAX_GET_IDS", ""),
        f"reference-guide.md states {_label} exactly once, as {_v}{_unit}", _found)
 
 # =====================================================================
-# 2d · two manuals, two audiences, and the door between them
+# 2d · one manual, whole, behind no door
 # =====================================================================
 
-print("\n== the two manuals, and who is allowed to read which ==")
+print("\n== one manual, whole, and the stop line inside it ==")
 
 # There is ONE way to reach a file from server.py — a module-level Path
 # constant, then .read_text — and every half of that sentence is pinned,
 # because each one on its own is a door left ajar. All three of these were
-# TRIED as ungated tools serving the maintenance manual, and each slipped a
-# version of this section that was missing one line:
+# TRIED as extra tools serving a file, and each slipped a version of this
+# section that was missing one line:
 #   `with open(path) as f` .............. caught by the ban on open, as a name
-#   `_LEGISLATOR.open()` / `io.open()` .. caught by the ban on open, as an attribute
+#   `_GUIDE.open()` / `io.open()` ....... caught by the ban on open, as an attribute
 #   a module helper that reads it ....... caught by the LOCALITY check below
 _OPENS = [ast.unparse(n)[:40] for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
           and ((isinstance(n.func, ast.Name) and n.func.id in ("open", "fdopen"))
@@ -642,16 +641,18 @@ _LOOSE = sorted({ast.unparse(n.func.value) for n in _READERS
                  if ast.unparse(n.func.value) not in PATH_CONSTS})
 ok(not _LOOSE, "and every read goes through one of those constants", _LOOSE)
 
-_LEG = next((t for t in TOOLS if t.name == "legislator_guide"), None)
 _REF = next((t for t in TOOLS if t.name == "reference_guide"), None)
-ok(_LEG is not None, "legislator_guide is exposed")
 ok(_REF is not None, "reference_guide is exposed")
+ok("legislator_guide" not in TOOL_NAMES,
+   "legislator_guide is gone: the separate door protected an hygiene with no "
+   "readers, and the craft now lives past the stop line")
 
 # LOCALITY: a constant may be named only inside the tool that serves it. Pull
-# the read one function further out — `def _text(): return _LEGISLATOR.read_text()`,
-# called by an ungated tool — and every check that looks INSIDE a tool for a
+# the read one function further out — `def _text(): return _GUIDE.read_text()`,
+# called by a second tool — and every check that looks INSIDE a tool for a
 # read goes blind, because there is no read in there any more. Measured: an
-# ungated third tool built that way passed everything.
+# ungated extra tool built that way passed everything, on the two-manual
+# version of this section.
 _ENCLOSING = {}
 for _fn in ast.walk(SERVER_TREE):
     if isinstance(_fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -661,52 +662,45 @@ _TOUCHES_CONST = {}
 for _n in ast.walk(SERVER_TREE):
     if isinstance(_n, ast.Name) and _n.id in PATH_CONSTS and isinstance(_n.ctx, ast.Load):
         _TOUCHES_CONST.setdefault(_ENCLOSING.get(id(_n), "(module level)"), set()).add(_n.id)
-ok(set(_TOUCHES_CONST) == {"reference_guide", "legislator_guide"},
-   "only the two manual tools ever name a manual's path — no helper in between",
+ok(set(_TOUCHES_CONST) == {"reference_guide"},
+   "only reference_guide ever names the manual's path — no helper in between",
    sorted(_TOUCHES_CONST))
-
-# WHICH tool names WHICH constant, as an equality. Everything else in this
-# section stays green with the two swapped — one word — and the swap puts the
-# maintenance manual behind the open door and the open one behind the code. It
-# is the single most likely edit, because the second tool was written by
-# copying the first.
-for _t, _want in ((_REF, "reference-guide.md"), (_LEG, "legislator-guide.md")):
-    if _t is None:
-        continue
-    _reads = {PATH_CONSTS.get(c) for c in _TOUCHES_CONST.get(_t.name, set())}
-    ok(_reads == {_want}, f"{_t.name} serves {_want}, and nothing else",
+if _REF is not None:
+    _reads = {PATH_CONSTS.get(c) for c in _TOUCHES_CONST.get("reference_guide", set())}
+    ok(_reads == {"reference-guide.md"},
+       "reference_guide serves reference-guide.md, and nothing else",
        sorted(map(str, _reads)))
 
-# THE GATE, as an equality over the pair. This is the guarantee the whole
-# delivery is: one manual open, one behind the maintenance code. Every other
-# check here is conditional on the gate already being there — the loop that
-# demands _admin only visits tools that WRITE, and legislator_guide writes
-# nothing; the loop that pins the gate's position only visits tools that call
-# _admin already, so deleting the call deletes the check with it. Measured:
-# dropping `_admin(code)` left the suite green before this line existed, with
-# the `code` parameter still in the signature, so the tool went on LOOKING
-# protected.
-_GATED = {t.name for t in (_REF, _LEG) if t is not None
-          and any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                  and n.func.id == "_admin" for n in ast.walk(t))}
-ok(_GATED == {"legislator_guide"},
-   "the legislator's manual is behind the code and the open one is not",
+# The manual is OPEN, and that is the decision this section holds: it is read
+# by three chats, the skills do not read it at all, and the stop line inside
+# the file is the boundary that used to be a second tool behind the code.
+_GATED = {t.name for t in ([_REF] if _REF is not None else [])
+          if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                 and n.func.id == "_admin" for n in ast.walk(t))}
+ok(_GATED == set(),
+   "reference_guide takes no admin code: the manual is one file, open",
    sorted(_GATED))
 
 # A file missing from the image is OURS, not the caller's. Left as a RulesError
 # it would leave one quiet INFO line starting with the word "refused" — a
 # broken image wearing the face of a normal answer, which is the defect the
 # decorator exists to close, inverted.
-for _t in (_REF, _LEG):
-    if _t is None:
-        continue
-    _raised = {ast.unparse(n.exc.func) for n in ast.walk(_t)
+if _REF is not None:
+    _raised = {ast.unparse(n.exc.func) for n in ast.walk(_REF)
                if isinstance(n, ast.Raise) and isinstance(n.exc, ast.Call)}
     ok(_raised == {"RulesFault"},
-       f"{_t.name} raises RulesFault when the file is not there, never RulesError",
+       "reference_guide raises RulesFault when the file is not there, never RulesError",
        sorted(_raised))
 
-# The legislator's manual has to stay APPLICABLE, and that is not something a
+# The STOP line is the boundary the whole delivery is: one manual, and the
+# consumer's part ends where it stands. COUNTED, not `in`-tested — a rewrite
+# that leaves a second copy behind, with a contradicting line between them, is
+# exactly what `in` cannot see.
+ok(GUIDE_SRC.count("⛔ STOP — everything below requires the maintenance code") == 1,
+   "the manual carries the stop line, exactly once",
+   GUIDE_SRC.count("⛔ STOP — everything below requires the maintenance code"))
+
+# The legislator's part has to stay APPLICABLE, and that is not something a
 # test can judge. What it can hold is the shape the applicability rests on: the
 # gates, each of which is a question asked of one line. A rewrite that turns
 # them back into principles has to come through here and say so.
@@ -715,20 +709,17 @@ for _pin in ("GATE 1 — Is it a rule, or a step?",
              "GATE 3 — Is it a rule, or a reminder?",
              "GATE 4 — Who could violate it?",
              "Would it still be true if the procedure changed?"):
-    # COUNT, not `in` — the same reason the ceilings above are a list equality:
-    # a second copy of a heading, with a contradicting line between them, is
-    # what a rewrite leaves behind, and `in` is satisfied by either.
-    ok(LEGISLATOR_SRC.count(_pin) == 1,
-       f"legislator-guide.md carries, exactly once: {_pin!r}",
-       LEGISLATOR_SRC.count(_pin))
+    ok(GUIDE_SRC.count(_pin) == 1,
+       f"the manual carries, exactly once: {_pin!r}",
+       GUIDE_SRC.count(_pin))
 
 # Every file a tool serves has to exist, and be IN the image. The explicit list
 # in the Dockerfile section is the other half; this half is derived, so a
 # manual added tomorrow cannot be forgotten in a list nobody remembers to
 # extend. The defect has been paid once already, with reference_guide pointing
 # at a file that did not exist.
-ok(SERVED_FILES == ["legislator-guide.md", "reference-guide.md"],
-   "server.py serves exactly the two manuals", SERVED_FILES)
+ok(SERVED_FILES == ["reference-guide.md"],
+   "server.py serves exactly the one manual", SERVED_FILES)
 for _f in SERVED_FILES:
     ok(os.path.exists(os.path.join(HERE, _f)), f"{_f} exists in the repository")
 # And the derived set is the same set the prose checks read. If a file is
@@ -739,11 +730,10 @@ ok(_READABLE == set(SERVED_FILES),
    "every served manual is one the prose checks actually read",
    sorted(set(SERVED_FILES) - _READABLE))
 
-# The preflight refuses to start a container that is missing one of them, and
-# that is the only place the question gets asked before a chat asks it. Its
-# list is written by hand — preflight cannot import server.py, that would drag
-# in FastMCP — so the two are held equal here, and a third manual cannot slip
-# past the boot check by being forgotten in a tuple.
+# The preflight refuses to start a container that is missing it, and that is
+# the only place the question gets asked before a chat asks it. Its list is
+# written by hand — preflight cannot import server.py, that would drag in
+# FastMCP — so the two are held equal here.
 _PRE = re.search(r"^MANUALS = \(([^)]*)\)", PREFLIGHT_SRC, re.MULTILINE)
 ok(_PRE is not None, "preflight.py declares the manuals it expects in the image")
 if _PRE:
@@ -888,7 +878,7 @@ ok(not any("*" in l for l in DOCKER_COPIES),
    "Dockerfile: no wildcard COPY — the test files do not belong in the image",
    [l for l in DOCKER_COPIES if "*" in l])
 for f in ("rules.py", "server.py", "preflight.py", "entrypoint.sh",
-          "reference-guide.md", "legislator-guide.md"):
+          "reference-guide.md"):
     ok(any(re.search(rf"\b{re.escape(f)}\b", l) for l in DOCKER_COPIES),
        f"Dockerfile: {f} is copied in")
 
@@ -915,11 +905,10 @@ ok(re.search(r"^CMD \[", DOCKERFILE, re.MULTILINE) is not None,
 ok(re.search(r"^ENTRYPOINT", DOCKERFILE, re.MULTILINE) is None,
    "Dockerfile: and no ENTRYPOINT, so the CMD is the whole command line")
 
-# The manuals are tools that read files. Without the file the tool answers with
-# a fault, and the failure surfaces in a chat rather than here.
-for _f in ("reference-guide.md", "legislator-guide.md"):
-    ok(os.path.exists(os.path.join(HERE, _f)),
-       f"the file {_f} actually exists")
+# The manual is a tool that reads a file. Without the file the tool answers
+# with a fault, and the failure surfaces in a chat rather than here.
+ok(os.path.exists(os.path.join(HERE, "reference-guide.md")),
+   "the file reference-guide.md actually exists")
 
 print("\n== a designed refusal does not look like a fault in the log ==")
 

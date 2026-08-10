@@ -221,24 +221,24 @@ def c_dns():
     return f"{host} resolves"
 
 
-MANUALS = ("reference-guide.md", "legislator-guide.md")
+MANUALS = ("reference-guide.md",)
 
 
 @check("manuals")
 def c_manuals():
-    # The two manuals are files, COPIED into the image one by one, and they are
-    # the only thing the server serves that the schema cannot vouch for. Left
-    # out of the image nothing fails at boot: the tool is announced, the
-    # surface looks whole, and the gap opens in a chat weeks later, which is
-    # the shape of defect this project has already paid for once with a guide
-    # that pointed at a file nobody had written. It is cheap to ask here.
-    # test_surface holds this tuple against the files server.py actually
-    # serves, so it cannot fall behind a third manual.
+    # The manual is a file, COPIED into the image, and it is the only thing
+    # the server serves that the schema cannot vouch for. Left out of the
+    # image nothing fails at boot: the tool is announced, the surface looks
+    # whole, and the gap opens in a chat weeks later, which is the shape of
+    # defect this project has already paid for once with a guide that pointed
+    # at a file nobody had written. It is cheap to ask here. test_surface
+    # holds this tuple against the files server.py actually serves, so it
+    # cannot fall behind a manual added later.
     here = os.path.dirname(os.path.abspath(__file__))
     missing = [m for m in MANUALS if not os.path.isfile(os.path.join(here, m))]
     if missing:
         raise RuntimeError(f"not in the image: {', '.join(missing)} — check the Dockerfile COPY")
-    return f"{len(MANUALS)} manuals, in the image"
+    return f"{len(MANUALS)} manual{'s' if len(MANUALS) != 1 else ''}, in the image"
 
 
 CHECKS = [c_db, c_schema, c_writable, c_ownership, c_admin_code, c_approval,

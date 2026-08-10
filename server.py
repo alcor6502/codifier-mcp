@@ -20,9 +20,9 @@ preflight. Three deliberate differences:
 Every tool that acts on a rule is prefixed `rules_`: the vault's tools (status,
 history, diff, search...) live in the same chat, and two namesakes get confused.
 The prefix stays `rules_` even though the repository is called codifier-mcp —
-inside this project "rules" is the only subject there is. The two manuals —
-`reference_guide` and `legislator_guide` — carry no prefix, because they touch
-no rule: they serve a file.
+inside this project "rules" is the only subject there is. The one manual —
+`reference_guide` — carries no prefix, because it touches no rule: it serves a
+file, whole, with a stop line where the consumer's part ends.
 
 Configuration, all through environment variables:
   DB_PATH                 the single database (default /db/rules.db)
@@ -156,13 +156,16 @@ tool = make_tool(mcp, log, refusal=RulesError, fault=RulesFault)
 mcp.add_middleware(Gate(log=log, allowed_login=ALLOWED_LOGIN,
                         allowed_cidrs=ALLOWED_CIDRS))
 
-# The two manuals. Both ship inside the image, which is the whole reason they
-# are files here and not documents in the vault: a manual that travels with the
+# The manual. It ships inside the image, which is the whole reason it is a
+# file here and not a document in the vault: a manual that travels with the
 # code cannot describe a version that is not running, and a static check can
 # hold it against the code it ships with. A copy anywhere else is verified by
-# nobody.
+# nobody. ONE manual since v2.0.0: the consumer part ends at a stop line, and
+# what follows — maintenance, and the legislator's craft — is read past it by
+# whoever holds the code. The separate legislator_guide door protected an
+# hygiene that had no readers: the manual is read by three chats, and the
+# skills do not read it at all.
 _GUIDE = Path(__file__).with_name("reference-guide.md")
-_LEGISLATOR = Path(__file__).with_name("legislator-guide.md")
 
 
 def _admin(code: str) -> None:
@@ -207,9 +210,12 @@ def rules_project_info(project: str) -> dict:
 
 @tool
 def reference_guide() -> dict:
-    """The manual for this registry: the model, what a consumer and a scope are,
-    the life of a rule from proposal to retirement, which tool for which job, and
-    what the errors mean. Read it before your first write."""
+    """The manual for this registry, whole. The consumer part comes first —
+    the model, the citations, which tool for which job, what the errors mean —
+    and ends at a STOP line: a working session can stop there. Below the line
+    live the maintenance tools, which want the admin code, and the craft of
+    deciding what deserves to be a rule. Read the first part before your first
+    write."""
     try:
         return {"version": VERSION, "guide": _GUIDE.read_text(encoding="utf-8")}
     except OSError as e:
@@ -677,52 +683,6 @@ def rules_backup(code: str) -> dict:
     backup. ZFS snapshots stay the main net."""
     _admin(code)
     return registry.backup(BACKUP_DIR)
-
-
-# =====================================================================
-# The legislator's manual
-# =====================================================================
-#
-# THE NAME, because this is a decision that will be read back. `rules_*` is
-# reserved for the tools that act on rules, and this one does not touch the
-# registry at all: it opens a file, exactly like `reference_guide`, which is
-# also prefixless. So the two manuals are named as a pair — reference_guide and
-# legislator_guide — and the prefix keeps meaning what it means. "Legislator"
-# is not decoration either: the whole point of the split is that redacting and
-# promulgating are two jobs, and this is the manual of the first one.
-#
-# THE CODE. Not secrecy — every word in that file could be published without
-# harm, and its existence is on the surface by construction: this docstring
-# travels in tools/list to anyone the Gate lets in, so what the code protects is
-# the TEXT and never the news that the text exists. It is role hygiene: the
-# manual that teaches how rules are decided has one audience, and the damage is
-# not that somebody learns it exists — it is that a chat which has just READ how
-# rules are written is one step from writing its own, which is the single thing
-# the whole registry exists to prevent.
-#
-# And nobody arrives here by browsing. Whoever administers the corpus is given
-# the maintenance code in the project's own instructions, and reading this
-# manual is the step after that. The manual of USE does not mention this tool at
-# all, deliberately: it is not the road, and pointing at a door somebody cannot
-# open is an invitation and not a service. The road is the sequence.
-
-@tool
-def legislator_guide(code: str) -> dict:
-    """MAINTENANCE. The manual for deciding WHAT DESERVES TO BE A RULE: the
-    tests that tell a rule from a step, from a missing manual and from a
-    reminder; who a rule has to reach; what the `reason` field must carry; and
-    what to ask at renewal.
-
-    This is not the manual for using the registry. That one is
-    `reference_guide`, it needs no code, and it is the one a working chat
-    wants. Do not read this one to learn how to call a tool."""
-    _admin(code)
-    try:
-        return {"version": VERSION, "guide": _LEGISLATOR.read_text(encoding="utf-8")}
-    except OSError as e:
-        # Same reasoning as reference_guide: a missing file in the image is
-        # ours, not the caller's.
-        raise RulesFault(f"legislator guide not available in the image: {e}") from e
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/versione-1.6.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-30%20tool-8A63D2.svg">
+<img src="https://img.shields.io/badge/versione-1.6.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-29%20tool-8A63D2.svg">
 
 **Le regole di un progetto in un registro invece che sparse nei Markdown — così
 una chat può rispondere in una chiamata a «sotto quali regole sto?».**
@@ -183,12 +183,12 @@ avvisa è un servizio di cui nessuno legge gli avvisi.
   sessione, quindi nessuna modalità rimasta aperta per sbaglio. Leggere le
   proprie regole e depositare una proposta sono gratis — una chat di lavoro il
   codice non ce l'ha mai.
-- **Due manuali, e il secondo vuole il codice.** `reference_guide` non prende
-  nessun argomento: chiunque il gate lasci entrare legge come si usa il
-  registro. `legislator_guide` è come si *decidono* le regole, e sta dietro al
-  codice di manutenzione. Non perché il testo sia sensibile — si potrebbe pubblicare parola
-  per parola — ma perché una chat che ha appena letto come si scrivono le regole
-  è a un passo dallo scriversele, che è l'unica cosa per cui il registro esiste.
+- **Un manuale solo, con la riga di stop.** `reference_guide` non prende
+  nessun argomento: chiunque il gate lasci entrare lo legge. La parte per i
+  consumer viene prima e finisce a una riga di stop; i tool di manutenzione
+  oltre la riga vogliono il codice a ogni chiamata. Il manuale del legislatore
+  della v1.4 è stato riassorbito: la sua porta proteggeva un'igiene senza
+  lettori — il manuale lo leggono tre chat, e le skill non lo leggono affatto.
 - **Il processo gira come root e il database è 644.** È l'opposto del gemello
   vault, di proposito: dalla share si legge e non si tocca, perché una scrittura
   a mano aggirerebbe i trigger e romperebbe lo storico in silenzio.
