@@ -1,5 +1,8 @@
 # Codifier MCP — manual
 
+This is the manual for **using** the registry: which tool for which job, how to
+read what comes back, what a refusal means, and where the ceilings are.
+
 ## THE MODEL
 
 This is a **registry of rules**, and it exists to make one question a query:
@@ -8,8 +11,9 @@ This is a **registry of rules**, and it exists to make one question a query:
 **One database, N projects.** A project is a column, not a table, so `VA-0002` of
 one project and `VA-0002` of another coexist with separate histories. You address
 a project by an opaque **CODE**, never by its name — the code sits at the top of
-that project's instructions. No tool lists projects, and no error names one: a
-missing code and a wrong code give the identical answer.
+that project's instructions. No tool you can reach without the maintenance code
+lists projects, and no error names one: a missing code and a wrong code give the
+identical answer.
 
 **Consumers** are whoever downloads rules: chats *and* skills. A skill is not a
 chat, but it acts, and what acts is under rules — calling `rules_list` is the
@@ -50,9 +54,6 @@ the Architect needs to decide whether it belongs somewhere else.
 uppercase letters the project has declared — and the registry hands back the
 next number in it, four digits: `VA-0001` for the first of its domain. The
 assigned ID is in the verdict, and it is what other rules must cite.
-
-A number is not a choice, it is a position in a sequence. Whoever does not pass
-it cannot pick it, which is why there is no rule anywhere telling you not to.
 
 Four digits because IDs are **never reused**: a domain that retires and rewrites
 burns numbers even while only twenty are alive. Older text may still say
@@ -114,9 +115,13 @@ work around, it is the shape of the job.
 
 A rule filed before this format existed keeps its old text, and that is
 deliberate: nobody rewrites prose by pattern. Such a rule can still be renamed,
-retyped and retired — `rules_fix` only checks a body you actually change. What
-is already stored is reported by `rules_check`, which is a report and not a door
-slammed on unrelated work.
+retyped and retired — **`rules_fix` checks the body only if you pass one**.
+Read that literally: what is exempt is the body you leave alone, not the body
+that has not changed. A `body` you pass is checked before anything compares it
+with what is stored, so handing back the old text of a legacy rule to change
+only its title is refused for the pointers that text always had. Omit the
+field and the same edit goes through. What is already stored is reported by
+`rules_check`, which is a report and not a door slammed on unrelated work.
 
 ### Reading expands them
 
@@ -141,15 +146,21 @@ all.
 3. **History is written by the database TRIGGERS, not by the tools.** A change
    made by hand with `sqlite3` is in there too. Whole versions are kept, not
    diffs.
-4. **A new rule reaches nobody until its batch is approved**, and the approval
-   is signed. Which is why proposing needs no maintenance code.
+4. **A new rule reaches nobody until its batch is approved.** Which is why
+   proposing needs no maintenance code. Whether that approval must carry an
+   ed25519 signature is a property of the deployment, not of the rule:
+   `rules_project_info` answers it in `approval.required`, and while a grace
+   window is open a batch goes through unsigned and is **recorded** as
+   unsigned.
 5. **An approved rule is PROVISIONAL and expires.** Staying costs a decision,
    going is free.
 
-Rule five is the load-bearing one. Rules did not pile up — 63 to 172 — because
-somebody wrote them without permission. They piled up because adding costs a
-call and removing costs a decision nobody takes. Expiry inverts that asymmetry;
-authorisation alone never would have.
+What rule five does to you in practice: a provisional rule carries an expiry
+date, `rules_pending` shows you yours from thirty days out, and on the day it
+passes the rule leaves the lists on its own. `rules_renew` puts it back for
+another term and `rules_promote` makes it permanent — both signed, because
+keeping a rule alive is letting it in again. Nobody has to do anything for a
+rule to go; somebody has to decide for it to stay.
 
 ## THE LIFE OF A RULE
 
@@ -158,10 +169,15 @@ authorisation alone never would have.
         │                              └──> retired
         └──> denied  (with a reason, and the row STAYS)
 
-- **`rules_propose`** files it. It needs only the project code: a proposal
+- **`rules_propose`** files it, and needs no maintenance code: a proposal
   reaches nobody, so it cannot do harm — and it means you can stop keeping a
   note about it. It takes the **domain**, not the number, and gives the number
-  back.
+  back. Six things are required: `domain`, `type` (`R` binding, `M` method, `F`
+  technical fact), `title`, `body`, `scopes`, and `reason` — one sentence
+  saying why the rule should exist, which is what somebody will have to decide
+  on when it comes up for renewal. Pass `proposed_by` as well: without it the
+  registry does not know the proposal is yours, and `rules_pending` will never
+  show it to you.
 - **`rules_batch`** returns the pending proposals and a **digest**.
   **`rules_approve`** verifies an ed25519 signature over that digest. You sign
   the batch, never the single rule: at the twelfth signature in a row a person
@@ -169,16 +185,18 @@ authorisation alone never would have.
   become visible side by side.
 - **`rules_deny`** needs no signature — refusing cannot do harm. The row stays
   and the ID is burnt. The reason turns silence into an answer, and it is what
-  `rules_pending` shows you: since the counter assigns the number, the registry
-  can no longer recognise a re-proposal by its ID. Reading your own refusals is
-  now a habit, not a guard rail.
+  `rules_pending` shows you. Since the counter assigns the number, the registry
+  cannot recognise a re-proposal by its ID: reading your own refusals is a
+  habit, not a guard rail.
 - **`rules_renew`** and **`rules_promote`** are signed, because keeping a rule
   alive is letting it in again.
 - **`rules_pending`** is your noticeboard: yours waiting, yours denied with the
   reason, yours expiring within 30 days.
 
 The private key never enters a conversation. The registry holds only the public
-half: even with the `.db` in hand, nobody can manufacture an approval.
+half: once signatures are required, nobody can manufacture an approval even with
+the `.db` in hand. Every approval records whether it was signed, so the question
+"was this let in properly?" always has an answer.
 
 ## WHICH TOOL
 
@@ -190,13 +208,17 @@ half: even with the `.db` in hand, nobody can manufacture an approval.
 | find a phrase in your own rules | `rules_search` | no |
 | know what became of your proposal | `rules_pending` | no |
 | file a new rule | `rules_propose` | no |
+| read this page | `reference_guide` | no |
 | see the pending batch and its digest | `rules_batch` | yes |
 | approve · deny · renew · promote | `rules_approve` · `rules_deny` · `rules_renew` · `rules_promote` | yes |
-| fix a defect in place | `rules_fix` | yes |
+| fix a defect in place — something that was never right | `rules_fix` | yes |
 | make a rule reach one more scope | `rules_widen` | yes |
 | stop a rule reaching a scope | `rules_narrow` | yes |
 | take a rule out of the lists | `rules_retire` | yes |
 | audit a project | `rules_check` | yes |
+| see the counts: by domain, by consumer, expired | `rules_status` | yes |
+| list every project in the registry | `rules_registry` | yes |
+| change a project's code | `rules_project_rekey` | yes |
 | see how a rule changed, and why | `rules_history` · `rules_diff` | yes |
 | snapshot to Markdown | `rules_export` | yes |
 | create a project, consumer, domain, group | `rules_project_create` · `rules_consumers_add` · `rules_domains_add` · `rules_scope_create` | yes |
@@ -218,6 +240,27 @@ stumble into an audit: broken citations are worth far more seen together.
 project's code. It never means "it exists somewhere else" — the registry will
 not tell you that, by design.
 
+## THE CEILINGS, AND THE WAY PAST EACH
+
+| Ceiling | | Way past |
+|---|---|---|
+| IDs per `rules_get` | 50 | ask in batches; the answer is a dict you can merge |
+| body of one rule | 64000 bytes | it is two rules: split it |
+| rules per `rules_import` | 500 | more than this is a seeding pass, not an import |
+| numbers in one domain | 9999 | a domain that burns these needs splitting, not widening |
+
+A ceiling refuses before it writes anything, and says which one it was. None of
+them truncates: there is no call here that silently gives you part of an answer.
+One exception, and it is in the tool that is on its way out: `rules_import` does
+not check the size of a body, and it files what it imports **permanent**, so
+nothing it brings in ever expires. That is the practical reason a corpus is
+seeded by hand, one rule at a time.
+
+The expiry term is not a ceiling and is not written here: it is set by the
+deployment, and `rules_project_info` reports it in `approval.provisional_days`.
+The date for one rule is its own `expires_at`, which comes back with the rule;
+`rules_pending` is the shortcut for the ones inside thirty days.
+
 ## DO NOT IMPROVISE
 
 Each of these has a right answer that already exists.
@@ -226,21 +269,17 @@ Each of these has a right answer that already exists.
   receives them. The legislator is the Architect; the registry is the code; the
   chat applies. If you spot something worth codifying, `rules_propose` it and
   forget it — `rules_pending` will have the answer when you come back.
-- **Do not re-propose something that was denied.** The registry no longer stops
-  you — it cannot, now that the number is not yours to choose, so the same text
-  filed again simply takes a new one. The refusals are still there, with their
-  reasons, in `rules_pending`: read them before proposing. This one is on you.
+- **Do not re-propose something that was denied.** Nothing stops you: the
+  number is not yours to choose, so the same text filed again simply takes a
+  new one and the registry cannot recognise it. The refusals are there, with
+  their reasons, in `rules_pending`. Read them before proposing — this one is
+  on you and on nobody else.
 - **Do not write the gloss inside a citation** by hand. Write `(VA-0002)` and
   nothing else; the title is added on reading, from the rule itself, which is
   precisely why it cannot go out of date. Pasting back a body you read expanded
   is fine — that one is stripped for you.
 - **Do not try to cite a rule that is still a proposal.** It is refused, and the
   cure is to wait for it to be approved, not to work around it.
-- **Do not fix a superseded DECISION with `rules_fix`.** `rules_fix` is for
-  defects: a wrong number, a broken pointer, a sentence that says something
-  false — things that never were right. A decision that *was* right and stopped
-  being so gets a new rule, and the old one is retired pointing at it. Collapse
-  the two and history stops being able to tell you which happened.
 - **Do not widen a group to make one rule travel further.** `rules_scope_edit`
   changes the perimeter of *every* rule pointing at that group. For one rule,
   `rules_widen`.
@@ -258,8 +297,9 @@ Three that surprise people:
 
 - *"project not specified"* — for a missing code **and** for a wrong one. The
   message is identical on purpose: one that told them apart would be an oracle.
-- *"you read version N, it is at M"* — somebody wrote between your read and your
-  write. Re-read, reconcile, retry. Nothing was lost.
+- *"VA-0002 is at version 3, you read 2: someone wrote in the meantime"* —
+  exactly that: somebody wrote between your read and your write. Re-read,
+  reconcile, retry.
 - *"that digest is not the current one"* — a proposal arrived after you read the
   batch. Ask for the batch again and re-sign. You cannot sign one batch and have
   another approved.

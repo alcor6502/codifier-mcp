@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-1.3.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-30%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-1.4.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-31%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -188,6 +188,13 @@ and warns is a service whose warnings nobody reads.
 - **The maintenance code travels on every call** that writes: no session, so no
   mode is left open by accident. Reading your own rules and filing a proposal
   are both free — a working chat never needs the code.
+- **Two manuals, and the second one needs the code.** `reference_guide` takes
+  no arguments at all — anyone the gate lets in can read how the registry is
+  used. `legislator_guide` is how rules are *decided*, and it sits behind the
+  maintenance code. Not because the text is sensitive — every word of it could
+  be published — but because a chat that has just read how rules are written is
+  one step from writing its own, which is the one thing the registry exists to
+  prevent.
 - **The process runs as root and the database is 0644.** This is the opposite of
   the vault twin, deliberately: from the share you read and you do not touch,
   because a write by hand would bypass the triggers and break history in

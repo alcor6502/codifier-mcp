@@ -62,7 +62,79 @@ ENGINE_TREE = parse(ENGINE)
 SERVER_SRC = source(SERVER)
 RULES_SRC = source(ENGINE)
 PREFLIGHT_SRC = source(os.path.join(HERE, "preflight.py"))
-GUIDE_SRC = source(os.path.join(HERE, "reference-guide.md"))
+def source_or_none(path: str):
+    """For the files a check is ABOUT. Reading one of those at import time with
+    source() turns a missing file into a traceback on line sixty, and then not
+    one of the three hundred checks below runs — including the ones written to
+    notice exactly that. A missing file has to be a red line with a name on
+    it."""
+    try:
+        return source(path)
+    except OSError:
+        return None
+
+
+GUIDE_SRC = source_or_none(os.path.join(HERE, "reference-guide.md")) or ""
+LEGISLATOR_SRC = source_or_none(os.path.join(HERE, "legislator-guide.md")) or ""
+
+# WHERE server.py keeps the files it serves: the module-level constants, with
+# the file each one names, read off the source and not listed by hand. It is
+# the mapping and not the list that matters — a list says two manuals ship, the
+# mapping says WHICH TOOL SERVES WHICH, and swapping the two constants is a
+# one-word edit that puts the maintenance manual behind the open door.
+PATH_CONSTS = {}
+for _n in SERVER_TREE.body:
+    if not isinstance(_n, ast.Assign) or len(_n.targets) != 1:
+        continue
+    if not isinstance(_n.targets[0], ast.Name):
+        continue
+    for _c in ast.walk(_n.value):
+        if (isinstance(_c, ast.Call) and ast.unparse(_c.func).endswith(".with_name")
+                and _c.args and isinstance(_c.args[0], ast.Constant)):
+            PATH_CONSTS[_n.targets[0].id] = _c.args[0].value
+
+def sole_binding(name, kinds, why: str):
+    """The name means what it looks like: ONE definition, at module level,
+    undecorated, and never bound to anything else afterwards.
+
+    Every check in this file that reaches for `Gate`, `tool` or `_admin` finds
+    it by NAME, and Python gives the name to whatever was bound last without
+    saying so. A second `class Gate(Middleware)` further down, or
+    `Gate = _NoGate` on the line above the registration, leaves the real
+    definition in place for the AST to find and hands the running server the
+    other one. Both were executed: the suite stayed green with the gate off.
+
+    So the three load-bearing names are pinned here, once, in one place —
+    rather than three copies that drift — and the node this returns is the one
+    the checks below read.
+    """
+    defs = [n for n in ast.walk(SERVER_TREE) if isinstance(n, kinds) and n.name == name]
+    ok(len(defs) == 1, f"server.py defines `{name}` exactly once", len(defs))
+    ok(bool(defs) and defs[0] in SERVER_TREE.body,
+       f"and `{name}` is at module level, not nested where a flag could skip it")
+    ok(bool(defs) and not defs[0].decorator_list,
+       f"and `{name}` carries no decorator that could stand in for it",
+       [ast.unparse(d) for d in defs[0].decorator_list] if defs else "")
+    rebound = []
+    for n in ast.walk(SERVER_TREE):
+        hit = False
+        if isinstance(n, (ast.Import, ast.ImportFrom)):
+            hit = any((a.asname or a.name.split(".")[0]) == name for a in n.names)
+        elif isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr, ast.For)):
+            hit = any(isinstance(x, ast.Name) and x.id == name
+                      and isinstance(x.ctx, ast.Store) for x in ast.walk(n))
+        elif isinstance(n, ast.Global):
+            hit = name in n.names
+        if hit:
+            rebound.append(ast.unparse(n)[:50])
+    ok(not rebound, f"and the name `{name}` is never bound to anything else — {why}",
+       rebound)
+    return defs[0] if len(defs) == 1 else None
+
+
+SERVED_FILES = sorted(set(PATH_CONSTS.values()))
+MANUALS = {f: source_or_none(os.path.join(HERE, f))
+           for f in SERVED_FILES if f.endswith(".md")}
 
 # =====================================================================
 # The engine: signatures, and which methods write
@@ -209,7 +281,7 @@ ok(not _TOOL_CALLS, "`tool` is only ever used as a decorator, never called",
    [ast.unparse(n)[:40] for n in _TOOL_CALLS])
 
 # An EQUALITY against what the file says, never a threshold. `>= 25` against
-# thirty tools tolerates five escapees, and one escapee is the realistic
+# the whole surface tolerates five escapees, and one escapee is the realistic
 # mistake — you forget a line, not five. Worse, the one way a tool escapes
 # quietly is `@tool()` with the brackets: that is an ast.Call and not an
 # ast.Name, so it slips the list AND satisfies the threshold, while at boot it
@@ -263,20 +335,41 @@ ok(not [n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
 # three counts drop together and stay in step. Nothing at runtime complains
 # either — the tool simply is not there any more, and the chat that needed it
 # gets "no such tool" weeks later. The twin catches this with the signature
-# block in its manual; this project has no such block yet (see the two-manuals
-# decision), so the manual's PROSE is the witness: every rules_* it names must
-# still be a tool. Injected and confirmed: removing @tool from rules_search
-# left the whole suite green before this existed.
-_NAMED_IN_GUIDE = set(re.findall(r"\brules_[a-z_]+\b", GUIDE_SRC))
-_VANISHED = sorted(n for n in _NAMED_IN_GUIDE if n not in TOOL_NAMES)
-ok(not _VANISHED,
-   "every tool the manual names is still registered as one", _VANISHED)
+# block in its manual; this project has no such block, so the manuals' PROSE is
+# the witness: every tool either of them names must still be a tool. Injected
+# and confirmed: removing @tool from rules_search left the whole suite green
+# before this existed.
+#
+# BOTH manuals, one loop over MANUALS. Reading only the first would leave the
+# second as prose nobody verifies — and the second is the one no other check in
+# this file touches, so it is where a dead name would live longest.
+#
+# The pattern is a SHAPE, not a list of the tools that exist. Deriving it from
+# TOOL_NAMES would be the trap: the whole point is to catch a name that is no
+# longer a tool, and a pattern built from the tools that are left cannot match
+# one that has gone. `_guide` is in there because the two manuals name each
+# other. What still escapes: a prefixless tool that is not a manual — there is
+# none today, and the engine witness below covers every tool anyway.
+NAME_IN_PROSE = re.compile(r"\b(rules_[a-z_]+|[a-z][a-z_]*_guide)\b")
+# Names that read like tools and are not, allowed in prose anywhere. It has
+# to be subtracted in BOTH places the shape is used: naming the server in a
+# manual is a legitimate sentence, and a check that goes red on a legitimate
+# sentence gets deleted rather than obeyed.
+NOT_TOOLS = {"rules_mcp"}
+for _manual, _text in MANUALS.items():
+    ok(_text is not None, f"{_manual} is there to be read at all")
+    _named = set(NAME_IN_PROSE.findall(_text or "")) - NOT_TOOLS
+    ok(_named, f"{_manual} names tools at all — an empty witness is not one")
+    _vanished = sorted(n for n in _named if n not in TOOL_NAMES)
+    ok(not _vanished,
+       f"every tool {_manual} names is still registered as one "
+       f"({len(_named)} named)", _vanished)
 
-# The manual covers 26 of the 30, and it is PROSE — rewrite the sentence and
-# the witness is gone. So the real witness is the engine: a function in
+# The manuals do not name every tool, and they are PROSE — rewrite a sentence
+# and the witness is gone. So the real witness is the engine: a function in
 # server.py that reaches `registry.<something>` is a tool by definition, and if
 # it is not one any more it has fallen off the surface while still looking like
-# a tool. This covers all thirty and cannot be talked out of it.
+# a tool. This covers every one of them and cannot be talked out of it.
 _TOUCHES_REGISTRY = []
 for _fn in ast.walk(SERVER_TREE):
     if not isinstance(_fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -322,6 +415,52 @@ for tool in TOOLS:
 ok(set(UNGATED_ON_PURPOSE) <= TOOL_NAMES,
    "every documented exception names a tool that exists",
    sorted(set(UNGATED_ON_PURPOSE) - TOOL_NAMES))
+
+# The gate is a NAME, and every check above is happy as long as the name is
+# called. `_admin` redefined once more further down — under an `if
+# os.environ.get("DEV")`, which is the shape this arrives in — leaves every one
+# of them green with no gate anywhere. Python does not warn: the last
+# definition wins. So the definition is pinned too: one, at module level, never
+# reassigned.
+_ADMIN = sole_binding("_admin", (ast.FunctionDef, ast.AsyncFunctionDef),
+                      "the last binding wins and every gated tool calls the name")
+
+# And the BODY of the gate, because everything else here pins the name, the
+# count and the call site while leaving what it does unconstrained. A decorator
+# that skips it, or a `if os.environ.get("DEV"): return` in front of the
+# comparison, are two lines that read like conveniences and open the registry:
+# both measured green before this. The comparison is constant-time on purpose —
+# `==` on a secret is a different defect — so it is pinned as written.
+if _ADMIN is not None:
+    _gbody = [s for s in _ADMIN.body
+              if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
+    _guard = _gbody[0] if _gbody else None
+    ok(isinstance(_guard, ast.If)
+       and ast.unparse(_guard.test).startswith("not secrets.compare_digest(")
+       and any(isinstance(r, ast.Raise) for r in ast.walk(_guard)),
+       "and its first act is the constant-time comparison, and it raises",
+       ast.unparse(_guard)[:70] if _guard else "(empty)")
+
+# And it is called UNCONDITIONALLY, first thing. `if code: _admin(code)` reads
+# like making an argument optional and is an open door: every check that asks
+# whether _admin appears inside the function is satisfied by it. First
+# statement after the docstring, exactly `_admin(code)`, or say so.
+for _t in TOOLS:
+    if not any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+               and n.func.id == "_admin" for n in ast.walk(_t)):
+        continue
+    _body = [s for s in _t.body
+             if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
+    _first = ast.unparse(_body[0]) if _body else "(empty)"
+    # The tool's own first parameter, whatever it is called, passed straight
+    # through — positionally or by keyword. Pinning the literal string
+    # `_admin(code)` would go red on `_admin(code=code)`, which changes
+    # nothing, and a check that fails on a harmless edit gets deleted.
+    _params = [a.arg for a in _t.args.posonlyargs + _t.args.args]
+    _accept = {f"_admin({p})" for p in _params} | {f"_admin({p}={p})" for p in _params}
+    ok(_first in _accept,
+       f"{_t.name}: the gate is the first statement, and it is not conditional",
+       _first[:60])
 
 # =====================================================================
 # 2b · the number is not on the surface
@@ -383,14 +522,181 @@ ok("no `id` parameter" in GUIDE_SRC,
 ok("legacy_id" in GUIDE_SRC, "the manual documents legacy_id")
 
 # =====================================================================
+# 2c · the ceilings in the manual are the ceilings in the engine
+# =====================================================================
+
+print("\n== the manual's ceilings are rendered from the engine's constants ==")
+
+# A manual with no limits is useless to a caller; a manual with the wrong ones
+# is worse, because the caller plans around them. The way out is not to drop
+# them, it is to read the row back OUT of the manual and compare it with the
+# constant — an `in` test would be satisfied while a second, stale row sat
+# right above saying something else, which is the state a rewrite leaves
+# behind. So: find every row with that label, and demand the list be exactly
+# one, holding exactly the constant.
+#
+# `import rules` and getattr, not `from rules import ...`: a from-import of a
+# constant that got renamed raises ImportError HERE, in the middle of the file,
+# and everything below — the Dockerfile section, the badges, the whole surface
+# — silently never runs.
+import rules as _rules                                          # noqa: E402
+
+for _label, _attr, _unit in (("IDs per `rules_get`", "MAX_GET_IDS", ""),
+                             ("body of one rule", "MAX_BODY_BYTES", " bytes"),
+                             ("rules per `rules_import`", "MAX_IMPORT", ""),
+                             ("numbers in one domain", "MAX_SEQ", "")):
+    _v = getattr(_rules, _attr, None)
+    ok(_v is not None, f"the engine still declares {_attr}")
+    _found = re.findall(rf"^\|\s*{re.escape(_label)}\s*\|\s*([^|]*?)\s*\|",
+                        GUIDE_SRC, re.MULTILINE)
+    ok(_found == [f"{_v}{_unit}"],
+       f"reference-guide.md states {_label} exactly once, as {_v}{_unit}", _found)
+
+# =====================================================================
+# 2d · two manuals, two audiences, and the door between them
+# =====================================================================
+
+print("\n== the two manuals, and who is allowed to read which ==")
+
+# There is ONE way to reach a file from server.py — a module-level Path
+# constant, then .read_text — and every half of that sentence is pinned,
+# because each one on its own is a door left ajar. All three of these were
+# TRIED as ungated tools serving the maintenance manual, and each slipped a
+# version of this section that was missing one line:
+#   `with open(path) as f` .............. caught by the ban on open, as a name
+#   `_LEGISLATOR.open()` / `io.open()` .. caught by the ban on open, as an attribute
+#   a module helper that reads it ....... caught by the LOCALITY check below
+_OPENS = [ast.unparse(n)[:40] for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
+          and ((isinstance(n.func, ast.Name) and n.func.id in ("open", "fdopen"))
+               or (isinstance(n.func, ast.Attribute) and n.func.attr in ("open", "fdopen")))]
+ok(not _OPENS, "server.py never opens a file by hand: it goes through a Path constant",
+   _OPENS)
+_READERS = [n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr in ("read_text", "read_bytes")]
+_LOOSE = sorted({ast.unparse(n.func.value) for n in _READERS
+                 if ast.unparse(n.func.value) not in PATH_CONSTS})
+ok(not _LOOSE, "and every read goes through one of those constants", _LOOSE)
+
+_LEG = next((t for t in TOOLS if t.name == "legislator_guide"), None)
+_REF = next((t for t in TOOLS if t.name == "reference_guide"), None)
+ok(_LEG is not None, "legislator_guide is exposed")
+ok(_REF is not None, "reference_guide is exposed")
+
+# LOCALITY: a constant may be named only inside the tool that serves it. Pull
+# the read one function further out — `def _text(): return _LEGISLATOR.read_text()`,
+# called by an ungated tool — and every check that looks INSIDE a tool for a
+# read goes blind, because there is no read in there any more. Measured: an
+# ungated third tool built that way passed everything.
+_ENCLOSING = {}
+for _fn in ast.walk(SERVER_TREE):
+    if isinstance(_fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        for _sub in ast.walk(_fn):
+            _ENCLOSING.setdefault(id(_sub), _fn.name)
+_TOUCHES_CONST = {}
+for _n in ast.walk(SERVER_TREE):
+    if isinstance(_n, ast.Name) and _n.id in PATH_CONSTS and isinstance(_n.ctx, ast.Load):
+        _TOUCHES_CONST.setdefault(_ENCLOSING.get(id(_n), "(module level)"), set()).add(_n.id)
+ok(set(_TOUCHES_CONST) == {"reference_guide", "legislator_guide"},
+   "only the two manual tools ever name a manual's path — no helper in between",
+   sorted(_TOUCHES_CONST))
+
+# WHICH tool names WHICH constant, as an equality. Everything else in this
+# section stays green with the two swapped — one word — and the swap puts the
+# maintenance manual behind the open door and the open one behind the code. It
+# is the single most likely edit, because the second tool was written by
+# copying the first.
+for _t, _want in ((_REF, "reference-guide.md"), (_LEG, "legislator-guide.md")):
+    if _t is None:
+        continue
+    _reads = {PATH_CONSTS.get(c) for c in _TOUCHES_CONST.get(_t.name, set())}
+    ok(_reads == {_want}, f"{_t.name} serves {_want}, and nothing else",
+       sorted(map(str, _reads)))
+
+# THE GATE, as an equality over the pair. This is the guarantee the whole
+# delivery is: one manual open, one behind the maintenance code. Every other
+# check here is conditional on the gate already being there — the loop that
+# demands _admin only visits tools that WRITE, and legislator_guide writes
+# nothing; the loop that pins the gate's position only visits tools that call
+# _admin already, so deleting the call deletes the check with it. Measured:
+# dropping `_admin(code)` left the suite green before this line existed, with
+# the `code` parameter still in the signature, so the tool went on LOOKING
+# protected.
+_GATED = {t.name for t in (_REF, _LEG) if t is not None
+          and any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                  and n.func.id == "_admin" for n in ast.walk(t))}
+ok(_GATED == {"legislator_guide"},
+   "the legislator's manual is behind the code and the open one is not",
+   sorted(_GATED))
+
+# A file missing from the image is OURS, not the caller's. Left as a RulesError
+# it would leave one quiet INFO line starting with the word "refused" — a
+# broken image wearing the face of a normal answer, which is the defect the
+# decorator exists to close, inverted.
+for _t in (_REF, _LEG):
+    if _t is None:
+        continue
+    _raised = {ast.unparse(n.exc.func) for n in ast.walk(_t)
+               if isinstance(n, ast.Raise) and isinstance(n.exc, ast.Call)}
+    ok(_raised == {"RulesFault"},
+       f"{_t.name} raises RulesFault when the file is not there, never RulesError",
+       sorted(_raised))
+
+# The legislator's manual has to stay APPLICABLE, and that is not something a
+# test can judge. What it can hold is the shape the applicability rests on: the
+# gates, each of which is a question asked of one line. A rewrite that turns
+# them back into principles has to come through here and say so.
+for _pin in ("GATE 1 — Is it a rule, or a step?",
+             "GATE 2 — Is it a rule, or a missing manual?",
+             "GATE 3 — Is it a rule, or a reminder?",
+             "GATE 4 — Who could violate it?",
+             "Would it still be true if the procedure changed?"):
+    # COUNT, not `in` — the same reason the ceilings above are a list equality:
+    # a second copy of a heading, with a contradicting line between them, is
+    # what a rewrite leaves behind, and `in` is satisfied by either.
+    ok(LEGISLATOR_SRC.count(_pin) == 1,
+       f"legislator-guide.md carries, exactly once: {_pin!r}",
+       LEGISLATOR_SRC.count(_pin))
+
+# Every file a tool serves has to exist, and be IN the image. The explicit list
+# in the Dockerfile section is the other half; this half is derived, so a
+# manual added tomorrow cannot be forgotten in a list nobody remembers to
+# extend. The defect has been paid once already, with reference_guide pointing
+# at a file that did not exist.
+ok(SERVED_FILES == ["legislator-guide.md", "reference-guide.md"],
+   "server.py serves exactly the two manuals", SERVED_FILES)
+for _f in SERVED_FILES:
+    ok(os.path.exists(os.path.join(HERE, _f)), f"{_f} exists in the repository")
+# And the derived set is the same set the prose checks read. If a file is
+# served but unreadable, MANUALS quietly drops it and the loop above turns into
+# a loop over nothing — the shape of a check that filters out its own case.
+_READABLE = {f for f, text in MANUALS.items() if text is not None}
+ok(_READABLE == set(SERVED_FILES),
+   "every served manual is one the prose checks actually read",
+   sorted(set(SERVED_FILES) - _READABLE))
+
+# The preflight refuses to start a container that is missing one of them, and
+# that is the only place the question gets asked before a chat asks it. Its
+# list is written by hand — preflight cannot import server.py, that would drag
+# in FastMCP — so the two are held equal here, and a third manual cannot slip
+# past the boot check by being forgotten in a tuple.
+_PRE = re.search(r"^MANUALS = \(([^)]*)\)", PREFLIGHT_SRC, re.MULTILINE)
+ok(_PRE is not None, "preflight.py declares the manuals it expects in the image")
+if _PRE:
+    _declared = sorted(re.findall(r'"([^"]+)"', _PRE.group(1)))
+    ok(_declared == SERVED_FILES,
+       "and that list is exactly what server.py serves", _declared)
+_CHECKS_LIST = re.search(r"^CHECKS = \[(.*?)\]", PREFLIGHT_SRC, re.MULTILINE | re.DOTALL)
+ok(_CHECKS_LIST is not None and "c_manuals" in _CHECKS_LIST.group(1),
+   "and the check is in CHECKS — one that is defined but not listed never runs")
+
+# =====================================================================
 # 3 · no docstring points at a tool that is not there
 # =====================================================================
 
 print("\n== the docstrings point at things that exist ==")
 
-MENTION = re.compile(r"\b(rules_[a-z_]+|reference_guide)\b")
-# Names that read like tools but are not, and are allowed to appear in prose.
-NOT_TOOLS = {"rules_mcp"}
+MENTION = NAME_IN_PROSE   # one shape, defined once: two copies would diverge
 
 for node in ast.walk(SERVER_TREE):
     if not isinstance(node, (ast.FunctionDef, ast.Module, ast.ClassDef)):
@@ -425,8 +731,9 @@ print("\n== the Gate is wired to the hook it says it is ==")
 # raising has no channel to answer on). The method set pins the WIRING, and it
 # is the one that catches the typo. Changing the decision means changing this
 # test too, deliberately — which is the point.
-GATE = next((n for n in SERVER_TREE.body
-             if isinstance(n, ast.ClassDef) and n.name == "Gate"), None)
+GATE = sole_binding("Gate", (ast.ClassDef,),
+                    "add_middleware(Gate()) instantiates whatever the name holds, "
+                    "and a pass-through in its place is a gate that is off in silence")
 ok(GATE is not None, "server.py defines the Gate middleware")
 
 if GATE is not None:
@@ -529,9 +836,18 @@ DOCKER_COPIES = [l for l in DOCKERFILE.splitlines() if l.startswith("COPY ")]
 ok(not any("*" in l for l in DOCKER_COPIES),
    "Dockerfile: no wildcard COPY — the test files do not belong in the image",
    [l for l in DOCKER_COPIES if "*" in l])
-for f in ("rules.py", "server.py", "preflight.py", "entrypoint.sh", "reference-guide.md"):
+for f in ("rules.py", "server.py", "preflight.py", "entrypoint.sh",
+          "reference-guide.md", "legislator-guide.md"):
     ok(any(re.search(rf"\b{re.escape(f)}\b", l) for l in DOCKER_COPIES),
        f"Dockerfile: {f} is copied in")
+
+# And the same thing derived, so the list above is a second opinion and not the
+# only one. A tool that serves a file the image does not carry answers with a
+# fault in a chat instead of a red line here — this project has paid that once,
+# with reference_guide pointing at a file nobody had written.
+for _f in SERVED_FILES:
+    ok(any(re.search(rf"\b{re.escape(_f)}\b", l) for l in DOCKER_COPIES),
+       f"Dockerfile: {_f} is copied in — a tool serves it", DOCKER_COPIES)
 ok(not any("test_" in l for l in DOCKER_COPIES), "Dockerfile: no test file is copied in")
 
 # What starts the container, and it is checked in two files at once because it
@@ -548,10 +864,11 @@ ok(re.search(r"^CMD \[", DOCKERFILE, re.MULTILINE) is not None,
 ok(re.search(r"^ENTRYPOINT", DOCKERFILE, re.MULTILINE) is None,
    "Dockerfile: and no ENTRYPOINT, so the CMD is the whole command line")
 
-# reference_guide is a tool that reads a file. Without the file it would answer
-# with an error, and the failure would surface in a chat rather than here.
-ok(os.path.exists(os.path.join(HERE, "reference-guide.md")),
-   "the file reference_guide serves actually exists")
+# The manuals are tools that read files. Without the file the tool answers with
+# a fault, and the failure surfaces in a chat rather than here.
+for _f in ("reference-guide.md", "legislator-guide.md"):
+    ok(os.path.exists(os.path.join(HERE, _f)),
+       f"the file {_f} actually exists")
 
 print("\n== a designed refusal does not look like a fault in the log ==")
 
@@ -564,15 +881,13 @@ print("\n== a designed refusal does not look like a fault in the log ==")
 # logger.exception has already run. That cost an hour, and it is the kind of
 # thing that gets undone by somebody tidying up — hence this check.
 # EXACTLY one `def tool`. A second one further down wins for every tool defined
-# after it — and since all thirty are defined after the Gate, a three-line
+# after it — and since every tool is defined after the Gate, a three-line
 # `def tool(fn): return fn` left there while debugging empties the entire MCP
 # surface with the suite at 261 passed, 0 failed. Demonstrated.
-_converters = [n for n in ast.walk(SERVER_TREE)
-               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-               and n.name == "tool"]
-ok(len(_converters) == 1, "server.py defines its own `tool` decorator, once",
-   len(_converters))
-_converter = _converters[0] if len(_converters) == 1 else None
+_converter = sole_binding("tool", (ast.FunctionDef, ast.AsyncFunctionDef),
+                          "`tool = mcp.tool` before the first @tool registers every "
+                          "tool bare: no conversion, no log line, and the counts "
+                          "all still agree")
 
 # And the name RulesFault must mean in the engine what this file assumes it
 # means. `RulesFault = RulesError` in rules.py — one line, plausible as a
@@ -611,6 +926,40 @@ _IMPORTED = [a.name for n in SERVER_TREE.body if isinstance(n, ast.ImportFrom)
 _MISSING = [n for n in _IMPORTED if n not in _ENGINE_NAMES]
 ok(not _MISSING, "every name server.py imports from rules.py exists there — "
                  "otherwise the container dies at import", _MISSING)
+
+# And the other direction, which is the one that bites: an exception class
+# NAMED in server.py but not imported is a NameError at the first refusal, and
+# no suite would see it — none of the three imports server.py, on purpose. The
+# import line is one line, it is edited by hand, and dropping RulesFault from
+# it kills the decorator's first branch: every refusal in the service.
+#
+# Three forms, because two of them were missed on the first pass and both were
+# measured green: `raise Foo(...)` is a Call, `raise Foo` is a bare Name, and
+# `except (OSError, Foo):` is a Tuple that unparses to something that is not an
+# identifier at all. So: walk the nodes and collect the NAMES.
+_NAMED_EXC: set[str] = set()
+for _n in ast.walk(SERVER_TREE):
+    if isinstance(_n, ast.Raise) and _n.exc is not None:
+        _target = _n.exc.func if isinstance(_n.exc, ast.Call) else _n.exc
+        _NAMED_EXC |= {x.id for x in ast.walk(_target) if isinstance(x, ast.Name)}
+    elif isinstance(_n, ast.ExceptHandler) and _n.type is not None:
+        _NAMED_EXC |= {x.id for x in ast.walk(_n.type) if isinstance(x, ast.Name)}
+# `dir(builtins)` and not `dir(__builtins__)`: run as a script __builtins__ is
+# the module, imported it is a dict, and the check would silently change shape.
+import builtins as _builtins                                    # noqa: E402
+
+_BOUND = set(_IMPORTED) | set(dir(_builtins))
+for _n in SERVER_TREE.body:
+    if isinstance(_n, (ast.Import, ast.ImportFrom)):
+        _BOUND |= {(a.asname or a.name.split(".")[0]) for a in _n.names}
+    elif isinstance(_n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        _BOUND.add(_n.name)
+    elif isinstance(_n, ast.Assign):
+        _BOUND |= {t.id for t in _n.targets if isinstance(t, ast.Name)}
+_UNDECLARED = sorted(e for e in _NAMED_EXC if e not in _BOUND)
+ok(not _UNDECLARED,
+   "every exception server.py raises or catches by name is imported or defined",
+   _UNDECLARED)
 
 if _converter is not None:
     # THE WRAPPER, not the decorator. Everything below used to be gathered with
@@ -812,6 +1161,13 @@ for _readme, _label in (("README.md", "version"), ("README.it.md", "versione")):
     _txt = source(os.path.join(HERE, _readme))
     _badges = re.findall(rf"badge/{_label}-([0-9]+\.[0-9]+\.[0-9]+)-", _txt)
     ok(_badges == [_V], f"{_readme}: the version badge says {_V}", _badges)
+    # The second hand-copied number on that line, and it had nothing tied to it
+    # either: the badge said one number while the surface said another, and
+    # a badge is the first thing anybody reads. The count comes from the AST,
+    # so it moves the day a tool is added, which is the day it goes wrong.
+    _counts = re.findall(r"badge/MCP-([0-9]+)%20tools?-", _txt)
+    ok(_counts == [str(len(TOOLS))],
+       f"{_readme}: the tool badge says {len(TOOLS)}", _counts)
 
 _STRAY = [f for f in ("server.py", "preflight.py", "sign.py", "Dockerfile",
                       "entrypoint.sh", "codifier-mcp.xml")

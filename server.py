@@ -14,10 +14,12 @@ preflight. Three deliberate differences:
 - writing is a two-step affair. A chat PROPOSES; the batch is approved with an
   ed25519 signature over its digest. The registry holds only the public half.
 
-Every tool name is prefixed `rules_`: the vault's tools (status, history, diff,
-search...) live in the same chat, and two namesakes get confused. The prefix
-stays `rules_` even though the repository is called codifier-mcp — inside this
-project "rules" is the only subject there is.
+Every tool that acts on a rule is prefixed `rules_`: the vault's tools (status,
+history, diff, search...) live in the same chat, and two namesakes get confused.
+The prefix stays `rules_` even though the repository is called codifier-mcp —
+inside this project "rules" is the only subject there is. The two manuals —
+`reference_guide` and `legislator_guide` — carry no prefix, because they touch
+no rule: they serve a file.
 
 Configuration, all through environment variables:
   DB_PATH                 the single database (default /db/rules.db)
@@ -303,12 +305,20 @@ class Gate(Middleware):
 
 mcp.add_middleware(Gate())
 
+# The two manuals. Both ship inside the image, which is the whole reason they
+# are files here and not documents in the vault: a manual that travels with the
+# code cannot describe a version that is not running, and a static check can
+# hold it against the code it ships with. A copy anywhere else is verified by
+# nobody.
 _GUIDE = Path(__file__).with_name("reference-guide.md")
+_LEGISLATOR = Path(__file__).with_name("legislator-guide.md")
 
 
 def _admin(code: str) -> None:
-    """The MAINTENANCE gate: writing, and the reads that step outside the
-    caller's own perimeter (status, audit, history, export, the registry index).
+    """The MAINTENANCE gate: writing, the reads that step outside the caller's
+    own perimeter (status, audit, history, export, the registry index), and the
+    manual that is for whoever maintains the corpus rather than for whoever
+    works under it.
 
     It is not session state: the code travels on every call, so there is no
     "mode" left open by accident."""
@@ -352,7 +362,12 @@ def reference_guide() -> dict:
     try:
         return {"version": VERSION, "guide": _GUIDE.read_text(encoding="utf-8")}
     except OSError as e:
-        raise RulesError(f"guide not available in the image: {e}")
+        # A FAULT, not a refusal: the caller did nothing wrong, the image is
+        # incomplete. As a RulesError it would leave one quiet INFO line
+        # beginning with the word "refused" — a broken image wearing the face
+        # of a normal answer, which is the exact inversion the decorator exists
+        # to prevent. As a RulesFault it rises with its traceback at ERROR.
+        raise RulesFault(f"guide not available in the image: {e}") from e
 
 
 @tool
@@ -560,16 +575,18 @@ def rules_fix(project: str, id: str, expected_version: int, reason: str, code: s
     in the meantime the change is refused and you are told the current version.
     Leave empty whatever you are not changing.
 
-    A new `body` goes through the SAME citation check as a proposal: `(VA-0002)`
-    must resolve and must point at a rule already approved, a bare ID outside a
-    bracket of its own is refused, and so is a note of your own inside one. This is the tool that repairs what rules_check lists
-    as broken pointers, so it cannot be the one that lets a broken one in.
+    A `body` you pass goes through the SAME citation check as a proposal:
+    `(VA-0002)` must resolve and must point at a rule already approved, a bare
+    ID outside a bracket of its own is refused, and so is a note of your own
+    inside one. This is the tool that repairs what rules_check lists as broken
+    pointers, so it cannot be the one that lets a broken one in.
 
-    An UNCHANGED body is not re-checked. That is what lets a rule written before
-    this format existed still be renamed, retyped or given a changelog: the
-    registry does not slam a door on unrelated work over a sentence nobody
-    touched today. You may also paste the body back exactly as you read it — the
-    title inside the brackets is a gloss generated on reading, and it is dropped
+    OMIT `body` and nothing about it is checked — that is what lets a rule
+    written before this format existed still be renamed, retyped or given a
+    changelog. The exemption is the field you leave out, not the text that
+    happens to be unchanged: a body passed back identical is still checked
+    first. You may paste the body back exactly as you read it — the title
+    inside the brackets is a gloss generated on reading, and it is dropped
     here."""
     _admin(code)
     return registry.amend(project, id, expected_version, reason,
@@ -813,6 +830,52 @@ def rules_backup(code: str) -> dict:
     backup. ZFS snapshots stay the main net."""
     _admin(code)
     return registry.backup(BACKUP_DIR)
+
+
+# =====================================================================
+# The legislator's manual
+# =====================================================================
+#
+# THE NAME, because this is a decision that will be read back. `rules_*` is
+# reserved for the tools that act on rules, and this one does not touch the
+# registry at all: it opens a file, exactly like `reference_guide`, which is
+# also prefixless. So the two manuals are named as a pair — reference_guide and
+# legislator_guide — and the prefix keeps meaning what it means. "Legislator"
+# is not decoration either: the whole point of the split is that redacting and
+# promulgating are two jobs, and this is the manual of the first one.
+#
+# THE CODE. Not secrecy — every word in that file could be published without
+# harm, and its existence is on the surface by construction: this docstring
+# travels in tools/list to anyone the Gate lets in, so what the code protects is
+# the TEXT and never the news that the text exists. It is role hygiene: the
+# manual that teaches how rules are decided has one audience, and the damage is
+# not that somebody learns it exists — it is that a chat which has just READ how
+# rules are written is one step from writing its own, which is the single thing
+# the whole registry exists to prevent.
+#
+# And nobody arrives here by browsing. Whoever administers the corpus is given
+# the maintenance code in the project's own instructions, and reading this
+# manual is the step after that. The manual of USE does not mention this tool at
+# all, deliberately: it is not the road, and pointing at a door somebody cannot
+# open is an invitation and not a service. The road is the sequence.
+
+@tool
+def legislator_guide(code: str) -> dict:
+    """MAINTENANCE. The manual for deciding WHAT DESERVES TO BE A RULE: the
+    tests that tell a rule from a step, from a missing manual and from a
+    reminder; who a rule has to reach; what the `reason` field must carry; and
+    what to ask at renewal.
+
+    This is not the manual for using the registry. That one is
+    `reference_guide`, it needs no code, and it is the one a working chat
+    wants. Do not read this one to learn how to call a tool."""
+    _admin(code)
+    try:
+        return {"version": VERSION, "guide": _LEGISLATOR.read_text(encoding="utf-8")}
+    except OSError as e:
+        # Same reasoning as reference_guide: a missing file in the image is
+        # ours, not the caller's.
+        raise RulesFault(f"legislator guide not available in the image: {e}") from e
 
 
 if __name__ == "__main__":

@@ -60,7 +60,7 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 TYPES = ("R", "M", "F")                 # R binding · M method · F technical fact
 ALL = "_ALL_"                           # reaches every consumer, present and future
@@ -1337,13 +1337,15 @@ class Registry:
     def _cites(self, p: str, body: str, self_id: str = "") -> list[str]:
         """Parse a body and VALIDATE its citations. Raises, so this is the door.
 
-        Three refusals:
+        Four refusals:
           · a bare ID left OUTSIDE the brackets, which is a forgotten bracket
             and would otherwise become a mute citation. Case does not matter:
             `va-0001` and `Va-0001` are the same mistake;
           · a citation that does not RESOLVE — a chat cannot hallucinate a
             pointer, because the proposal does not go in;
-          · a citation towards a rule that is NOT YET APPROVED.
+          · a citation towards a rule that is NOT YET APPROVED;
+          · a gloss of your own inside the brackets, because what is between
+            them is not stored and dropping it silently would be worse.
 
         THE THIRD ONE IS THE LOAD-BEARING ONE, and it is a decision about how
         the corpus is built, not a technicality. You may only cite a rule that

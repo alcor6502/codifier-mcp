@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/versione-1.3.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-30%20tool-8A63D2.svg">
+<img src="https://img.shields.io/badge/versione-1.4.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-31%20tool-8A63D2.svg">
 
 **Le regole di un progetto in un registro invece che sparse nei Markdown — così
 una chat può rispondere in una chiamata a «sotto quali regole sto?».**
@@ -192,6 +192,12 @@ avvisa è un servizio di cui nessuno legge gli avvisi.
   sessione, quindi nessuna modalità rimasta aperta per sbaglio. Leggere le
   proprie regole e depositare una proposta sono gratis — una chat di lavoro il
   codice non ce l'ha mai.
+- **Due manuali, e il secondo vuole il codice.** `reference_guide` non prende
+  nessun argomento: chiunque il gate lasci entrare legge come si usa il
+  registro. `legislator_guide` è come si *decidono* le regole, e sta dietro al
+  codice di manutenzione. Non perché il testo sia sensibile — si potrebbe pubblicare parola
+  per parola — ma perché una chat che ha appena letto come si scrivono le regole
+  è a un passo dallo scriversele, che è l'unica cosa per cui il registro esiste.
 - **Il processo gira come root e il database è 644.** È l'opposto del gemello
   vault, di proposito: dalla share si legge e non si tocca, perché una scrittura
   a mano aggirerebbe i trigger e romperebbe lo storico in silenzio.
