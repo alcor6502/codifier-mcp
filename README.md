@@ -65,7 +65,7 @@ group tomorrow cannot rewrite what was true yesterday.
 
 ## How a rule gets in
 
-    proposed ──(signed batch)──> active + provisional ──(signature)──> permanent
+    proposed ──(approved batch)──> active + provisional ──(promotion)──> permanent
         │                              │
         │                              └──> retired
         └──> denied  (with a reason, and the row STAYS)
@@ -78,14 +78,17 @@ from 63 rules to 172, not because anyone wrote without permission, but because
 its own unless somebody decides to keep it. Staying costs a decision, going is
 free.
 
-**Approval is by batch, and signed.** A chat cannot ask you to sign in the
-middle of a conversation — proposals accumulate, and you see them together,
-which is the only moment three near-duplicates are visible as such. The
-signature is ed25519 over the batch digest; the registry holds **only the public
-key**, so even with the database in hand nobody can manufacture an approval. The
-private half never enters a conversation — not by discipline, by construction.
+**Approval is by batch, against its digest.** Proposals accumulate, and you see
+them together, which is the only moment three near-duplicates are visible as
+such. `rules_batch` returns the pending proposals — each with its reason — and
+a digest over the whole; `rules_approve` demands that digest back, so what gets
+approved is provably the batch that was **read**: a proposal arriving in
+between moves the digest and voids the stale approval. Approval sits behind
+the maintenance code. (An ed25519 signature used to ride on top; it left in
+v2.0.0 — it was the clumsy way of letting a person in instead of a chat, and
+the admin UI solves that at the root.)
 
-Denial needs no signature: refusing cannot do harm. The denied row stays, with
+Denial needs no digest: refusing cannot do harm. The denied row stays, with
 its reason, and `rules_pending` shows a chat its own refusals — so the same idea
 coming back through another chat in three weeks is something you can see,
 rather than something the registry can block.
@@ -152,18 +155,7 @@ mount for the database, one for state, and environment variables.
    fight over the callback.
 2. **`JWT_SIGNING_KEY`**: `openssl rand -hex 32`. Stable forever — change it and
    every issued token dies.
-3. **An ed25519 key pair**, on your own machine: `python3 sign.py --keygen`. It
-   prints the public half, which goes in `APPROVAL_PUBKEY`; the private half
-   stays in `~/.codifier/approval.key` at mode 0600 and never travels. The same
-   script signs the batch digests later: `python3 sign.py <digest>`.
-   It needs `cryptography`, and recent macOS and Linux refuse a plain
-   `pip install` into the system Python — so make it a venv once,
-   `python3 -m venv ~/.codifier/venv`, install there, and forget about it:
-   sign.py finds that venv and re-executes itself inside it.
-   While you are still setting up you can leave the key empty and set
-   `APPROVAL_GRACE_UNTIL` to a near date instead — it is a date and not a
-   switch, so it closes by itself.
-4. **The database directory must be local storage**, never a network share:
+3. **The database directory must be local storage**, never a network share:
    SQLite in WAL needs real file locking.
 
 The template in this repository **is** the configuration, and its field
@@ -210,7 +202,7 @@ Three suites. No network, no FastMCP, no Docker.
 
 ```
 python3 test_collaudo.py    # the engine, refusals included
-python3 test_surface.py     # the seam, the image, the template, the signer
+python3 test_surface.py     # the seam, the image, the template
 python3 test_crash.py       # SIGKILL mid-transaction, as Docker does
 ```
 

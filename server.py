@@ -11,8 +11,11 @@ preflight. Three deliberate differences:
   NAME but an opaque alphanumeric CODE that lives at the top of that project's
   instructions. No read tool lists projects and no error names one: whoever
   lacks the code cannot find the door;
-- writing is a two-step affair. A chat PROPOSES; the batch is approved with an
-  ed25519 signature over its digest. The registry holds only the public half.
+- writing is a two-step affair. A chat PROPOSES; the batch is approved behind
+  the admin code, against the batch's DIGEST — you approve the batch you read.
+  The ed25519 signature that used to ride on approval left in v2.0.0: the
+  admin UI is the door a person will come through, and until it exists
+  approve/renew/promote stay here as its placeholder.
 
 Every tool that acts on a rule is prefixed `rules_`: the vault's tools (status,
 history, diff, search...) live in the same chat, and two namesakes get confused.
@@ -25,8 +28,6 @@ Configuration, all through environment variables:
   DB_PATH                 the single database (default /db/rules.db)
   BACKUP_DIR              VACUUM INTO copies (default: <db dir>/backup)
   ADMIN_ACCESS_CODE       the maintenance code: it travels on every call
-  APPROVAL_PUBKEY         ed25519 PUBLIC key, raw base64. Never the private half
-  APPROVAL_GRACE_UNTIL    YYYY-MM-DD: until then a batch passes unsigned
   PROVISIONAL_DAYS        how long an approved rule lives (default 90)
   BASE_URL                public URL (e.g. https://host.tailnet.ts.net)
   GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET / ALLOWED_GITHUB_LOGIN / JWT_SIGNING_KEY
@@ -112,8 +113,6 @@ BACKUP_DIR = os.environ.get("BACKUP_DIR") or os.path.join(os.path.dirname(DB_PAT
 ALLOWED_CIDRS = cidrs_from_env()
 
 registry = Registry(DB_PATH,
-                    public_key=os.environ.get("APPROVAL_PUBKEY", ""),
-                    grace_until=os.environ.get("APPROVAL_GRACE_UNTIL", ""),
                     provisional_days=int(os.environ.get("PROVISIONAL_DAYS") or 90))
 if registry.repaired:
     log.warning("schema rebuilt at open: %s — somebody had removed these objects",
@@ -125,9 +124,8 @@ if registry.repaired:
 # the very pointers that pass exists to re-decide.
 if registry.migrated:
     log.warning("schema migrated at open: %s", ", ".join(registry.migrated))
-log.info("registry %s — %s — %s projects — approval: %s",
-         VERSION, DB_PATH, registry.projects()["count"],
-         "grace open until " + registry.grace_until if registry.in_grace() else "signature required")
+log.info("registry %s — %s — %s projects — provisional %s days",
+         VERSION, DB_PATH, registry.projects()["count"], registry.provisional_days)
 
 auth = GitHubProvider(
     client_id=env("GITHUB_CLIENT_ID"),
@@ -343,22 +341,19 @@ def rules_propose(project: str, domain: str, type: str, title: str, body: str,
 
 
 # =====================================================================
-# Approving — the admin code, and a signature over the batch
+# Approving — the admin code, and the batch's digest
 # =====================================================================
 
 @tool
 def rules_batch(project: str, code: str) -> dict:
     """MAINTENANCE. The pending proposals, whole, plus the DIGEST of the batch.
 
-    You sign the BATCH, never the single rule. Two reasons, and both were paid
-    for: at the twelfth signature in a row a person signs without reading; and
-    seen side by side, three proposals that say the same thing become visible as
-    what they are.
+    You approve the BATCH, never the single rule: seen side by side, three
+    proposals that say the same thing become visible as what they are.
 
-    Sign the digest string on your own machine and pass the base64 signature to
-    rules_approve. The private key never enters this conversation, and the
-    registry holds only the public half. If a proposal arrives in between, the
-    digest changes and the old signature is refused — that is on purpose.
+    Pass the digest to rules_approve. If a proposal arrives in between, the
+    digest changes and the stale one is refused — that is on purpose: it is
+    the proof that what gets approved is the batch that was READ.
 
     Each proposal carries its `reason`: the why you are letting in is on the
     table where the decision happens, not a history call away."""
@@ -367,7 +362,7 @@ def rules_batch(project: str, code: str) -> dict:
 
 
 @tool
-def rules_approve(project: str, digest: str, code: str, signature: str = "") -> dict:
+def rules_approve(project: str, digest: str, code: str) -> dict:
     """MAINTENANCE. Approve the whole batch: the proposals become ACTIVE and
     PROVISIONAL, with an expiry date.
 
@@ -376,10 +371,12 @@ def rules_approve(project: str, digest: str, code: str, signature: str = "") -> 
     adding one costs a call and removing one costs a decision nobody takes.
     Expiry inverts that: staying costs a decision, going is free.
 
-    `digest` must be the current one from rules_batch. Inside the grace window
-    the signature may be omitted, and the approval is recorded AS UNSIGNED."""
+    `digest` must be the current one from rules_batch: it proves the approval
+    covers the batch that was read, not the batch that exists now. This tool
+    is the admin UI's placeholder — when the UI arrives it calls the same
+    engine method, and this door closes."""
     _admin(code)
-    return registry.approve(project, digest, signature)
+    return registry.approve(project, digest)
 
 
 @tool
@@ -397,26 +394,23 @@ def rules_deny(project: str, ids: list[str], reason: str, code: str) -> dict:
 
 
 @tool
-def rules_renew(project: str, ids: list[str], code: str,
-                signature: str = "", days: int = 0) -> dict:
-    """MAINTENANCE. Push the expiry of provisional rules forward. Signed, because
-    keeping a rule alive is letting it in again.
-
-    The digest to sign is returned by the error when the signature is missing or
-    wrong, and in the verdict when it succeeds."""
+def rules_renew(project: str, ids: list[str], code: str, days: int = 0) -> dict:
+    """MAINTENANCE. Push the expiry of provisional rules forward: keeping a
+    rule alive is letting it in again, which is why this is behind the admin
+    code and why renewal is where the corpus is governed."""
     _admin(code)
-    return registry.renew(project, ids, signature, days)
+    return registry.renew(project, ids, days)
 
 
 @tool
-def rules_promote(project: str, ids: list[str], code: str, signature: str = "") -> dict:
+def rules_promote(project: str, ids: list[str], code: str) -> dict:
     """MAINTENANCE. From provisional to PERMANENT: no expiry, it never leaves on
-    its own again. Rare, deliberate, and signed.
+    its own again. Rare and deliberate.
 
     Think twice: a permanent rule is one you are promising to notice when it
     goes stale, because nothing else will notice for you."""
     _admin(code)
-    return registry.promote(project, ids, signature)
+    return registry.promote(project, ids)
 
 
 # =====================================================================

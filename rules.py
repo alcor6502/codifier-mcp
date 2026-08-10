@@ -38,9 +38,12 @@ Invariants
 - whole versions are kept, not diffs: a chain of diffs rots, and 177 rules of
   text weigh nothing;
 - every operation returns a VERDICT, not a dump;
-- a new rule reaches nobody until it is approved. Approval is signed, covers a
-  BATCH, and the signature is verified against a PUBLIC key: the private half
-  never enters a conversation.
+- a new rule reaches nobody until it is approved. Approval covers a BATCH and
+  demands the batch's DIGEST back: you approve the batch you READ, and a
+  proposal arriving in between moves the digest and voids the approval. The
+  ed25519 signature that used to ride on top left in v2.0.0 — it was the
+  clumsy way of letting a person in instead of a chat, and the admin UI solves
+  that at the root. The digest was never the signature's: it stays;
 - an approved rule is PROVISIONAL and expires. Staying costs a decision, going
   is free — which is the asymmetry that stops rules from piling up.
 
@@ -50,7 +53,6 @@ break history in silence.
 """
 from __future__ import annotations
 
-import base64
 import difflib
 import functools
 import hashlib
@@ -171,19 +173,15 @@ class RulesFault(RulesError):
     the text still reaches the caller. Only its fate in the log differs.
 
     The line between the two is not the wording, it is WHO CAUSED IT. In this
-    engine almost everything is the caller: of the eighty-odd refusals, one is
-    a fault, and it is the missing signature library — an image built wrong,
-    which no caller can do anything about. Two neighbours that deliberately
-    stay ordinary refusals, because the reasoning is not obvious:
-
-    - the UNIQUE collision on (project, domain, seq) when two writers take the
-      same number. It comes from the database, but nothing was written and the
-      message says filing it again is safe — the twin decided the same for its
-      CAS conflicts, which are the same shape;
-    - "no approval public key configured and the grace window is closed". It is
-      configuration, not machinery, and the preflight refuses to start in that
-      state — so reaching it means the window expired while the service ran,
-      and the message is exactly the instruction to fix it.
+    engine almost everything is the caller: of the eighty-odd refusals, the one
+    fault left is the schema-and-code disagreement behind a proposal the
+    database refused for a reason that is not the counter race — which no
+    caller can fix and which will fail again for ever. One neighbour that
+    deliberately stays an ordinary refusal, because the reasoning is not
+    obvious: the UNIQUE collision on (project, domain, seq) when two writers
+    take the same number. It comes from the database, but nothing was written
+    and the message says filing it again is safe — the twin decided the same
+    for its CAS conflicts, which are the same shape.
 
     Anything sqlite raises on its own — a locked file, a half-written page, a
     full disk — never becomes a RulesError at all: this engine lets it rise
@@ -192,10 +190,6 @@ class RulesFault(RulesError):
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def _plus_days(days: int) -> str:
@@ -262,43 +256,6 @@ def _norm_scope_list(scopes) -> list[str]:
         if t not in out:
             out.append(t)
     return out
-
-
-# =====================================================================
-# Signature — ed25519, and the database holds only the PUBLIC half
-# =====================================================================
-
-def verify_signature(public_key_b64: str, message: str, signature_b64: str) -> None:
-    """Raise RulesError unless signature_b64 is a valid ed25519 signature of
-    `message` under public_key_b64. Both are raw base64, 32 and 64 bytes.
-
-    Deliberately not the SSH signature format: this way there is no archaeology
-    on either side, and the signer is twenty lines the user can read."""
-    try:
-        from cryptography.exceptions import InvalidSignature
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    except ImportError as e:                                    # pragma: no cover
-        # A FAULT, and the only one in this file: the image was built without
-        # the signature library. The caller asked for nothing wrong and can do
-        # nothing about it, so this keeps its traceback instead of being filed
-        # away as a refusal.
-        raise RulesFault(f"signature verification unavailable: {e}")
-    try:
-        raw = base64.b64decode(public_key_b64.strip(), validate=True)
-        sig = base64.b64decode(signature_b64.strip(), validate=True)
-    except Exception:
-        raise RulesError("public key or signature is not valid base64")
-    if len(raw) != 32:
-        raise RulesError(f"public key is {len(raw)} bytes, expected 32 (raw ed25519)")
-    if len(sig) != 64:
-        raise RulesError(f"signature is {len(sig)} bytes, expected 64 (raw ed25519)")
-    try:
-        Ed25519PublicKey.from_public_bytes(raw).verify(sig, message.encode("utf-8"))
-    except InvalidSignature:
-        raise RulesError(
-            "signature does not match this digest. Either it was produced for a different "
-            "batch — someone proposed a rule in the meantime — or it was signed with "
-            "another key. Ask for the digest again and re-sign it.")
 
 
 # =====================================================================
@@ -468,11 +425,9 @@ CREATE TABLE IF NOT EXISTS rule_versions (
 CREATE TABLE IF NOT EXISTS approvals (
   project     TEXT NOT NULL,
   digest      TEXT NOT NULL,
-  signature   TEXT,
   n_rules     INTEGER NOT NULL,
   rule_ids    TEXT NOT NULL,
   approved_at TEXT NOT NULL,
-  signed      INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY (project, digest, approved_at)
 );
 
@@ -636,11 +591,9 @@ def _serialised(cls):
 
 @_serialised
 class Registry:
-    def __init__(self, db_path: str, *, public_key: str = "",
-                 grace_until: str = "", provisional_days: int = DEFAULT_PROVISIONAL_DAYS) -> None:
+    def __init__(self, db_path: str, *,
+                 provisional_days: int = DEFAULT_PROVISIONAL_DAYS) -> None:
         self.path = db_path
-        self.public_key = (public_key or "").strip()
-        self.grace_until = (grace_until or "").strip()
         self.provisional_days = int(provisional_days or DEFAULT_PROVISIONAL_DAYS)
         # Re-entrant, and it must exist before anything else: every public
         # method acquires it (see _serialised).
@@ -730,6 +683,25 @@ class Registry:
             # happens once.
             self.cx.execute("DROP TRIGGER IF EXISTS trg_rules_upd")
             self.migrated.append("trg_rules_upd")
+        # The signature left in v2.0.0, and its two columns leave WITH it —
+        # out of the schema, not dead in place. A dead column kept "until the
+        # reset" would be reborn by the reset itself, because the reset
+        # recreates the schema from this code. Dropped, so a fresh install and
+        # an upgraded one stay the same thing; the rows above them — what was
+        # approved, when — are untouched.
+        if "approvals" in have:
+            acols = {r[1] for r in self.cx.execute("PRAGMA table_info(approvals)")}
+            for name in ("signature", "signed"):
+                if name in acols:
+                    try:
+                        self.cx.execute(f"ALTER TABLE approvals DROP COLUMN {name}")
+                    except sqlite3.OperationalError as e:
+                        # Same two-process race as the ADD above: the loser
+                        # must not die at __init__.
+                        if "no such column" not in str(e).lower():
+                            raise
+                    else:
+                        self.migrated.append(f"approvals.{name} dropped")
 
     def _fix_modes(self) -> None:
         """0644 is DELIBERATE: whoever mounts the share reads and does not touch."""
@@ -743,30 +715,14 @@ class Registry:
     def close(self) -> None:
         self.cx.close()
 
-    def in_grace(self) -> bool:
-        """True while signatures are not yet required. A lock you must remember
-        to switch on is a lock that stays off, so this one is a DATE and closes
-        by itself."""
-        return bool(self.grace_until) and _today() <= self.grace_until
-
-    def _require_signature(self, project: str, message: str, signature: str,
-                           n: int, ids: list[str]) -> bool:
-        """Returns True if the batch was signed, False if it passed under grace.
-        Records the approval either way — including that it was unsigned."""
-        signed = True
-        if self.in_grace() and not signature:
-            signed = False
-        elif not self.public_key:
-            raise RulesError(
-                "no approval public key is configured (APPROVAL_PUBKEY) and the grace "
-                "window is closed: nothing can be approved. Set the key, or reopen grace.")
-        else:
-            verify_signature(self.public_key, message, signature)
+    def _record_approval(self, project: str, digest: str, ids: list[str]) -> None:
+        """One row per approval, written by the lifecycle. What it records is
+        WHAT was let in and WHEN — the who is the OAuth gate's business, a
+        layer up, and the signature that used to sit here left in v2.0.0."""
         self.cx.execute(
-            "INSERT INTO approvals (project, digest, signature, n_rules, rule_ids, "
-            "approved_at, signed) VALUES (?,?,?,?,?,?,?)",
-            (project, message, signature or None, n, ",".join(ids), _now(), 1 if signed else 0))
-        return signed
+            "INSERT INTO approvals (project, digest, n_rules, rule_ids, approved_at) "
+            "VALUES (?,?,?,?,?)",
+            (project, digest, len(ids), ",".join(ids), _now()))
 
     # ---------- projects ----------
 
@@ -825,9 +781,7 @@ class Registry:
             "scopes": scopes,
             "domains": {d["domain"]: d["description"] for d in doms},
             "registry_version": VERSION,
-            "approval": {"required": not self.in_grace(),
-                         "grace_until": self.grace_until or None,
-                         "provisional_days": self.provisional_days},
+            "approval": {"provisional_days": self.provisional_days},
         }
 
     def create_project(self, code: str, name: str, consumers, domains,
@@ -1216,7 +1170,6 @@ class Registry:
                     expiring.append(self._dict(row, p))
         return {"project": p, "consumer": c or "(all)",
                 "waiting": waiting, "denied": denied, "expiring_within_30_days": expiring,
-                "approval_required": not self.in_grace(),
                 "note": "a denied proposal is kept on purpose, with its reason. The registry "
                         "no longer refuses a re-proposal — the number is assigned by the "
                         "counter, so the same text filed again simply takes a new one. "
@@ -1256,9 +1209,7 @@ class Registry:
             },
             "by_domain": by_domain,
             "by_consumer": by_consumer,
-            "approval": {"required": not self.in_grace(),
-                         "grace_until": self.grace_until or None,
-                         "public_key_configured": bool(self.public_key),
+            "approval": {"provisional_days": self.provisional_days,
                          "batches_approved": q(
                              "SELECT COUNT(*) FROM approvals WHERE project=:p")},
             "registry_version": VERSION,
@@ -1743,9 +1694,9 @@ class Registry:
 
     def batch(self, code: str) -> dict:
         """The pending batch plus its DIGEST — sha256 over the ordered list of
-        IDs and bodies. You sign the batch, not the single rule: that is what
-        makes the signature worth reading, and it is where three proposals that
-        say the same thing become visible next to each other.
+        IDs and bodies. You approve the batch, not the single rule: seen side
+        by side, three proposals that say the same thing become visible as
+        what they are.
 
         Each proposal carries its `reason`: the why being let in is on the
         table where the decision happens, not a history call away."""
@@ -1764,38 +1715,37 @@ class Registry:
         return {"project": p, "count": len(ids), "ids": ids,
                 "proposals": [self._dict(r, p, why=True) for r in rows],
                 "digest": digest,
-                "approval_required": not self.in_grace(),
-                "how_to_sign": ("on your own machine: python3 sign.py <digest>, over this "
-                                "exact digest string, then pass the base64 signature to "
-                                "approve. The private key never enters this conversation."),
-                "note": "if a proposal arrives after you read this, the digest changes and "
-                        "the old signature is refused. That is on purpose."}
+                "note": "pass this digest to approve: it proves you approve the batch you "
+                        "READ. If a proposal arrives after this call the digest changes "
+                        "and the stale one is refused. That is on purpose."}
 
-    def approve(self, code: str, digest: str, signature: str = "") -> dict:
+    def approve(self, code: str, digest: str) -> dict:
+        """Approve the whole pending batch. The DIGEST is the one check left on
+        this door, and it is not ceremony: it proves the approval covers the
+        batch that was read, not the batch that exists now."""
         p = self._project(code)
         current = self.batch(code)
         if (digest or "").strip() != current["digest"]:
             raise RulesError(
                 "that digest is not the current one: the batch changed after you read it "
                 "(someone proposed or denied something). Ask for the batch again and "
-                "re-sign. You cannot sign one batch and have another approved.")
+                "re-read it. You cannot read one batch and have another approved.")
         if not current["ids"]:
             raise RulesError("nothing to approve: the batch is empty")
-        signed = self._require_signature(p, current["digest"], signature,
-                                         len(current["ids"]), current["ids"])
+        self._record_approval(p, current["digest"], current["ids"])
         expires = _plus_days(self.provisional_days)
         for rid in current["ids"]:
             self.cx.execute(
                 "UPDATE rules SET status='active', permanence='provisional', expires_at=?, "
                 "event=?, updated_at=? WHERE project=? AND id=?",
-                (expires, f"approved{'' if signed else ' under grace'}", _now(), p, rid))
+                (expires, "approved", _now(), p, rid))
         return {"project": p, "approved": current["ids"], "count": len(current["ids"]),
-                "signed": signed, "expires_at": expires,
+                "expires_at": expires,
                 "note": ("they are PROVISIONAL: unless renewed they leave the lists by "
                          "themselves. Staying costs a decision, going is free.")}
 
     def deny(self, code: str, ids, reason: str) -> dict:
-        """No signature: denying cannot do harm. And an explicit denial turns
+        """No digest: denying cannot do harm. And an explicit denial turns
         silence into an answer — the chat learns instead of guessing."""
         p = self._project(code)
         if not (reason or "").strip():
@@ -1819,8 +1769,10 @@ class Registry:
                         "number — but rules_pending shows the refusal and its reason to "
                         "whoever filed it"}
 
-    def renew(self, code: str, ids, signature: str = "", days: int = 0) -> dict:
-        """Keeping a rule alive is letting it in again, so it is signed too."""
+    def renew(self, code: str, ids, days: int = 0) -> dict:
+        """Keeping a rule alive is letting it in again — which is why the
+        renewal is where the corpus is governed, and why it goes behind the
+        admin code in the server."""
         p = self._project(code)
         if isinstance(ids, str):
             ids = [ids]
@@ -1831,18 +1783,16 @@ class Registry:
             row = self._row(p, rid)
             if row is None or row["status"] != "active":
                 raise RulesError(f"{rid}: not an active rule")
-        message = hashlib.sha256(("renew|" + p + "|" + ",".join(ids)).encode()).hexdigest()
-        signed = self._require_signature(p, message, signature, len(ids), ids)
         expires = _plus_days(int(days) or self.provisional_days)
         for rid in ids:
             self.cx.execute("UPDATE rules SET expires_at=?, event=?, updated_at=? "
                             "WHERE project=? AND id=?",
                             (expires, "renewed", _now(), p, rid))
-        return {"project": p, "renewed": ids, "expires_at": expires, "signed": signed,
-                "digest": message}
+        return {"project": p, "renewed": ids, "expires_at": expires}
 
-    def promote(self, code: str, ids, signature: str = "") -> dict:
-        """From provisional to permanent. Rare, deliberate, and signed."""
+    def promote(self, code: str, ids) -> dict:
+        """From provisional to permanent. Rare and deliberate: a permanent rule
+        is one you promise to notice when it goes stale."""
         p = self._project(code)
         if isinstance(ids, str):
             ids = [ids]
@@ -1853,13 +1803,11 @@ class Registry:
             row = self._row(p, rid)
             if row is None or row["status"] != "active":
                 raise RulesError(f"{rid}: not an active rule")
-        message = hashlib.sha256(("promote|" + p + "|" + ",".join(ids)).encode()).hexdigest()
-        signed = self._require_signature(p, message, signature, len(ids), ids)
         for rid in ids:
             self.cx.execute("UPDATE rules SET permanence='permanent', expires_at=NULL, "
                             "event=?, updated_at=? WHERE project=? AND id=?",
                             ("promoted to permanent", _now(), p, rid))
-        return {"project": p, "promoted": ids, "signed": signed, "digest": message}
+        return {"project": p, "promoted": ids}
 
     def amend(self, code: str, rid: str, expected_version: int, reason: str,
               title: str = None, body: str = None, rtype: str = None,

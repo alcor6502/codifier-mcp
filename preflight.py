@@ -21,21 +21,19 @@ Its own, because this service keeps a database instead of files:
   ownership   the process is root and the database is NOT writable by anyone
               else: a write from the share would bypass the triggers
   admin_code  ADMIN_ACCESS_CODE present, long enough, not a placeholder
-  approval    the approval key and the grace window, so the registry cannot
-              come up in a state where nothing can ever be approved
+  approval    the one knob the approval lifecycle reads, PROVISIONAL_DAYS,
+              validated at the edge instead of at the first approval
 
 Selective skip (for local testing only, never in production):
   PREFLIGHT_SKIP="funnel,node_key"
 """
 from __future__ import annotations
 
-import base64
 import os
 import secrets
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime, timezone
 
 from mcp_common_engine import (RESULTS, SKIP, check, cidrs_from_env,
                                describe_cidrs, is_placeholder)
@@ -133,55 +131,15 @@ def c_admin_code():
 
 @check("approval")
 def c_approval():
-    """The registry must not come up in a state where nothing can ever be
-    approved — a service that accepts proposals and can never let one through
-    looks healthy and is not."""
-    key = os.environ.get("APPROVAL_PUBKEY", "").strip()
-    if key:
-        if is_placeholder(key):
-            raise RuntimeError("APPROVAL_PUBKEY is still a placeholder")
-        try:
-            raw = base64.b64decode(key, validate=True)
-        except Exception:
-            raise RuntimeError("APPROVAL_PUBKEY is not valid base64: it wants the raw ed25519 "
-                               "public key, 32 bytes, not the OpenSSH one-line format")
-        if len(raw) == 64:
-            # 64 bytes is the seed+public pair. Saying so is worth a line: the
-            # mistake is easy to make and the generic message would send you
-            # looking at the wrong thing.
-            raise RuntimeError("APPROVAL_PUBKEY is 64 bytes — that is a PRIVATE key. Only the "
-                               "public half belongs here, and the private half never leaves "
-                               "the machine that signs.")
-        if len(raw) != 32:
-            raise RuntimeError(f"APPROVAL_PUBKEY decodes to {len(raw)} bytes, 32 expected "
-                               "(raw ed25519 public key)")
-
-    grace = os.environ.get("APPROVAL_GRACE_UNTIL", "").strip()
-    open_grace = False
-    if grace:
-        try:
-            until = datetime.strptime(grace, "%Y-%m-%d").date()
-        except ValueError:
-            raise RuntimeError(f"APPROVAL_GRACE_UNTIL={grace!r}: it wants a DATE, YYYY-MM-DD. "
-                               "It is a date and not a switch on purpose — it closes by itself, "
-                               "and a lock you have to remember to switch on stays off.")
-        open_grace = until >= datetime.now(timezone.utc).date()
-
-    if not key and not open_grace:
-        raise RuntimeError("no APPROVAL_PUBKEY and the grace window is closed or unset: nothing "
-                           "could ever be approved. Set the key, or set APPROVAL_GRACE_UNTIL to "
-                           "a future date.")
-
+    """What is left of this check after the signature's exit is the one knob
+    the approval lifecycle still reads. Validated AT THE EDGE, at boot: a bad
+    number found here is one line with a name, found at the first approval it
+    is a traceback in a chat."""
     days = os.environ.get("PROVISIONAL_DAYS", "").strip()
     if days:
         if not days.isdigit() or int(days) < 1:
             raise RuntimeError(f"PROVISIONAL_DAYS={days!r}: a positive whole number of days")
-
-    parts = ["key present" if key else "no key"]
-    parts.append(f"grace open until {grace}" if open_grace
-                 else (f"grace closed on {grace}" if grace else "no grace window"))
-    parts.append(f"provisional {days or 90} days")
-    return " · ".join(parts)
+    return f"provisional {days or 90} days · admin code approves, no signature"
 
 
 @check("oauth")

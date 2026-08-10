@@ -64,7 +64,7 @@ così cambiare un gruppo domani non riscrive quello che era vero ieri.
 
 ## Come entra una regola
 
-    proposta ──(lotto firmato)──> attiva + provvisoria ──(firma)──> permanente
+    proposta ──(lotto approvato)──> attiva + provvisoria ──(promozione)──> permanente
         │                              │
         │                              └──> ritirata
         └──> respinta  (col motivo, e la riga RESTA)
@@ -78,15 +78,18 @@ prende.**
 dalle liste da sola se nessuno decide di tenerla. Tenerla costa una decisione,
 lasciarla andare è gratis.
 
-**Si approva a lotti, e si firma.** Una chat non può chiederti di firmare in
-mezzo a una conversazione — le proposte si accumulano, e le vedi tutte insieme,
-che è l'unico momento in cui salta all'occhio che tre dicono la stessa cosa. La
-firma è ed25519 sul digest del lotto; il registro tiene **solo la chiave
-pubblica**, quindi anche col database in mano nessuno può fabbricare
-un'approvazione. La metà privata non entra mai in una conversazione — non per
-disciplina, per costruzione.
+**Si approva a lotti, contro il loro digest.** Le proposte si accumulano, e le
+vedi tutte insieme, che è l'unico momento in cui salta all'occhio che tre
+dicono la stessa cosa. `rules_batch` restituisce le proposte pendenti — ognuna
+col suo perché — e un digest sull'insieme; `rules_approve` rivuole quel digest,
+quindi ciò che viene approvato è provabilmente il lotto che è stato **letto**:
+una proposta che arriva nel mezzo sposta il digest e invalida l'approvazione
+stantia. L'approvazione sta dietro il codice di manutenzione. (Sopra viaggiava
+una firma ed25519; è uscita nella v2.0.0 — era il modo goffo di far entrare una
+persona invece di una chat, e la UI di amministrazione risolve il problema alla
+radice.)
 
-Il diniego non vuole firma: negare non può fare danno. La riga della regola
+Il diniego non vuole digest: negare non può fare danno. La riga della regola
 respinta resta, col suo motivo, e `rules_pending` mostra a una chat i propri
 rifiuti — così la stessa idea che torna da un'altra chat fra tre settimane è
 una cosa che si vede, non una cosa che il registro può impedire.
@@ -154,19 +157,7 @@ il database, uno per lo stato, e variabili d'ambiente.
    si contendono la callback.
 2. **`JWT_SIGNING_KEY`**: `openssl rand -hex 32`. Stabile per sempre — cambiarla
    invalida ogni token già emesso.
-3. **Una coppia di chiavi ed25519**, sulla tua macchina:
-   `python3 sign.py --keygen`. Stampa la metà pubblica, che va in
-   `APPROVAL_PUBKEY`; la privata resta in `~/.codifier/approval.key` a 0600 e
-   non viaggia mai. Lo stesso script firma poi i digest dei lotti:
-   `python3 sign.py <digest>`.
-   Gli serve `cryptography`, e macOS e Linux recenti rifiutano un `pip install`
-   normale nel Python di sistema — quindi fanne un venv una volta sola,
-   `python3 -m venv ~/.codifier/venv`, installalo lì, e dimenticatene: sign.py
-   quel venv lo trova e ci si ri-esegue dentro.
-   Finché stai ancora montando tutto puoi lasciare la chiave vuota e mettere
-   `APPROVAL_GRACE_UNTIL` a una data vicina — è una data e non un interruttore,
-   quindi si chiude da sola.
-4. **La cartella del database dev'essere storage locale**, mai una share di
+3. **La cartella del database dev'essere storage locale**, mai una share di
    rete: SQLite in WAL vuole locking vero.
 
 Il template in questo repository **è** la configurazione, e le descrizioni dei
@@ -212,7 +203,7 @@ Tre suite. Niente rete, niente FastMCP, niente Docker.
 
 ```
 python3 test_collaudo.py    # il motore, rifiuti compresi
-python3 test_surface.py     # la cucitura, l'immagine, il template, il firmatario
+python3 test_surface.py     # la cucitura, l'immagine, il template
 python3 test_crash.py       # SIGKILL a metà transazione, come fa Docker
 ```
 

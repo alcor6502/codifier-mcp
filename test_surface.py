@@ -25,7 +25,6 @@ Run it with `python3 test_surface.py`. Exit code 0 means green.
 from __future__ import annotations
 
 import ast
-import hashlib
 import os
 import re
 import sys
@@ -1160,73 +1159,6 @@ for n in ast.walk(ENGINE_TREE):
 ok("fastmcp" not in ENGINE_IMPORTS and "mcp" not in ENGINE_IMPORTS,
    f"rules.py imports no server framework: {sorted(ENGINE_IMPORTS)}")
 
-print("\n== the signer exists, works, and stays OUT of the image ==")
-
-# rules_batch tells the caller to run `python3 sign.py <digest>`. For a while it
-# said that about a file nobody had written — same class of defect as the
-# reference guide, and it would have surfaced at the first approval.
-SIGNER = os.path.join(HERE, "sign.py")
-ok(os.path.exists(SIGNER), "sign.py exists — the batch note points at something real")
-ok(not any("sign.py" in l for l in DOCKER_COPIES),
-   "sign.py is NOT in the image: it belongs on Alfredo's machine, with the key")
-
-import subprocess                                               # noqa: E402
-import tempfile                                                 # noqa: E402
-
-def signer(args, key):
-    env = dict(os.environ, CODIFIER_KEY=key)
-    return subprocess.run([sys.executable, SIGNER] + args, capture_output=True,
-                          text=True, env=env)
-
-_d = tempfile.mkdtemp(prefix="signer-")
-_key = os.path.join(_d, "approval.key")
-_gen = signer(["--keygen"], _key)
-ok(_gen.returncode == 0 and os.path.exists(_key), "--keygen writes a key", _gen.stderr[:120])
-ok(oct(os.stat(_key).st_mode)[-3:] == "600", "the private key is born 0600")
-ok(signer(["--keygen"], _key).returncode == 2,
-   "generating over an existing key is refused — it would orphan every approval")
-
-_pub = signer(["--pubkey"], _key).stdout.strip()
-_digest = hashlib.sha256(b"a batch").hexdigest()
-_sig = signer([_digest], _key).stdout.strip()
-
-# The round trip is the point: a signer whose output the engine rejects is worse
-# than no signer, because the error would send you looking at the key.
-try:
-    from rules import verify_signature                          # noqa: E402
-    verify_signature(_pub, _digest, _sig)
-    ok(True, "a signature from sign.py verifies against the engine")
-except Exception as e:
-    ok(False, "a signature from sign.py verifies against the engine", str(e)[:120])
-
-try:
-    verify_signature(_pub, _digest.replace("a", "b", 1), _sig)
-    ok(False, "and it does NOT verify against another digest", "it was accepted")
-except Exception:
-    ok(True, "and it does NOT verify against another digest")
-
-ok(signer(["not-a-digest"], _key).returncode == 2,
-   "something that is not a digest is refused before it is signed")
-
-# What happens on a machine WITHOUT cryptography — which is every fresh macOS,
-# since the system Python refuses a plain pip install. Simulated by shadowing
-# the module with one that raises on import.
-_shadow = os.path.join(_d, "shadow")
-os.makedirs(_shadow, exist_ok=True)
-with open(os.path.join(_shadow, "cryptography.py"), "w") as f:
-    f.write("raise ImportError('not installed')\n")
-
-_env = dict(os.environ, CODIFIER_KEY=_key, PYTHONPATH=_shadow,
-            HOME=os.path.join(_d, "nohome"))
-try:
-    _r = subprocess.run([sys.executable, SIGNER, "--pubkey"], capture_output=True,
-                        text=True, env=_env, timeout=20)
-    ok(_r.returncode == 2 and "venv" in _r.stderr,
-       "without cryptography it says how to fix it, in two commands", _r.stderr[:100])
-except subprocess.TimeoutExpired:
-    ok(False, "without cryptography it says how to fix it, in two commands",
-       "it hung — the re-exec is looping")
-
 print("\n== the version is written in one place and copied nowhere ==")
 
 # VERSION lives in rules.py and the CI compares it with the tag. The badges in
@@ -1249,7 +1181,7 @@ for _readme, _label in (("README.md", "version"), ("README.it.md", "versione")):
     ok(_counts == [str(len(TOOLS))],
        f"{_readme}: the tool badge says {len(TOOLS)}", _counts)
 
-_STRAY = [f for f in ("server.py", "preflight.py", "sign.py", "Dockerfile",
+_STRAY = [f for f in ("server.py", "preflight.py", "Dockerfile",
                       "entrypoint.sh", "codifier-mcp.xml")
           if re.search(r"^VERSION\s*=", source(os.path.join(HERE, f)), re.MULTILINE)]
 ok(not _STRAY, "no second file declares a VERSION of its own", _STRAY)
@@ -1331,7 +1263,7 @@ ok("<PostArgs/>" in TEMPLATE,
 # Unraid does not propagate new variables to containers already installed, so a
 # variable introduced later means editing every existing install by hand. These
 # go in now, inert or not.
-for var in ("APPROVAL_PUBKEY", "APPROVAL_GRACE_UNTIL", "PROVISIONAL_DAYS", "WEB_PORT",
+for var in ("PROVISIONAL_DAYS", "WEB_PORT",
             "LOG_LEVEL", "ALLOWED_CIDRS", "DB_PATH", "BACKUP_DIR", "ADMIN_ACCESS_CODE"):
     ok(f'Target="{var}"' in TEMPLATE, f"template declares {var}")
 
@@ -1484,7 +1416,7 @@ for value, expect_level, expect_rejected in (
 # DEBUG is listed as inert above, and that claim has to stay true: the day
 # somebody adds a .debug() line, the closed list silently starts hiding output
 # instead of merely not producing any.
-for _f in ("server.py", "rules.py", "preflight.py", "sign.py"):
+for _f in ("server.py", "rules.py", "preflight.py"):
     _src = source(os.path.join(HERE, _f))
     ok(".debug(" not in _src,
        f"{_f} contains no .debug() — which is why DEBUG is inert, not offered")
@@ -1548,6 +1480,34 @@ ok('Target="LOG_LEVEL"' in TEMPLATE and 'Default="INFO|WARNING"' in TEMPLATE,
 for _dead in ("DEBUG, INFO, WARNING, ERROR", "DEBUG, INFO, WARNING and ERROR"):
     ok(_dead not in TEMPLATE,
        f"the template no longer offers the inert value: {_dead!r}")
+
+print("\n== the signature left, whole ==")
+
+# Decided 2026-08-10: sign.py, the key knobs and the signature parameter all
+# leave; approve/renew/promote stay on the MCP behind the admin code until the
+# UI exists. The digest stays — it is the check that you approve the batch you
+# read, and it was never the signature's.
+ok(not os.path.exists(os.path.join(HERE, "sign.py")),
+   "sign.py is gone from the repository")
+for _tok in ("APPROVAL_PUBKEY", "APPROVAL_GRACE_UNTIL"):
+    for _fname, _src2 in (("codifier-mcp.xml", TEMPLATE), ("server.py", SERVER_SRC),
+                          ("rules.py", RULES_SRC), ("preflight.py", PREFLIGHT_SRC)):
+        ok(_tok not in _src2, f"{_fname} no longer knows {_tok}")
+for _tname in ("rules_approve", "rules_renew", "rules_promote"):
+    _t2 = next((t for t in TOOLS if t.name == _tname), None)
+    ok(_t2 is not None, f"{_tname} is still on the surface: the UI is not built yet")
+    if _t2 is not None:
+        _p2 = [a.arg for a in _t2.args.posonlyargs + _t2.args.args]
+        ok("signature" not in _p2, f"{_tname} takes no signature", _p2)
+        ok("code" in _p2, f"{_tname} still wants the admin code", _p2)
+_APPR = next((t for t in TOOLS if t.name == "rules_approve"), None)
+if _APPR is not None:
+    _p3 = [a.arg for a in _APPR.args.posonlyargs + _APPR.args.args]
+    ok("digest" in _p3,
+       "rules_approve still wants the digest: you approve the batch you READ", _p3)
+ok("cryptography" not in source(os.path.join(HERE, "requirements.txt"))
+   and "cryptography" not in DOCKERFILE,
+   "no cryptography dependency survives outside the engine's own")
 
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

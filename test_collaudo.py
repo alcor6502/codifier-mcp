@@ -21,17 +21,12 @@ The four proofs that carry the model, if you only read four:
 """
 from __future__ import annotations
 
-import base64
-import hashlib
 import os
 import sqlite3
 import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from cryptography.hazmat.primitives import serialization as ser
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from rules import (ALL, FILE_MODE, MAX_BODY_BYTES, MAX_GET_IDS, MAX_IMPORT,
                    Registry, RulesError, VERSION, _plus_days)
@@ -98,29 +93,9 @@ def refuses(label: str, fn, fragment: str = "", kind=Exception) -> None:
     print(f"  FAIL  {label}: did NOT refuse")
 
 
-# ed25519 signer. The private half lives here only because this is a test: in
-# real life it never enters a conversation.
-SK = Ed25519PrivateKey.generate()
-PUB = base64.b64encode(
-    SK.public_key().public_bytes(ser.Encoding.Raw, ser.PublicFormat.Raw)).decode()
-OTHER_SK = Ed25519PrivateKey.generate()
-
-
-def sign(msg: str) -> str:
-    return base64.b64encode(SK.sign(msg.encode())).decode()
-
-
-def sign_other(msg: str) -> str:
-    return base64.b64encode(OTHER_SK.sign(msg.encode())).decode()
-
-
-def digest_of(kind: str, project: str, ids: list[str]) -> str:
-    return hashlib.sha256(f"{kind}|{project}|{','.join(sorted(ids))}".encode()).hexdigest()
-
-
 D = tempfile.mkdtemp(prefix="collaudo-")
 DB = os.path.join(D, "rules.db")
-R = Registry(DB, public_key=PUB, provisional_days=90)
+R = Registry(DB, provisional_days=90)
 
 FP, HT, CASA = "Fp7m2Qx91Ab", "Ht4Rn8Wq02zz", "Ca6Hj3Lv77xy"
 NAME_FP, NAME_HT, NAME_CASA = "Financial Portfolio", "Health Tracking", "Casa"
@@ -361,7 +336,7 @@ def the_counter_does_not_skip_and_does_not_go_back():
     R.deny(CNT, [b], "spent on purpose")
     c = R.propose(CNT, "VA", "R", "Three", "Body three.", ["*"], "m")["id"]
     assert c == "VA-0003", c
-    R.approve(CNT, R.batch(CNT)["digest"], sign(R.batch(CNT)["digest"]))
+    R.approve(CNT, R.batch(CNT)["digest"])
     R.retire(CNT, c, reason="retired to spend the number")
     d = R.propose(CNT, "VA", "R", "Four", "Body four.", ["*"], "m")["id"]
     assert d == "VA-0004", d
@@ -403,29 +378,20 @@ case("version 1 already carries the perimeter (deferred FK)",
      deferred_fk_photographs_a_full_perimeter)
 
 # =====================================================================
-head("the batch, and the signature on it")
+head("the batch, and the digest on it")
 # =====================================================================
 
 B = R.batch(FP)
 ok(B["count"] == 4, "the batch holds the four proposals", B["ids"])
 ok(B["digest"] == R.batch(FP)["digest"], "the digest is stable while the batch is")
 refuses("a digest that is not the current one",
-        lambda: R.approve(FP, "deadbeef", sign("deadbeef")), "not the current one", RulesError)
-refuses("a signature made over another message",
-        lambda: R.approve(FP, B["digest"], sign("something else")),
-        "does not match this digest", RulesError)
-refuses("a signature from another key",
-        lambda: R.approve(FP, B["digest"], sign_other(B["digest"])),
-        "does not match this digest", RulesError)
-refuses("a signature that is not base64",
-        lambda: R.approve(FP, B["digest"], "not base64 at all!"),
-        "not valid base64", RulesError)
+        lambda: R.approve(FP, "deadbeef"), "not the current one", RulesError)
 
-A = R.approve(FP, B["digest"], sign(B["digest"]))
-ok(A["signed"] and A["count"] == 4, "batch approved with a valid signature")
+A = R.approve(FP, B["digest"])
+ok(A["count"] == 4, "batch approved against its digest")
 ok(R.batch(FP)["count"] == 0, "the batch is empty afterwards")
 refuses("nothing to approve on an empty batch",
-        lambda: R.approve(FP, R.batch(FP)["digest"], sign(R.batch(FP)["digest"])),
+        lambda: R.approve(FP, R.batch(FP)["digest"]),
         "batch is empty", RulesError)
 
 
@@ -705,7 +671,7 @@ def you_may_only_cite_a_rule_ALREADY_APPROVED():
         assert "not in force yet" in str(e), e
     # And once the cited rule IS approved, the citing one goes in.
     ok_target = R.propose(FP, "VE", "R", "Approved first", "Body.", ["*"], "test")["id"]
-    R.approve(FP, R.batch(FP)["digest"], sign(R.batch(FP)["digest"]))
+    R.approve(FP, R.batch(FP)["digest"])
     citer = R.propose(FP, "VE", "R", "Leans on an approved one",
                       f"Builds on ({ok_target}).", ["*"], "test")["id"]
     assert R.cx.execute("SELECT dst FROM rule_refs WHERE project=? AND src=?",
@@ -795,7 +761,7 @@ def reading_expands_the_citation():
     # point thrown away — a title changed tomorrow would leave a stale copy of
     # itself inside somebody else's rule, which is the staleness of an export
     # but inside the authoritative source.
-    R.approve(FP, R.batch(FP)["digest"], sign(R.batch(FP)["digest"]))
+    R.approve(FP, R.batch(FP)["digest"])
     R.amend(FP, rid, R._version(NAME_FP, rid), reason="pasted back as read", body=shown)
     assert R.cx.execute("SELECT body FROM rules WHERE project=? AND id=?",
                         (NAME_FP, rid)).fetchone()[0] == body, "the gloss is NOT stored"
@@ -1054,34 +1020,31 @@ case("an expired provisional leaves the lists on its own",
      an_expired_provisional_leaves_by_itself)
 
 
-def renewal_is_signed_because_it_lets_it_back_in():
-    msg = digest_of("renew", NAME_FP, ["FI-0001"])
-    out = R.renew(FP, ["FI-0001"], sign(msg))
-    assert out["signed"] and out["digest"] == msg
+def renewal_brings_it_back():
+    out = R.renew(FP, ["FI-0001"])
+    assert out["renewed"] == ["FI-0001"] and out["expires_at"]
     assert "FI-0001" in [x["id"] for x in R.list_rules(FP, "tax")["rules"]]
 
 
-case("renew brings it back, and it is signed", renewal_is_signed_because_it_lets_it_back_in)
+case("renew brings it back, with a fresh expiry", renewal_brings_it_back)
 
-refuses("renewing with the wrong signature",
-        lambda: R.renew(FP, ["FI-0001"], sign("whatever")), "does not match", RulesError)
 refuses("renewing a rule that is not active",
-        lambda: R.renew(FP, ["FI-0002"], sign(digest_of("renew", NAME_FP, ["FI-0002"]))),
+        lambda: R.renew(FP, ["FI-0002"]),
         "not an active rule", RulesError)
 refuses("renewing nothing", lambda: R.renew(FP, []), "no ID to renew", RulesError)
 
 
 def promotion_makes_it_permanent():
-    msg = digest_of("promote", NAME_FP, ["VA-0001"])
-    out = R.promote(FP, ["VA-0001"], sign(msg))
+    out = R.promote(FP, ["VA-0001"])
     row = R._row(NAME_FP, "VA-0001")
-    assert out["signed"] and row["permanence"] == "permanent" and row["expires_at"] is None
+    assert out["promoted"] == ["VA-0001"]
+    assert row["permanence"] == "permanent" and row["expires_at"] is None
 
 
-case("promote: permanent, no expiry, signed", promotion_makes_it_permanent)
+case("promote: permanent, no expiry", promotion_makes_it_permanent)
 
-refuses("promoting with the wrong signature",
-        lambda: R.promote(FP, ["PE-0001"], sign("nope")), "does not match", RulesError)
+refuses("promoting a rule that is not active",
+        lambda: R.promote(FP, ["FI-0002"]), "not an active rule", RulesError)
 
 
 def the_noticeboard_warns_before_the_expiry():
@@ -1089,7 +1052,7 @@ def the_noticeboard_warns_before_the_expiry():
                  (_plus_days(10), NAME_FP))
     p = R.pending(FP, "architect")
     assert [x["id"] for x in p["expiring_within_30_days"]] == ["PE-0001"], p["expiring_within_30_days"]
-    R.renew(FP, ["PE-0001"], sign(digest_of("renew", NAME_FP, ["PE-0001"])))
+    R.renew(FP, ["PE-0001"])
     assert R.pending(FP, "architect")["expiring_within_30_days"] == []
 
 
@@ -1109,7 +1072,7 @@ ok(FI_NEW == "FI-0004",
 
 def retire_with_a_successor():
     b = R.batch(FP)
-    R.approve(FP, b["digest"], sign(b["digest"]))
+    R.approve(FP, b["digest"])
     out = R.retire(FP, FI1, reason=f"superseded by {FI_NEW}", superseded_by=FI_NEW)
     assert out["superseded_by"] == FI_NEW
     assert FI1 not in [x["id"] for x in R.list_rules(FP, "tax")["rules"]]
@@ -1146,7 +1109,7 @@ def a_successor_must_be_approved_too():
     unborn = R.propose(FP, "FI", "M", "Never approved successor", "Body.",
                        ["tax"], "test")["id"]
     victim = R.propose(FP, "FI", "M", "To be retired", "Body.", ["tax"], "test")["id"]
-    R.approve(FP, R.batch(FP)["digest"], sign(R.batch(FP)["digest"]))
+    R.approve(FP, R.batch(FP)["digest"])
     # (the batch above approved both; put one back to 'proposed' by hand so the
     # case is about the check and not about the batch)
     R.cx.execute("UPDATE rules SET status='proposed' WHERE project=? AND id=?",
@@ -1200,7 +1163,7 @@ ORPHAN = R.propose(FP, "VE", "R", "Orphan to be", "Only here to be narrowed to n
 
 def narrow_to_nothing_is_reported():
     b = R.batch(FP)
-    R.approve(FP, b["digest"], sign(b["digest"]))
+    R.approve(FP, b["digest"])
     out = R.narrow(FP, ORPHAN, ["market-news"])
     assert out["scopes"] == [] and "reaches nobody" in out["warning"]
     assert ORPHAN in R.check(FP)["rules_without_perimeter"]
@@ -1245,7 +1208,7 @@ def redundancy_is_a_suspicion_not_a_verdict():
     TWIN_B = R.propose(FP, "ST", "R", "Two", f"Body two, see ({VA1}).",
                        ["market-news"], "test")["id"]
     b = R.batch(FP)
-    R.approve(FP, b["digest"], sign(b["digest"]))
+    R.approve(FP, b["digest"])
     pairs = [c["pair"] for c in R.check(FP)["redundancy_candidates"]]
     assert [TWIN_A, TWIN_B] in pairs, pairs
 
@@ -1274,7 +1237,7 @@ def a_dropped_trigger_is_rebuilt_AND_declared():
     cx.execute("DROP TRIGGER trg_rules_upd")
     cx.commit()
     cx.close()
-    r2 = Registry(DB, public_key=PUB)
+    r2 = Registry(DB)
     assert "trg_rules_upd" in r2.repaired, r2.repaired
     assert r2.status(FP)["repaired_at_open"] == ["trg_rules_upd"]
     r2.close()
@@ -1283,7 +1246,7 @@ def a_dropped_trigger_is_rebuilt_AND_declared():
 case("a trigger dropped by hand is rebuilt, and the repair is DECLARED",
      a_dropped_trigger_is_rebuilt_AND_declared)
 
-R = Registry(DB, public_key=PUB, provisional_days=90)
+R = Registry(DB, provisional_days=90)
 ok(R.repaired == [], "a clean reopen repairs nothing")
 
 # =====================================================================
@@ -1296,7 +1259,7 @@ def same_id_two_projects_two_histories():
                      ["*"], "initial import")["id"]
     assert twin == VA1, "each project counts on its own, from one"
     b = R.batch(HT)
-    R.approve(HT, b["digest"], sign(b["digest"]))
+    R.approve(HT, b["digest"])
     assert R._row(NAME_HT, "VA-0001")["title"] == "Namesake but different"
     assert R._row(NAME_FP, "VA-0001")["title"] == "Re-read the sources"
     assert R.history(HT, "VA-0001")["count"] < R.history(FP, "VA-0001")["count"]
@@ -1318,7 +1281,7 @@ def new_domain_and_consumer_work_at_once():
     fresh = R.propose(HT, "AL", "R", "New domain", "Body.", ["nutritionist"], "test")["id"]
     assert fresh == "AL-0001", "a domain born later starts its own counter at one"
     b = R.batch(HT)
-    R.approve(HT, b["digest"], sign(b["digest"]))
+    R.approve(HT, b["digest"])
     assert [x["id"] for x in R.list_rules(HT, "nutritionist")["rules"]] == [VA1, fresh]
 
 
@@ -1337,7 +1300,7 @@ def all_aliases_all_mean_all():
         assert rid == f"MS-{i:04d}", (alias, rid)
         assert R._scopes_of(NAME_HT, rid) == [ALL], alias
     b = R.batch(HT)
-    R.approve(HT, b["digest"], sign(b["digest"]))
+    R.approve(HT, b["digest"])
 
 
 case("_ALL_ and its aliases all land on the same scope", all_aliases_all_mean_all)
@@ -1419,43 +1382,58 @@ refuses("import of nothing at all",
         lambda: R.import_rules(EMPTY, [], "m"), "nothing to import", RulesError)
 
 # =====================================================================
-head("grace: a lock that closes by itself")
+head("the signature is gone, and the digest stays")
 # =====================================================================
 
-
-def grace_lets_an_unsigned_batch_through():
-    g = Registry(os.path.join(D, "grace.db"), grace_until="2099-12-31")
-    g.create_project("Gg11Hh22Ii", "Grace", [("architect", "chat")], {"VA": "x"})
-    g.propose("Gg11Hh22Ii", "VA", "R", "During grace", "Body.", ["*"], "test")
-    b = g.batch("Gg11Hh22Ii")
-    assert b["approval_required"] is False
-    out = g.approve("Gg11Hh22Ii", b["digest"])
-    assert out["signed"] is False, "it went through, and it is recorded as UNSIGNED"
-    row = g.cx.execute("SELECT signed FROM approvals").fetchone()[0]
-    assert row == 0
-    g.close()
+# The signature was the clumsy way of letting a PERSON in instead of a chat;
+# the admin UI solves that at the root, and keeping it would be ceremony
+# (decided 2026-08-10). THE DIGEST IS NOT THE SIGNATURE'S: it is the check
+# that you approve the batch you READ, and it stays — proved above, where a
+# stale digest is refused. With the signature went the grace window: there is
+# no unsigned state left to record, so there is nothing for a date to permit.
 
 
-case("inside the grace window an unsigned batch passes, and says so",
-     grace_lets_an_unsigned_batch_through)
+def no_write_takes_a_signature():
+    """The guarantee is an ABSENCE, so it is proved from the outside: no
+    lifecycle method has a parameter that could carry a signature."""
+    import inspect
+    for name in ("approve", "renew", "promote"):
+        params = list(inspect.signature(getattr(R, name)).parameters)
+        assert "signature" not in params, f"{name}() still takes a signature: {params}"
 
 
-def a_closed_grace_window_with_no_key_approves_nothing():
-    g = Registry(os.path.join(D, "closed.db"), grace_until="2000-01-01")
-    g.create_project("Jj11Kk22Ll", "Closed", [("architect", "chat")], {"VA": "x"})
-    g.propose("Jj11Kk22Ll", "VA", "R", "After grace", "Body.", ["*"], "test")
-    b = g.batch("Jj11Kk22Ll")
-    assert b["approval_required"] is True
-    try:
-        g.approve("Jj11Kk22Ll", b["digest"])
-        raise AssertionError("it should have refused")
-    except RulesError as e:
-        assert "APPROVAL_PUBKEY" in str(e), e
-    g.close()
+case("approve, renew and promote have no way to receive a signature",
+     no_write_takes_a_signature)
 
 
-case("grace closed and no key: nothing can be approved, and the message says which knob",
-     a_closed_grace_window_with_no_key_approves_nothing)
+def the_approvals_table_records_no_signature():
+    cols = {r[1] for r in R.cx.execute("PRAGMA table_info(approvals)")}
+    assert "signature" not in cols, f"approvals still records a signature: {sorted(cols)}"
+    assert "signed" not in cols, f"approvals still records signed/unsigned: {sorted(cols)}"
+    # What it DOES record: what was let in and when, one row per approval.
+    rows = R.cx.execute("SELECT n_rules, rule_ids FROM approvals WHERE project=?",
+                        (NAME_FP,)).fetchall()
+    assert rows, "no approval was recorded at all"
+    first = [r for r in rows if "VA-0001" in r["rule_ids"]]
+    assert first and first[0]["n_rules"] == 4, [dict(r) for r in rows]
+
+
+case("the approvals table records what was let in, and no signature",
+     the_approvals_table_records_no_signature)
+
+
+def the_engine_has_no_verifier_and_no_grace():
+    import rules as _r
+    assert not hasattr(_r, "verify_signature"), "verify_signature is still in the engine"
+    assert not hasattr(R, "in_grace"), "in_grace() is still on the Registry"
+    assert not hasattr(R, "_require_signature"), "_require_signature is still on the Registry"
+    import inspect
+    init = list(inspect.signature(Registry.__init__).parameters)
+    assert "public_key" not in init and "grace_until" not in init, init
+
+
+case("no verifier, no grace window, no key on the Registry",
+     the_engine_has_no_verifier_and_no_grace)
 
 # =====================================================================
 head("derivatives: export and backup")
@@ -1523,8 +1501,8 @@ def status_counts_agree_with_the_lists():
         "SELECT COUNT(*) FROM rules WHERE project=? AND status='retired'",
         (NAME_FP,)).fetchone()[0] > 0
     assert s["rules"]["permanent"] == 1
-    assert s["approval"]["public_key_configured"] is True
-    assert s["approval"]["required"] is True
+    assert s["approval"]["batches_approved"] > 0
+    assert s["approval"]["provisional_days"] == 90
     assert s["registry_version"] == VERSION
     for consumer, n in s["by_consumer"].items():
         assert n == R.list_rules(FP, consumer)["count"], consumer
@@ -1555,7 +1533,7 @@ def reopen_finds_everything_where_it_was():
     versions = R.history(FP, "VA-0001")["count"]
     listed = [x["id"] for x in R.list_rules(FP, "tax")["rules"]]
     R.close()
-    r3 = Registry(DB, public_key=PUB)
+    r3 = Registry(DB)
     s = r3.status(FP)
     assert s["database"]["integrity"] == "ok" and s["database"]["journal_mode"] == "wal"
     assert r3.projects()["count"] == 5
@@ -1601,7 +1579,7 @@ END"""
 
 
 def an_old_database_gains_a_column_and_nothing_else():
-    o = Registry(OLD_DB, public_key=PUB)
+    o = Registry(OLD_DB)
     o.create_project("Ll11Mm22Nn33", "Legacy", [("architect", "chat")],
                      {"PE": "perimeter", "VA": "vault"})
     # Written the way the old engine wrote it: the ID chosen by the caller, the
@@ -1625,18 +1603,25 @@ def an_old_database_gains_a_column_and_nothing_else():
                             ).fetchone()[0]
     # Take the additions back off, so what is on disk is shaped like a v1.0.4
     # database and the reopen has something real to migrate: no legacy_id, no
-    # event, and the update trigger of that day, copying NEW.reason.
+    # event, the update trigger of that day copying NEW.reason — and the
+    # approvals table still carrying the signature columns of its day.
     o.cx.execute("DROP INDEX ux_rules_legacy")
     o.cx.execute("ALTER TABLE rules DROP COLUMN legacy_id")
     if "event" in {r[1] for r in o.cx.execute("PRAGMA table_info(rules)")}:
         o.cx.execute("DROP TRIGGER trg_rules_upd")
         o.cx.execute("ALTER TABLE rules DROP COLUMN event")
         o.cx.execute(_OLD_TRG_UPD)
+    o.cx.execute("ALTER TABLE approvals ADD COLUMN signature TEXT")
+    o.cx.execute("ALTER TABLE approvals ADD COLUMN signed INTEGER NOT NULL DEFAULT 1")
     o.close()
 
-    n = Registry(OLD_DB, public_key=PUB)
+    n = Registry(OLD_DB)
     assert n.repaired == [], f"an upgrade is not a repair: {n.repaired}"
-    assert n.migrated == ["rules.legacy_id", "rules.event", "trg_rules_upd"], n.migrated
+    assert n.migrated == ["rules.legacy_id", "rules.event", "trg_rules_upd",
+                          "approvals.signature dropped",
+                          "approvals.signed dropped"], n.migrated
+    acols = {r[1] for r in n.cx.execute("PRAGMA table_info(approvals)")}
+    assert "signature" not in acols and "signed" not in acols, sorted(acols)
     after = {r[0]: r[1] for r in n.cx.execute(
         "SELECT id, body FROM rules WHERE project='Legacy'")}
     assert after == before, "not one ID and not one body moved"
@@ -1656,7 +1641,7 @@ def an_old_database_gains_a_column_and_nothing_else():
     assert out["legacy_id"] == "VA-07"
     n.close()
 
-    again = Registry(OLD_DB, public_key=PUB)
+    again = Registry(OLD_DB)
     assert again.migrated == [], f"the column is added once: {again.migrated}"
     assert again.repaired == []
     again.close()
@@ -1671,7 +1656,7 @@ def the_old_identifier_is_a_mapping_and_not_a_door():
     second name for one thing, which is the ambiguity this project keeps out
     everywhere else. It is a note for the conversion pass, and when the pass is
     over it goes."""
-    n = Registry(OLD_DB, public_key=PUB)
+    n = Registry(OLD_DB)
     got = n.pending("Ll11Mm22Nn33")["waiting"]
     assert [x["legacy_id"] for x in got if x["id"] == "VA-0008"] == ["VA-07"]
     assert "legacy_id" not in inspect_get_params(n.get_rules)
@@ -1693,7 +1678,7 @@ head("the engine is used from a THREAD POOL, not from here")
 # with "SQLite objects created in a thread can only be used in that same
 # thread", and no test here could have seen it. Now one can.
 
-R = Registry(DB, public_key=PUB, provisional_days=90)    # the reopen test closed the last one
+R = Registry(DB, provisional_days=90)    # the reopen test closed the last one
 
 
 def a_worker_thread_can_use_the_engine():
@@ -1775,7 +1760,7 @@ def two_connections_asking_the_same_counter():
     'database is locked' that no busy timeout can help, and it would reach the
     chat as a fault rather than as a refusal."""
     import threading
-    engines = [Registry(DB, public_key=PUB, provisional_days=90) for _ in range(4)]
+    engines = [Registry(DB, provisional_days=90) for _ in range(4)]
     got: list[str] = []
     errors: list[Exception] = []
     lock = threading.Lock()
@@ -1860,13 +1845,13 @@ def reason_survives_every_event():
     rid = R.propose(C1, "VA", "R", "The immutable guinea pig", "Body.",
                     ["*"], WHY, "architect")["id"]
     b = R.batch(C1)
-    R.approve(C1, b["digest"], sign(b["digest"]))
+    R.approve(C1, b["digest"])
     assert _c1(rid)["reason"] == WHY, \
         f"approve rewrote reason to {_c1(rid)['reason']!r}"
-    R.renew(C1, [rid], sign(digest_of("renew", C1_NAME, [rid])))
+    R.renew(C1, [rid])
     assert _c1(rid)["reason"] == WHY, \
         f"renew rewrote reason to {_c1(rid)['reason']!r}"
-    R.promote(C1, [rid], sign(digest_of("promote", C1_NAME, [rid])))
+    R.promote(C1, [rid])
     assert _c1(rid)["reason"] == WHY, \
         f"promote rewrote reason to {_c1(rid)['reason']!r}"
     ver = len(_c1_versions(rid))
@@ -1899,7 +1884,7 @@ def the_events_land_in_their_own_column():
     rid3 = R.propose(C1, "PE", "R", "To be retired", "Body.", ["*"],
                      "born to die on the bench", "architect")["id"]
     b = R.batch(C1)
-    R.approve(C1, b["digest"], sign(b["digest"]))
+    R.approve(C1, b["digest"])
     R.retire(C1, rid3, "the bench is done with it")
     assert _c1(rid3)["reason"] == "born to die on the bench", \
         f"retire rewrote reason to {_c1(rid3)['reason']!r}"
@@ -1956,7 +1941,7 @@ def the_order_is_still_the_breadth():
     rid_narrow = R.propose(C1, "PE", "R", "For the architect alone", "Body.",
                            ["architect"], "narrow on purpose", "architect")["id"]
     b = R.batch(C1)
-    R.approve(C1, b["digest"], sign(b["digest"]))
+    R.approve(C1, b["digest"])
     ids = [d["id"] for d in R.list_rules(C1, "architect")["rules"]]
     assert ids.index("VA-0001") < ids.index(rid_narrow), \
         f"the widest rule no longer comes first: {ids}"
@@ -1989,31 +1974,36 @@ case("the maintenance reading carries the why: batch and export",
 C1M_DB = os.path.join(D, "c1-migration.db")
 
 def an_old_database_gains_the_event_column_and_the_new_trigger():
-    o = Registry(C1M_DB, public_key=PUB)
+    o = Registry(C1M_DB)
     o.create_project("Mm11Nn22Oo33", "Migration bench", [("architect", "chat")],
                      {"VA": "vault"})
     rid = o.propose("Mm11Nn22Oo33", "VA", "R", "Old-world rule", "Body.", ["*"],
                     "the original why", "architect")["id"]
     b = o.batch("Mm11Nn22Oo33")
-    o.approve("Mm11Nn22Oo33", b["digest"], sign(b["digest"]))
+    o.approve("Mm11Nn22Oo33", b["digest"])
     cols = {r[1] for r in o.cx.execute("PRAGMA table_info(rules)")}
     assert "event" in cols, \
         "the rules table has no `event` column: the events still live in `reason`"
     # Reshape the file the way v1.5.0 left it: no `event` column, the update
-    # trigger copying NEW.reason into the history, and `reason` already
-    # overwritten by the last event. The dirt is PART of the shape.
+    # trigger copying NEW.reason into the history, `reason` already
+    # overwritten by the last event, and the signature columns still on
+    # approvals. The dirt is PART of the shape.
     o.cx.execute("DROP TRIGGER trg_rules_upd")
     o.cx.execute("UPDATE rules SET reason='approved' "
                  "WHERE project='Migration bench'")
     o.cx.execute("ALTER TABLE rules DROP COLUMN event")
     o.cx.execute(_OLD_TRG_UPD)
+    o.cx.execute("ALTER TABLE approvals ADD COLUMN signature TEXT")
+    o.cx.execute("ALTER TABLE approvals ADD COLUMN signed INTEGER NOT NULL DEFAULT 1")
     versions = o.cx.execute("SELECT COUNT(*) FROM rule_versions "
                             "WHERE project='Migration bench'").fetchone()[0]
     o.close()
 
-    n = Registry(C1M_DB, public_key=PUB)
+    n = Registry(C1M_DB)
     assert n.repaired == [], f"an upgrade is not a repair: {n.repaired}"
-    assert n.migrated == ["rules.event", "trg_rules_upd"], n.migrated
+    assert n.migrated == ["rules.event", "trg_rules_upd",
+                          "approvals.signature dropped",
+                          "approvals.signed dropped"], n.migrated
     # NOTHING was converted: the reason v1.5.0 dirtied stays dirty. It is
     # gym data and it dies with the reset — a migration that rewrote it would
     # be inventing a why nobody wrote.
@@ -2026,8 +2016,7 @@ def an_old_database_gains_the_event_column_and_the_new_trigger():
         "the migration invented a version"
     # The NEW trigger must be in place, not the old one it replaced: the next
     # event has to land in the history as the event, not as the frozen reason.
-    n.renew("Mm11Nn22Oo33", [rid],
-            sign(digest_of("renew", "Migration bench", [rid])))
+    n.renew("Mm11Nn22Oo33", [rid])
     r = n.cx.execute("SELECT reason, event FROM rules "
                      "WHERE project='Migration bench' AND id=?", (rid,)).fetchone()
     assert r["reason"] == "approved" and r["event"] == "renewed", dict(r)
@@ -2038,7 +2027,7 @@ def an_old_database_gains_the_event_column_and_the_new_trigger():
         f"the update trigger still copies the frozen reason: {last['reason']!r}"
     n.close()
 
-    again = Registry(C1M_DB, public_key=PUB)
+    again = Registry(C1M_DB)
     assert again.migrated == [], f"the migration ran twice: {again.migrated}"
     assert again.repaired == []
     again.close()
