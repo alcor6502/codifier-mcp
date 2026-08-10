@@ -61,9 +61,18 @@ def c_db():
         rules = r.cx.execute("SELECT COUNT(*) FROM rules").fetchone()[0]
         projects = r.cx.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
         repaired = r.repaired
+        migrated = r.migrated
     finally:
         r.close()
     tail = f" — REBUILT: {', '.join(repaired)}" if repaired else ""
+    # THIS open is the one that migrates: the preflight touches the database
+    # before the server does, so by the time the server opens it there is
+    # nothing left to declare — at v1.6.0 the "schema migrated at open" line
+    # never appeared, because its only possible reader ran second. Whoever
+    # performs a one-way change on a database in service is the one who says
+    # so, and here that is this check.
+    if migrated:
+        tail += f" — migrated: {', '.join(migrated)}"
     # Not a fault (the schema repaired itself) but it must not be silent:
     # somebody had removed those objects from the database.
     return f"{DB}: whole, WAL, {projects} projects, {rules} rules{tail}"

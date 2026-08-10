@@ -1588,5 +1588,34 @@ ok(GUIDE_SRC.count("legend of the domains present") == 1,
    "the manual pins the legend, exactly once",
    GUIDE_SRC.count("legend of the domains present"))
 
+print("\n== the preflight declares the migration it performs ==")
+
+# The preflight opens Registry(DB) BEFORE the server, so the migration happens
+# in there — and at v1.6.0 it happened in silence: the server's "schema
+# migrated at open" line never appeared, because by the time the server opened
+# the file there was nothing left to migrate. A declaration whose only
+# possible reader is switched off is not a declaration. So the preflight says
+# it itself, and this proves it on a database that really migrates.
+import subprocess                                               # noqa: E402
+import tempfile                                                 # noqa: E402
+
+_md = tempfile.mkdtemp(prefix="preflight-migrate-")
+_mdb = os.path.join(_md, "rules.db")
+_r0 = _rules.Registry(_mdb)
+_r0.cx.execute("ALTER TABLE approvals ADD COLUMN signature TEXT")
+_r0.cx.execute("ALTER TABLE approvals ADD COLUMN signed INTEGER NOT NULL DEFAULT 1")
+_r0.close()
+_env = dict(os.environ, DB_PATH=_mdb)
+_out = subprocess.run(
+    [sys.executable, "-c",
+     "import preflight; preflight.c_db(); "
+     "from mcp_common_engine import RESULTS; "
+     "print(RESULTS[-1])"],
+    capture_output=True, text=True, env=_env, cwd=HERE, timeout=60)
+ok(_out.returncode == 0, "the db check runs against a database that migrates",
+   (_out.stderr or _out.stdout)[:120])
+ok("migrated: approvals.signature dropped" in _out.stdout,
+   "and its line DECLARES what the open migrated", _out.stdout[:200])
+
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
