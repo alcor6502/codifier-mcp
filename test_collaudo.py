@@ -1557,6 +1557,16 @@ def a_v16_database_loses_the_relic_columns_and_nothing_else():
                  "ON rules(project, legacy_id) WHERE legacy_id IS NOT NULL")
     o.cx.execute("ALTER TABLE approvals ADD COLUMN signature TEXT")
     o.cx.execute("ALTER TABLE approvals ADD COLUMN signed INTEGER NOT NULL DEFAULT 1")
+    # And neither the brief nor its versions table: a real v1.6.0 had no
+    # trace of them. This is what the shape was missing at the 2.0.0 install:
+    # with consumer_versions still standing the reopen had nothing to
+    # rebuild, and `repaired == []` could never catch the autoindex that
+    # rides in WITH the table — the false REBUILT the log showed on
+    # 2026-08-10, sixth of its line, found at the Apply and not by a suite.
+    o.cx.execute("DROP TRIGGER trg_consumers_ins")
+    o.cx.execute("DROP TRIGGER trg_consumers_upd")
+    o.cx.execute("DROP TABLE consumer_versions")
+    o.cx.execute("ALTER TABLE consumers DROP COLUMN brief")
     # Photographed AFTER the reshape: the reshape itself writes history (the
     # UPDATE above goes through the trigger, as it must), the migration none.
     before = {r[0]: r[1] for r in o.cx.execute(
@@ -1567,7 +1577,8 @@ def a_v16_database_loses_the_relic_columns_and_nothing_else():
 
     n = Registry(OLD_DB)
     assert n.repaired == [], f"an upgrade is not a repair: {n.repaired}"
-    assert n.migrated == ["rules.legacy_id dropped",
+    assert n.migrated == ["consumers.brief",
+                          "rules.legacy_id dropped",
                           "approvals.signature dropped",
                           "approvals.signed dropped"], n.migrated
     after = {r[0]: r[1] for r in n.cx.execute(
@@ -1931,6 +1942,16 @@ def an_old_database_gains_the_event_column_and_the_new_trigger():
     o.cx.execute("ALTER TABLE rules DROP COLUMN supersedes")
     o.cx.execute("ALTER TABLE approvals ADD COLUMN signature TEXT")
     o.cx.execute("ALTER TABLE approvals ADD COLUMN signed INTEGER NOT NULL DEFAULT 1")
+    # And neither the brief nor its versions table: a real v1.6.0 had no
+    # trace of them. This is what the shape was missing at the 2.0.0 install:
+    # with consumer_versions still standing the reopen had nothing to
+    # rebuild, and `repaired == []` could never catch the autoindex that
+    # rides in WITH the table — the false REBUILT the log showed on
+    # 2026-08-10, sixth of its line, found at the Apply and not by a suite.
+    o.cx.execute("DROP TRIGGER trg_consumers_ins")
+    o.cx.execute("DROP TRIGGER trg_consumers_upd")
+    o.cx.execute("DROP TABLE consumer_versions")
+    o.cx.execute("ALTER TABLE consumers DROP COLUMN brief")
     versions = o.cx.execute("SELECT COUNT(*) FROM rule_versions "
                             "WHERE project='Migration bench'").fetchone()[0]
     o.close()
@@ -1940,6 +1961,7 @@ def an_old_database_gains_the_event_column_and_the_new_trigger():
         f"an upgrade is not a repair — the supersedes index rode in with its " \
         f"column and must not be reported: {n.repaired}"
     assert n.migrated == ["rules.event", "rules.supersedes",
+                          "consumers.brief",
                           "rules.legacy_id dropped",
                           "trg_rules_upd",
                           "approvals.signature dropped",

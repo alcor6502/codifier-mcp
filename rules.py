@@ -655,6 +655,16 @@ class Registry:
         if "consumers.brief" in self.migrated:
             _upgrade |= {"consumer_versions", "trg_consumers_ins",
                          "trg_consumers_upd"}
+        # A table SQLite creates brings its PRIMARY KEY autoindex along —
+        # sqlite_autoindex_<table>_N — a name nobody wrote in the schema, so
+        # a subtraction by written names misses it. At the 2.0.0 install this
+        # printed a false `REBUILT: sqlite_autoindex_consumer_versions_1` at
+        # the one boot that migrated: exactly the wolf this subtraction
+        # exists not to cry. Whatever table rides in with an upgrade, its
+        # autoindexes ride with it.
+        _upgrade |= {n for n in (after - before)
+                     if any(n.startswith(f"sqlite_autoindex_{t}_")
+                            for t in _upgrade)}
         self.repaired = [] if fresh else sorted((after - before) - _upgrade)
         self._fix_modes()
 
