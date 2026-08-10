@@ -231,9 +231,12 @@ def rules_list(project: str, consumer: str) -> dict:
     nothing else to read.
 
     The order is the BREADTH of the scope a rule reaches you through: what comes
-    first binds everyone, what comes last is yours alone. Each rule carries
-    `via` (which scope it arrives through) and `breadth` (how many consumers
-    that scope holds).
+    first binds everyone, what comes last is yours alone. Each rule arrives as
+    its ID and its BODY, citations expanded — and nothing else. That is the
+    CONSUMER reading: the title, the dates, the perimeter and the why are
+    administration, and they live in the maintenance reading (rules_batch,
+    rules_export) instead of costing context in every chat that works under
+    the rules.
 
     Consumers are not fixed: every project declares its own, and a skill is a
     consumer exactly like a chat. The verdict also says HOW MANY rules stayed
@@ -253,7 +256,10 @@ def rules_get(project: str, ids: list[str], consumer: str) -> dict:
     padded — VA-02 is VA-0002).
 
     Three DIFFERENT answers, kept apart, and the difference is the point:
-      found          the rules, whole
+      found          the rule's ID and its expanded body. One that is NOT in
+                     force additionally says so — retired, denied, expired —
+                     because a body handed back as if it bound you would be a
+                     lie by omission
       not_yours      they exist, but outside your perimeter — with who holds them
       never_defined  those IDs were never defined here: a BROKEN CITATION to be
                      reported, or you are using another project's code
@@ -271,7 +277,8 @@ def rules_get(project: str, ids: list[str], consumer: str) -> dict:
 def rules_search(project: str, text: str, consumer: str) -> dict:
     """Search a string in the title and body of the rules in force within your
     perimeter. It also says how many matches fell outside it, so you know they
-    exist without seeing them."""
+    exist without seeing them. Hits arrive as ID and expanded body — the
+    consumer reading, same as rules_list."""
     return registry.search(project, text, consumer)
 
 
@@ -351,7 +358,10 @@ def rules_batch(project: str, code: str) -> dict:
     Sign the digest string on your own machine and pass the base64 signature to
     rules_approve. The private key never enters this conversation, and the
     registry holds only the public half. If a proposal arrives in between, the
-    digest changes and the old signature is refused — that is on purpose."""
+    digest changes and the old signature is refused — that is on purpose.
+
+    Each proposal carries its `reason`: the why you are letting in is on the
+    table where the decision happens, not a history call away."""
     _admin(code)
     return registry.batch(project)
 
@@ -440,7 +450,11 @@ def rules_fix(project: str, id: str, expected_version: int, reason: str, code: s
     happens to be unchanged: a body passed back identical is still checked
     first. You may paste the body back exactly as you read it — the title
     inside the brackets is a gloss generated on reading, and it is dropped
-    here."""
+    here.
+
+    `reason` here is the why of the FIX: it lands in the event column and in
+    the history. The rule's own `reason` — the why it was filed — is never
+    rewritten by any event."""
     _admin(code)
     return registry.amend(project, id, expected_version, reason,
                           title or None, body or None, type or None, changelog or None)
@@ -561,6 +575,9 @@ def rules_export(project: str, code: str, consumer: str = "", expand: bool = Fal
       with `consumer`     only that perimeter, rules in force, widest first
       without `consumer`  the whole project, retired rules included — the
                           maintenance document, and the copy that goes into git
+
+    Every rule carries its `reason`, and the whole-project export the last
+    `event` too: this is the maintenance reading, where the why is on the page.
 
     `expand` decides how citations read: compact `(VA-0002)` by default, or
     carrying the current title of what they point at. This is the only reader

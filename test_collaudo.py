@@ -456,8 +456,11 @@ head("the order IS the breadth")
 L = R.list_rules(FP, "tax")
 ok([x["id"] for x in L["rules"]] == ["VA-0001", "PE-0001", "FI-0001"],
    "order: _ALL_, then the group, then the singleton", [x["id"] for x in L["rules"]])
-ok(L["rules"][0]["via"] == [ALL] and L["rules"][0]["breadth"] == 6,
-   "list_rules reports via and breadth")
+ok(set(L["rules"][0]) == {"id", "body"},
+   "the consumer reading carries no via and no breadth", sorted(L["rules"][0]))
+FULL = R._rules_for(NAME_FP, "tax")
+ok(FULL["rules"][0]["via"] == [ALL] and FULL["rules"][0]["breadth"] == 6,
+   "the maintenance reading still reports via and breadth")
 ok(L["outside_your_scope"] == 1, "it declares how many stay outside", L["outside_your_scope"])
 ok(R.list_rules(FP, "market-news")["count"] == 1,
    "market-news only sees the rule that binds everyone")
@@ -489,10 +492,12 @@ ok(R._members(NAME_FP, "deliberativi") == ["advisory", "alt-funds", "architect",
 
 
 def via_differs_by_consumer():
-    for r in R.list_rules(FP, "market-news")["rules"]:
+    # `via` moved to the maintenance reading: the engine under it is shared
+    # with list_rules, so what is measured here is the same reaching logic.
+    for r in R._rules_for(NAME_FP, "market-news")["rules"]:
         if r["id"] == "PE-0001":
             assert r["via"] == ["market-news"], r["via"]
-    for r in R.list_rules(FP, "architect")["rules"]:
+    for r in R._rules_for(NAME_FP, "architect")["rules"]:
         if r["id"] == "PE-0001":
             assert r["via"] == ["deliberativi"], r["via"]
 
@@ -503,7 +508,7 @@ case("`via` says where the rule reaches you FROM", via_differs_by_consumer)
 def widest_scope_decides_the_position():
     ids = [x["id"] for x in R.list_rules(FP, "architect")["rules"]]
     assert ids.index("VA-0001") < ids.index("PE-0001"), ids
-    r = [x for x in R.list_rules(FP, "architect")["rules"] if x["id"] == "PE-0001"][0]
+    r = [x for x in R._rules_for(NAME_FP, "architect")["rules"] if x["id"] == "PE-0001"][0]
     assert r["breadth"] == 4
 
 
@@ -885,10 +890,12 @@ case("a dangling pointer is MARKED on reading, not raised",
 
 
 def amend_rewrites_the_refs():
-    v = R.get_rules(FP, "VA-0001", "tax")["found"][0]["version"]
+    # The version number is administration now: a consumer reading has no
+    # `version` field, so the maintainer reads it where maintenance reads.
+    v = R._version(NAME_FP, "VA-0001")
     R.amend(FP, "VA-0001", v, reason="dropped the broken pointer",
             body="SOURCE data is re-read right before writing the derivative.")
-    assert R.get_rules(FP, "VA-0001", "tax")["found"][0]["version"] == v + 1
+    assert R._version(NAME_FP, "VA-0001") == v + 1
     broken = R.check(FP)["broken_pointers"]
     assert {"from": "VA-0001", "cites": "ST-0007"} not in broken
     assert {"from": "FI-0001", "cites": "VE-0090"} in broken, "the others stay"
@@ -1576,6 +1583,23 @@ head("the upgrade: a database written before the counter existed")
 OLD_DB = os.path.join(D, "legacy.db")
 
 
+_OLD_TRG_UPD = """
+CREATE TRIGGER trg_rules_upd AFTER UPDATE ON rules BEGIN
+  INSERT INTO rule_versions (project, rule_id, version, type, title, body,
+    status, permanence, expires_at, superseded_by, changelog, scopes, consumers,
+    ts, action, reason)
+  VALUES (NEW.project, NEW.id,
+          (SELECT IFNULL(MAX(version),0)+1 FROM rule_versions
+            WHERE project = NEW.project AND rule_id = NEW.id),
+          NEW.type, NEW.title, NEW.body, NEW.status, NEW.permanence,
+          NEW.expires_at, NEW.superseded_by, NEW.changelog,
+          (SELECT IFNULL(GROUP_CONCAT(scope, ', '), '') FROM
+            (SELECT scope FROM rule_scopes
+              WHERE project = NEW.project AND rule_id = NEW.id ORDER BY scope)),
+          '', NEW.updated_at, 'amended', NEW.reason);
+END"""
+
+
 def an_old_database_gains_a_column_and_nothing_else():
     o = Registry(OLD_DB, public_key=PUB)
     o.create_project("Ll11Mm22Nn33", "Legacy", [("architect", "chat")],
@@ -1599,15 +1623,20 @@ def an_old_database_gains_a_column_and_nothing_else():
         "SELECT id, body FROM rules WHERE project='Legacy'")}
     versions = o.cx.execute("SELECT COUNT(*) FROM rule_versions WHERE project='Legacy'"
                             ).fetchone()[0]
-    # Take the column back off, so what is on disk is shaped like a v1.0.4
-    # database and the reopen has something real to migrate.
+    # Take the additions back off, so what is on disk is shaped like a v1.0.4
+    # database and the reopen has something real to migrate: no legacy_id, no
+    # event, and the update trigger of that day, copying NEW.reason.
     o.cx.execute("DROP INDEX ux_rules_legacy")
     o.cx.execute("ALTER TABLE rules DROP COLUMN legacy_id")
+    if "event" in {r[1] for r in o.cx.execute("PRAGMA table_info(rules)")}:
+        o.cx.execute("DROP TRIGGER trg_rules_upd")
+        o.cx.execute("ALTER TABLE rules DROP COLUMN event")
+        o.cx.execute(_OLD_TRG_UPD)
     o.close()
 
     n = Registry(OLD_DB, public_key=PUB)
     assert n.repaired == [], f"an upgrade is not a repair: {n.repaired}"
-    assert n.migrated == ["rules.legacy_id"], n.migrated
+    assert n.migrated == ["rules.legacy_id", "rules.event", "trg_rules_upd"], n.migrated
     after = {r[0]: r[1] for r in n.cx.execute(
         "SELECT id, body FROM rules WHERE project='Legacy'")}
     assert after == before, "not one ID and not one body moved"
@@ -1794,6 +1823,230 @@ def the_lock_is_reentrant():
 
 
 case("a public method calling another does not deadlock", the_lock_is_reentrant)
+
+# =====================================================================
+head("the reason is immutable, and the registry has TWO readings")
+# =====================================================================
+
+# The defect measured on 2026-08-10: the `reason` column kept the why of the
+# last EVENT, not the why of the rule — approve rewrote it with 'approved',
+# renew with 'renewed' — and no reading tool returned it at all, so whoever
+# signed a batch was approving reasons they could not see. From here on the
+# column keeps what its name promises, the events land in a column of their
+# own, and the registry has two readings: the consumer's — the ID and the
+# body, and nothing else — and the maintainer's, everything, `reason` first.
+
+C1 = "Cc11Rr22Ss33"
+C1_NAME = "C1 Reason"
+WHY = "because the aggregator misreports the closing price"
+
+case("create the C1 bench project", lambda: R.create_project(
+    C1, C1_NAME, [("architect", "chat"), ("advisory", "chat")],
+    {"VA": "vault", "PE": "perimeter"}, "the immutability bench"))
+
+
+def _c1(rid):
+    return R.cx.execute("SELECT * FROM rules WHERE project=? AND id=?",
+                        (C1_NAME, rid)).fetchone()
+
+
+def _c1_versions(rid):
+    return R.cx.execute("SELECT version, action, reason FROM rule_versions "
+                        "WHERE project=? AND rule_id=? ORDER BY version",
+                        (C1_NAME, rid)).fetchall()
+
+
+def reason_survives_every_event():
+    rid = R.propose(C1, "VA", "R", "The immutable guinea pig", "Body.",
+                    ["*"], WHY, "architect")["id"]
+    b = R.batch(C1)
+    R.approve(C1, b["digest"], sign(b["digest"]))
+    assert _c1(rid)["reason"] == WHY, \
+        f"approve rewrote reason to {_c1(rid)['reason']!r}"
+    R.renew(C1, [rid], sign(digest_of("renew", C1_NAME, [rid])))
+    assert _c1(rid)["reason"] == WHY, \
+        f"renew rewrote reason to {_c1(rid)['reason']!r}"
+    R.promote(C1, [rid], sign(digest_of("promote", C1_NAME, [rid])))
+    assert _c1(rid)["reason"] == WHY, \
+        f"promote rewrote reason to {_c1(rid)['reason']!r}"
+    ver = len(_c1_versions(rid))
+    R.amend(C1, rid, ver, "renamed on the bench", title="The guinea pig, renamed")
+    assert _c1(rid)["reason"] == WHY, \
+        f"amend rewrote reason to {_c1(rid)['reason']!r}"
+
+
+case("no event rewrites the reason: approve, renew, promote, amend",
+     reason_survives_every_event)
+
+
+def the_events_land_in_their_own_column():
+    cols = {r[1] for r in R.cx.execute("PRAGMA table_info(rules)")}
+    assert "event" in cols, \
+        "the rules table has no `event` column: the events still live in `reason`"
+    rid = "VA-0001"
+    assert _c1(rid)["event"] == "renamed on the bench", \
+        f"after the amend the event column says {_c1(rid)['event']!r}"
+    # A denial: the reason stays the author's, the event says what happened,
+    # and denied_reason keeps carrying the maintainer's why as before.
+    rid2 = R.propose(C1, "VA", "R", "To be denied", "Body.", ["*"],
+                     "a why that must survive the denial", "advisory")["id"]
+    R.deny(C1, [rid2], "bench cleanup")
+    assert _c1(rid2)["reason"] == "a why that must survive the denial", \
+        f"deny rewrote reason to {_c1(rid2)['reason']!r}"
+    assert _c1(rid2)["event"] == "denied", _c1(rid2)["event"]
+    assert _c1(rid2)["denied_reason"] == "bench cleanup"
+    # A retirement: same shape, the why of the event is the event.
+    rid3 = R.propose(C1, "PE", "R", "To be retired", "Body.", ["*"],
+                     "born to die on the bench", "architect")["id"]
+    b = R.batch(C1)
+    R.approve(C1, b["digest"], sign(b["digest"]))
+    R.retire(C1, rid3, "the bench is done with it")
+    assert _c1(rid3)["reason"] == "born to die on the bench", \
+        f"retire rewrote reason to {_c1(rid3)['reason']!r}"
+    assert _c1(rid3)["event"] == "the bench is done with it"
+
+
+case("the events land in `event`, and denied_reason still works",
+     the_events_land_in_their_own_column)
+
+
+def history_keeps_the_why_at_v1_and_the_event_after():
+    rows = _c1_versions("VA-0001")
+    assert rows[0]["reason"] == WHY, \
+        f"version 1 lost the propose reason: {rows[0]['reason']!r}"
+    by_action = {r["action"]: r["reason"] for r in rows}
+    assert by_action.get("amended") in ("approved", "renewed",
+                                        "promoted to permanent",
+                                        "renamed on the bench"), \
+        f"the update trigger no longer records the event: {dict(by_action)}"
+    assert rows[-1]["reason"] == "renamed on the bench", \
+        f"the last version's reason is {rows[-1]['reason']!r}, not the last event"
+
+
+case("history: version 1 keeps the why, the later versions keep the events",
+     history_keeps_the_why_at_v1_and_the_event_after)
+
+
+def the_consumer_reading_is_the_id_and_the_body():
+    lst = R.list_rules(C1, "advisory")["rules"]
+    assert lst, "no rule in force reached advisory"
+    for d in lst:
+        assert set(d) == {"id", "body"}, \
+            f"rules_list leaks {sorted(set(d) - {'id', 'body'})} to a consumer"
+    got = R.get_rules(C1, [lst[0]["id"]], "advisory")["found"]
+    assert got, "rules_get found nothing"
+    for d in got:
+        assert set(d) == {"id", "body"}, \
+            f"rules_get leaks {sorted(set(d) - {'id', 'body'})} to a consumer"
+    hits = R.search(C1, "guinea", "advisory")["hits"]
+    assert hits, "rules_search found nothing"
+    for d in hits:
+        assert set(d) == {"id", "body"}, \
+            f"rules_search leaks {sorted(set(d) - {'id', 'body'})} to a consumer"
+    assert "(" in got[0]["body"] or got[0]["body"] == "Body.", got[0]["body"]
+
+
+case("the consumer reading is the ID and the body, and nothing else",
+     the_consumer_reading_is_the_id_and_the_body)
+
+
+def the_order_is_still_the_breadth():
+    # One rule through _ALL_ (breadth 2 here), one through a singleton: the
+    # widest must come first even though the fields that said so are gone.
+    rid_narrow = R.propose(C1, "PE", "R", "For the architect alone", "Body.",
+                           ["architect"], "narrow on purpose", "architect")["id"]
+    b = R.batch(C1)
+    R.approve(C1, b["digest"], sign(b["digest"]))
+    ids = [d["id"] for d in R.list_rules(C1, "architect")["rules"]]
+    assert ids.index("VA-0001") < ids.index(rid_narrow), \
+        f"the widest rule no longer comes first: {ids}"
+
+
+case("the order is still the breadth, with the fields gone",
+     the_order_is_still_the_breadth)
+
+
+def the_maintenance_reading_carries_the_why():
+    rid = R.propose(C1, "PE", "R", "Waiting for the batch", "Body.", ["*"],
+                    "so the batch shows the why", "architect")["id"]
+    b = R.batch(C1)
+    mine = [p for p in b["proposals"] if p["id"] == rid]
+    assert mine, "the proposal is not in the batch"
+    assert mine[0].get("reason") == "so the batch shows the why", \
+        "rules_batch does not show the reason being approved"
+    R.deny(C1, [rid], "bench cleanup")
+    md = R.export(C1)["markdown"]
+    assert WHY in md, "rules_export does not carry the reason"
+    per_consumer = R.export(C1, "architect")["markdown"]
+    assert WHY in per_consumer, \
+        "the per-consumer export does not carry the reason"
+
+
+case("the maintenance reading carries the why: batch and export",
+     the_maintenance_reading_carries_the_why)
+
+
+C1M_DB = os.path.join(D, "c1-migration.db")
+
+def an_old_database_gains_the_event_column_and_the_new_trigger():
+    o = Registry(C1M_DB, public_key=PUB)
+    o.create_project("Mm11Nn22Oo33", "Migration bench", [("architect", "chat")],
+                     {"VA": "vault"})
+    rid = o.propose("Mm11Nn22Oo33", "VA", "R", "Old-world rule", "Body.", ["*"],
+                    "the original why", "architect")["id"]
+    b = o.batch("Mm11Nn22Oo33")
+    o.approve("Mm11Nn22Oo33", b["digest"], sign(b["digest"]))
+    cols = {r[1] for r in o.cx.execute("PRAGMA table_info(rules)")}
+    assert "event" in cols, \
+        "the rules table has no `event` column: the events still live in `reason`"
+    # Reshape the file the way v1.5.0 left it: no `event` column, the update
+    # trigger copying NEW.reason into the history, and `reason` already
+    # overwritten by the last event. The dirt is PART of the shape.
+    o.cx.execute("DROP TRIGGER trg_rules_upd")
+    o.cx.execute("UPDATE rules SET reason='approved' "
+                 "WHERE project='Migration bench'")
+    o.cx.execute("ALTER TABLE rules DROP COLUMN event")
+    o.cx.execute(_OLD_TRG_UPD)
+    versions = o.cx.execute("SELECT COUNT(*) FROM rule_versions "
+                            "WHERE project='Migration bench'").fetchone()[0]
+    o.close()
+
+    n = Registry(C1M_DB, public_key=PUB)
+    assert n.repaired == [], f"an upgrade is not a repair: {n.repaired}"
+    assert n.migrated == ["rules.event", "trg_rules_upd"], n.migrated
+    # NOTHING was converted: the reason v1.5.0 dirtied stays dirty. It is
+    # gym data and it dies with the reset — a migration that rewrote it would
+    # be inventing a why nobody wrote.
+    r = n.cx.execute("SELECT reason, event FROM rules "
+                     "WHERE project='Migration bench' AND id=?", (rid,)).fetchone()
+    assert r["reason"] == "approved", f"the migration touched reason: {r['reason']!r}"
+    assert r["event"] is None, f"the migration invented an event: {r['event']!r}"
+    assert n.cx.execute("SELECT COUNT(*) FROM rule_versions "
+                        "WHERE project='Migration bench'").fetchone()[0] == versions, \
+        "the migration invented a version"
+    # The NEW trigger must be in place, not the old one it replaced: the next
+    # event has to land in the history as the event, not as the frozen reason.
+    n.renew("Mm11Nn22Oo33", [rid],
+            sign(digest_of("renew", "Migration bench", [rid])))
+    r = n.cx.execute("SELECT reason, event FROM rules "
+                     "WHERE project='Migration bench' AND id=?", (rid,)).fetchone()
+    assert r["reason"] == "approved" and r["event"] == "renewed", dict(r)
+    last = n.cx.execute("SELECT reason FROM rule_versions "
+                        "WHERE project='Migration bench' AND rule_id=? "
+                        "ORDER BY version DESC LIMIT 1", (rid,)).fetchone()
+    assert last["reason"] == "renewed", \
+        f"the update trigger still copies the frozen reason: {last['reason']!r}"
+    n.close()
+
+    again = Registry(C1M_DB, public_key=PUB)
+    assert again.migrated == [], f"the migration ran twice: {again.migrated}"
+    assert again.repaired == []
+    again.close()
+
+
+case("an old database gains the event column and the rebuilt trigger, "
+     "and nothing else moves",
+     an_old_database_gains_the_event_column_and_the_new_trigger)
 
 print(f"\n{OK} passed, {FAIL} failed")
 if FAILURES:

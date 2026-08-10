@@ -238,17 +238,25 @@ If the answer needs a *new* reason, it is a new rule: file it and retire the old
 one pointing at the successor. If the answer is "I would not bother", let it
 expire. Doing nothing is a decision here and it is the cheap one, on purpose.
 
-### Where to find the reason, because it is not where you expect
+### Where to find the reason
 
 `reason` is mandatory on `rules_propose`, and it is the piece the whole scheme
 rests on: **without the why, a rule cannot be defended, and at the first
 opportunity it is reopened.**
 
-But the `reason` **column** does not keep it. Approval overwrites it with
-`approved`, renewal with `renewed`, promotion with `promoted to permanent`, and
-no reading tool returns the field at all. The reason a rule was filed for
-survives in **version 1 of its history**: `rules_history` on that ID, first
-entry. Read it before deciding to renew — the alternative is deciding on the
+`reason` is immutable: written at the proposal, and no event rewrites it.
+What happens to a rule afterwards — approved, denied, renewed, promoted, the
+why of a fix or of a retirement — lands in a column of its own, `event`, and
+in the history. So the why is readable exactly where the deciding happens:
+**`rules_batch` carries it on every proposal**, which is what makes a
+signature worth signing, and **`rules_export` carries it on every rule**,
+which is what a renewal pass reads. Version 1 of `rules_history` keeps it
+too, as it always did. One caveat on a database migrated from before this:
+rows whose `reason` an event had already overwritten stay overwritten — the
+migration converts nothing, and for those rows version 1 of the history is
+still where the truth survives.
+
+Read the why before deciding to renew — the alternative is deciding on the
 title, which is how a corpus keeps everything.
 
 > **Could somebody who was not in the room use this reason to decide whether to

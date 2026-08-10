@@ -60,7 +60,7 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 
 TYPES = ("R", "M", "F")                 # R binding · M method · F technical fact
 ALL = "_ALL_"                           # reaches every consumer, present and future
@@ -399,6 +399,11 @@ CREATE TABLE IF NOT EXISTS rules (
   changelog     TEXT,
   source        TEXT,                   -- where it came from: the renewal criterion
   reason        TEXT NOT NULL DEFAULT 'created',
+                                        -- the why of the RULE: written at the
+                                        -- proposal, and no event rewrites it
+  event         TEXT,                   -- the last EVENT and its why: approved,
+                                        -- denied, renewed... written by the
+                                        -- lifecycle, never at the proposal
   proposed_by   TEXT,
   legacy_id     TEXT,                   -- the old markdown identifier. READ ONLY:
                                         -- never a second way to address a rule
@@ -492,7 +497,7 @@ CREATE TRIGGER IF NOT EXISTS trg_rules_upd AFTER UPDATE ON rules BEGIN
           NEW.type, NEW.title, NEW.body, NEW.status, NEW.permanence, NEW.expires_at,
           NEW.superseded_by, NEW.changelog,
           {_f(_SCOPES_OF, 'NEW')}, {_f(_CONSUMERS_OF, 'NEW')},
-          NEW.updated_at, 'amended', NEW.reason);
+          NEW.updated_at, 'amended', NEW.event);
 END;
 
 -- Safety net: if someone deletes by hand, the trace stays.
@@ -672,8 +677,8 @@ class Registry:
     _MIGRATION_OBJECTS = ("ux_rules_legacy",)
 
     def _migrate(self) -> None:
-        """The ONE thing that has to change on an existing database: the new
-        column. Nothing else.
+        """What has to change on an existing database: the new columns, and
+        the one trigger whose subject moved with them. Nothing else.
 
         `CREATE TABLE IF NOT EXISTS` is a no-op on a table that is already
         there, so a new column never appears on a database in service. This runs
@@ -704,7 +709,7 @@ class Registry:
         if "rules" not in have:
             return
         cols = {r[1] for r in self.cx.execute("PRAGMA table_info(rules)")}
-        for name, decl in (("legacy_id", "TEXT"),):
+        for name, decl in (("legacy_id", "TEXT"), ("event", "TEXT")):
             if name not in cols:
                 try:
                     self.cx.execute(f"ALTER TABLE rules ADD COLUMN {name} {decl}")
@@ -715,6 +720,16 @@ class Registry:
                         raise
                 else:
                     self.migrated.append(f"rules.{name}")
+        if "rules.event" in self.migrated:
+            # The history trigger changed subject with the column: it used to
+            # copy NEW.reason into the version row, and from here on reason
+            # never moves, so it copies NEW.event. CREATE TRIGGER IF NOT
+            # EXISTS never replaces a body — the old trigger must go, and the
+            # executescript right after this puts the new one in its place.
+            # Declared, because a trigger swap on a database in service
+            # happens once.
+            self.cx.execute("DROP TRIGGER IF EXISTS trg_rules_upd")
+            self.migrated.append("trg_rules_upd")
 
     def _fix_modes(self) -> None:
         """0644 is DELIBERATE: whoever mounts the share reads and does not touch."""
@@ -1009,10 +1024,13 @@ class Registry:
                             "WHERE project=? AND rule_id=?", (p, rid)).fetchone()
         return r[0]
 
-    def _dict(self, row, p: str, expand: bool = True) -> dict:
-        """The shape a rule takes on the way out. `expand` is TRUE by default
-        because a chat is never offered a choice it can get wrong: what reaches
-        a consumer always carries the gloss."""
+    def _dict(self, row, p: str, expand: bool = True, why: bool = False) -> dict:
+        """The MAINTENANCE shape of a rule — the consumer reading is not built
+        here: list_rules, get_rules and search strip their answers down to the
+        ID and the body themselves. `expand` is TRUE by default because a chat
+        is never offered a choice it can get wrong: what reaches a consumer
+        always carries the gloss. `why` adds `reason` and the last `event`: it
+        is on only where a person decides — the batch and the export."""
         body = row["body"]
         d = {"id": row["id"], "type": row["type"], "title": row["title"],
              "body": self._expand(p, body) if expand else body,
@@ -1026,6 +1044,10 @@ class Registry:
             d["denied_reason"] = row["denied_reason"]
         if row["legacy_id"]:
             d["legacy_id"] = row["legacy_id"]
+        if why:
+            d["reason"] = row["reason"]
+            if row["event"]:
+                d["event"] = row["event"]
         return d
 
     _IN_FORCE = ("status = 'active' AND (permanence = 'permanent' "
@@ -1049,17 +1071,11 @@ class Registry:
             out[r["rule_id"]] = (max(b, cache[sc]), sorted(lst + [sc]))
         return out
 
-    def list_rules(self, code: str, consumer: str, expand: bool = True) -> dict:
-        """Every rule in force for one consumer, in ONE call, ordered from the
-        most widespread to the most specific. The order IS the breadth of the
-        scope: it stays right on its own when a consumer is added.
-
-        Citations arrive EXPANDED with the current title of the rule they point
-        at, so the reference is understood without a second call. `expand` is
-        here for the Markdown export, which is read by a person; no tool offers
-        it to a chat."""
-        p = self._project(code)
-        c = self._consumer(p, consumer)
+    def _rules_for(self, p: str, c: str, expand: bool = True) -> dict:
+        """The full rows in force for one consumer, ordered by the breadth of
+        the scope they arrive through. The shared engine under TWO readings:
+        list_rules strips it down to what a consumer gets, export keeps it
+        whole because a person maintaining the corpus reads it."""
         reaching = self._reaching(p, c)
         now = _now()
         rules = []
@@ -1071,7 +1087,7 @@ class Registry:
                 continue
             if row["permanence"] != "permanent" and row["expires_at"] and row["expires_at"] <= now:
                 continue
-            d = self._dict(row, p, expand)
+            d = self._dict(row, p, expand, why=True)
             d["via"] = scopes
             d["breadth"] = breadth
             rules.append(d)
@@ -1079,8 +1095,26 @@ class Registry:
         total = self.cx.execute(
             "SELECT COUNT(*) FROM rules WHERE project=:p AND " + self._IN_FORCE,
             {"p": p, "now": now}).fetchone()[0]
+        return {"rules": rules, "outside": total - len(rules)}
+
+    def list_rules(self, code: str, consumer: str, expand: bool = True) -> dict:
+        """Every rule in force for one consumer, in ONE call, ordered from the
+        most widespread to the most specific. The order IS the breadth of the
+        scope: it stays right on its own when a consumer is added.
+
+        THE CONSUMER READING: each rule arrives as its ID and its body — the
+        citations expanded with the current title of what they point at — and
+        nothing else. The title, the dates, the perimeter and the why are
+        administration, and they cost context in every chat that works under
+        the rules: they live in the maintenance reading (rules_batch,
+        rules_export). The ORDER is still the breadth; only the fields that
+        said so went out."""
+        p = self._project(code)
+        c = self._consumer(p, consumer)
+        data = self._rules_for(p, c, expand)
+        rules = [{"id": d["id"], "body": d["body"]} for d in data["rules"]]
         return {"project": p, "consumer": c, "rules": rules, "count": len(rules),
-                "outside_your_scope": total - len(rules),
+                "outside_your_scope": data["outside"],
                 "note": "ordered by breadth: what comes first binds everyone. If an ID you "
                         "need is missing it is not undefined — it belongs to someone else"}
 
@@ -1104,8 +1138,16 @@ class Registry:
             if row is None:
                 never.append(rid)
             elif rid in reaching:
-                d = self._dict(row, p)
-                d["via"] = reaching[rid][1]
+                # The consumer reading: the ID and the body. One exception,
+                # and it is a verdict rather than a field: a rule NOT in force
+                # says so, because handing back a retired body as if it bound
+                # anybody would be the reading lying by omission.
+                d = {"id": rid, "body": self._expand(p, row["body"])}
+                if row["status"] != "active":
+                    d["status"] = row["status"]
+                elif row["permanence"] != "permanent" and row["expires_at"] \
+                        and row["expires_at"] <= _now():
+                    d["status"] = "expired"
                 found.append(d)
             else:
                 not_yours.append({"id": rid, "held_by": self._holders(p, rid)})
@@ -1139,9 +1181,7 @@ class Registry:
             if q not in (row["title"] or "").lower() and q not in (row["body"] or "").lower():
                 continue
             if row["id"] in reaching:
-                d = self._dict(row, p)
-                d["via"] = reaching[row["id"]][1]
-                hits.append(d)
+                hits.append({"id": row["id"], "body": self._expand(p, row["body"])})
             else:
                 outside += 1
         hits.sort(key=lambda d: (d["id"][:2], int(d["id"].split("-")[1])))
@@ -1705,7 +1745,10 @@ class Registry:
         """The pending batch plus its DIGEST — sha256 over the ordered list of
         IDs and bodies. You sign the batch, not the single rule: that is what
         makes the signature worth reading, and it is where three proposals that
-        say the same thing become visible next to each other."""
+        say the same thing become visible next to each other.
+
+        Each proposal carries its `reason`: the why being let in is on the
+        table where the decision happens, not a history call away."""
         p = self._project(code)
         rows = self.cx.execute("SELECT * FROM rules WHERE project=? AND status='proposed' "
                                "ORDER BY id", (p,)).fetchall()
@@ -1719,7 +1762,7 @@ class Registry:
             h.update((r["body"] or "").encode())
         digest = h.hexdigest()
         return {"project": p, "count": len(ids), "ids": ids,
-                "proposals": [self._dict(r, p) for r in rows],
+                "proposals": [self._dict(r, p, why=True) for r in rows],
                 "digest": digest,
                 "approval_required": not self.in_grace(),
                 "how_to_sign": ("on your own machine: python3 sign.py <digest>, over this "
@@ -1744,7 +1787,7 @@ class Registry:
         for rid in current["ids"]:
             self.cx.execute(
                 "UPDATE rules SET status='active', permanence='provisional', expires_at=?, "
-                "reason=?, updated_at=? WHERE project=? AND id=?",
+                "event=?, updated_at=? WHERE project=? AND id=?",
                 (expires, f"approved{'' if signed else ' under grace'}", _now(), p, rid))
         return {"project": p, "approved": current["ids"], "count": len(current["ids"]),
                 "signed": signed, "expires_at": expires,
@@ -1766,7 +1809,7 @@ class Registry:
                 raise RulesError(f"{rid}: no such proposal")
             if row["status"] != "proposed":
                 raise RulesError(f"{rid} is {row['status']}, not a pending proposal")
-            self.cx.execute("UPDATE rules SET status='denied', denied_reason=?, reason=?, "
+            self.cx.execute("UPDATE rules SET status='denied', denied_reason=?, event=?, "
                             "updated_at=? WHERE project=? AND id=?",
                             (reason.strip(), "denied", _now(), p, rid))
             out.append(rid)
@@ -1792,7 +1835,7 @@ class Registry:
         signed = self._require_signature(p, message, signature, len(ids), ids)
         expires = _plus_days(int(days) or self.provisional_days)
         for rid in ids:
-            self.cx.execute("UPDATE rules SET expires_at=?, reason=?, updated_at=? "
+            self.cx.execute("UPDATE rules SET expires_at=?, event=?, updated_at=? "
                             "WHERE project=? AND id=?",
                             (expires, "renewed", _now(), p, rid))
         return {"project": p, "renewed": ids, "expires_at": expires, "signed": signed,
@@ -1814,7 +1857,7 @@ class Registry:
         signed = self._require_signature(p, message, signature, len(ids), ids)
         for rid in ids:
             self.cx.execute("UPDATE rules SET permanence='permanent', expires_at=NULL, "
-                            "reason=?, updated_at=? WHERE project=? AND id=?",
+                            "event=?, updated_at=? WHERE project=? AND id=?",
                             ("promoted to permanent", _now(), p, rid))
         return {"project": p, "promoted": ids, "signed": signed, "digest": message}
 
@@ -1829,7 +1872,11 @@ class Registry:
         A new body goes through the SAME citation check as a proposal: this is
         the door the second seeding pass uses, so it cannot be the door that
         lets an unresolved pointer in. The body you read back is expanded — you
-        can paste it here as it came, the gloss is dropped."""
+        can paste it here as it came, the gloss is dropped.
+
+        The `reason` asked for here is the why of the FIX: it lands in the
+        event column and in the history. The rule's own `reason` — the why it
+        exists — is never rewritten by any event."""
         p = self._project(code)
         rid = _norm_id(rid)
         row = self._row(p, rid)
@@ -1862,7 +1909,7 @@ class Registry:
                 # Pasting back what you read is not an edit.
                 cites = None
         self.cx.execute(
-            "UPDATE rules SET type=?, title=?, body=?, changelog=?, reason=?, updated_at=? "
+            "UPDATE rules SET type=?, title=?, body=?, changelog=?, event=?, updated_at=? "
             "WHERE project=? AND id=?",
             (row["type"] if rtype is None else rtype.strip().upper(),
              row["title"] if title is None else title.strip(),
@@ -1938,7 +1985,7 @@ class Registry:
                     f"{sb} has not been approved yet, so it cannot supersede anything. "
                     "Have the successor approved first, then retire the rule it replaces.")
         self.cx.execute("UPDATE rules SET status='retired', superseded_by=?, changelog=?, "
-                        "reason=?, updated_at=? WHERE project=? AND id=?",
+                        "event=?, updated_at=? WHERE project=? AND id=?",
                         (sb, changelog or row["changelog"], reason.strip(), _now(), p, rid))
         citing = [r[0] for r in self.cx.execute(
             "SELECT DISTINCT f.src FROM rule_refs f JOIN rules r "
@@ -2064,17 +2111,21 @@ class Registry:
 
         This is the ONLY reader that gets a choice about the citations, because
         it is read by a person: compact by default, `expand` to have every
-        pointer carry the current title of what it points at."""
+        pointer carry the current title of what it points at.
+
+        Every rule carries its `reason`, and the whole-project export the last
+        `event` too: this is a MAINTENANCE reading, and the why is what a
+        person maintaining the corpus decides on."""
         p = self._project(code)
         lines = [f"# {p} — rules", "",
                  f"> Generated {_now()} by codifier-mcp {VERSION}. This file is a "
                  f"DERIVATIVE: the truth is the registry, and this regenerates.", ""]
         if consumer:
             c = self._consumer(p, consumer)
-            data = self.list_rules(code, c, expand)
+            data = self._rules_for(p, c, expand)
             lines[0] = f"# {p} — rules for {c}"
-            lines += [f"{data['count']} rules in force, widest first. "
-                      f"{data['outside_your_scope']} are outside your perimeter.", ""]
+            lines += [f"{len(data['rules'])} rules in force, widest first. "
+                      f"{data['outside']} are outside your perimeter.", ""]
             groups: dict[int, list] = {}
             for r in data["rules"]:
                 groups.setdefault(r["breadth"], []).append(r)
@@ -2083,7 +2134,8 @@ class Registry:
                 via = sorted({v for r in block for v in r["via"]})
                 lines += [f"## Reaching {breadth} consumer(s) — via {', '.join(via)}", ""]
                 for r in block:
-                    lines += [f"### {r['id']} · {r['title']}  `{r['type']}`", "", r["body"], ""]
+                    lines += [f"### {r['id']} · {r['title']}  `{r['type']}`", "",
+                              f"*why: {r['reason']}*", "", r["body"], ""]
         else:
             now = _now()
             rows = self.cx.execute("SELECT * FROM rules WHERE project=? ORDER BY domain, seq",
@@ -2101,6 +2153,9 @@ class Registry:
                               + (f" · expires {r['expires_at'][:10]}" if r["expires_at"] else "")
                               + (f" · was {r['legacy_id']}" if r["legacy_id"] else "")
                               + "*", "",
+                              f"*why: {r['reason']}*"
+                              + (f" — *last event: {r['event']}*" if r["event"] else ""),
+                              "",
                               self._expand(p, r["body"]) if expand else r["body"], ""]
         md = "\n".join(lines)
         return {"project": p, "consumer": consumer or None,

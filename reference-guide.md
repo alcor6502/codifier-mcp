@@ -44,9 +44,15 @@ anything.
 Read it that way too. The first lines are the foundations, the last are the
 particulars, and the position tells you the weight.
 
-Each rule carries `via` — which scope it arrives through. When a rule appears in
-your list and you cannot see why, `via` is the answer, and it is exactly what
-the Architect needs to decide whether it belongs somewhere else.
+What arrives is the CONSUMER reading: each rule as
+**the ID and the body, and nothing else** — the citations expanded.
+The title, the dates, the perimeter and
+the why are administration; they live in the maintenance reading
+(`rules_batch`, `rules_export`), because this registry exists to spend less
+context, not more. When a rule appears in your list and you cannot see why,
+the answer — `via`, which scope it arrives through — sits in the maintenance
+reading too, which is where that question gets decided: whether the rule
+belongs somewhere else is the Architect's call.
 
 ## THE NUMBER IS NOT YOURS TO PICK
 
@@ -231,7 +237,9 @@ stumble into an audit: broken citations are worth far more seen together.
 
 ## THE THREE ANSWERS OF `rules_get`
 
-    found          the rules, whole
+    found          the ID and the expanded body. A rule NOT in force says so —
+                   retired, denied, expired — because a body handed back as if
+                   it bound you would be a lie by omission
     not_yours      they exist, outside your perimeter — with who holds them
     never_defined  never defined here
 

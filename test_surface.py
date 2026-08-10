@@ -569,6 +569,27 @@ ok("no `id` parameter" in GUIDE_SRC,
    "the manual says the number is not a parameter")
 ok("legacy_id" in GUIDE_SRC, "the manual documents legacy_id")
 
+# The two readings. The consumer reading is the ID and the body; the why is
+# readable where a person decides. Each sentence is pinned in the manual that
+# carries it and COUNTED, not `in`-tested: a rewrite that leaves a second,
+# contradicting copy behind is exactly what `in` cannot see.
+ok(GUIDE_SRC.count("the ID and the body, and nothing else") == 1,
+   "the user manual pins the consumer reading, exactly once",
+   GUIDE_SRC.count("the ID and the body, and nothing else"))
+ok(LEGISLATOR_SRC.count("`reason` is immutable") == 1,
+   "the legislator's manual pins the immutable reason, exactly once",
+   LEGISLATOR_SRC.count("`reason` is immutable"))
+ok("does not keep it" not in LEGISLATOR_SRC,
+   "the legislator's manual no longer says the reason column loses the why")
+# And the consumer-facing docstrings stopped promising the fields that left: a
+# stale description does not fail, it advises badly, which is worse.
+for _t in TOOLS:
+    if _t.name in ("rules_list", "rules_get", "rules_search"):
+        _doc = ast.get_docstring(_t) or ""
+        for _tok in ("`via`", "`breadth`"):
+            ok(_tok not in _doc,
+               f"{_t.name} no longer promises {_tok} to a consumer")
+
 # =====================================================================
 # 2c · the ceilings in the manual are the ceilings in the engine
 # =====================================================================
