@@ -314,6 +314,27 @@ TOOLS = [n for n in ast.walk(SERVER_TREE)
          if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and is_tool(n)]
 TOOL_NAMES = {t.name for t in TOOLS}
 
+# ---------------------------------------------------------------------
+# No parameter dies at the seam. rules_propose accepted `supersedes` in
+# its signature — so the schema advertised it and the door took the
+# argument — and then never passed it to the engine: the value died
+# between the two files, in silence. The GATE of 2026-08-10 found it from
+# the connector, with the engine healthy and the manual right; the suites
+# missed it because collaudo calls the engine directly and this file
+# measured signatures, not the forwarding — the wiring is not the
+# behaviour. A parameter the body never READS is a dropped argument by
+# construction, so it fails here, by name.
+# ---------------------------------------------------------------------
+
+print("\n== no tool parameter dies at the seam ==")
+for _t in TOOLS:
+    _params = [a.arg for a in _t.args.posonlyargs + _t.args.args + _t.args.kwonlyargs]
+    _read = {n.id for n in ast.walk(ast.Module(body=_t.body, type_ignores=[]))
+             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    _dead = [p for p in _params if p not in _read]
+    ok(not _dead, f"{_t.name}: every parameter is read in the body",
+       f"dropped at the seam: {', '.join(_dead)}")
+
 # The other door, and it carries no decorator line at all: `tool(rules_purge)`
 # as a plain statement registers the function just as well, and every check
 # that looks for a decorator is blind to it. Same for handing it to anything

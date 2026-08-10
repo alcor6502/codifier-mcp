@@ -369,7 +369,7 @@ def rules_propose(project: str, domain: str, type: str, title: str, body: str,
     into a state where its own pointers were right only while it was being
     written."""
     return registry.propose(project, domain, type, title, body, scopes, reason,
-                            proposed_by, changelog, source)
+                            proposed_by, changelog, source, supersedes)
 
 
 # =====================================================================
