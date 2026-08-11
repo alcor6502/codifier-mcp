@@ -679,6 +679,183 @@ def rules_scope_edit(project: str, name: str, key: str,
 
 
 # =====================================================================
+# The task log — the project code, and the name of whoever is acting
+# =====================================================================
+#
+# Operating on tasks costs the PROJECT CODE and nothing else, plus the name of
+# whoever is acting, declared. It is the same trade rules_propose makes and
+# for the same reason turned inside out: a proposal is ungated because it
+# reaches nobody, a task because it IS the work — asking a working chat for
+# the architect key to write down what it has just finished would put the
+# maintenance credential in every chat in the project, which is the one thing
+# the credential model exists to prevent.
+#
+# The declared identity is not PROVED, and that is true of the whole registry
+# today. The one reading that IS maintenance is tasks_overview: across every
+# consumer at once is the maintainer's view, not a worker's.
+
+
+@tool
+def tasks_add(project: str, consumer: str, title: str, body: str, created_by: str,
+              urgent: bool = False, idem_key: str = "") -> dict:
+    """Open a task for a consumer. The ID comes back as TK-NNNN and is cited
+    like a rule, in round brackets: (TK-0012).
+
+    ANYBODY in the project may open one for ANYBODY — that is how a coherence
+    audit hands each correction to the role that owns it, instead of writing a
+    report somebody has to redistribute by hand. `created_by` is your own
+    consumer name and it is MANDATORY: a task nobody signed is a task nobody
+    can be asked about.
+
+    `urgent` is set by whoever CREATES the task and can never be changed
+    afterwards, by anyone. Urgency is born from a condition only the creator
+    knows, and letting the receiver clear the flag would put the lever in the
+    hand of whoever has an interest in postponing. There are no levels: a
+    scale of five inflates until it stops ordering anything. What guards
+    against inflation is that tasks_overview counts urgent tasks BY CREATOR.
+
+    `idem_key` is your own handle for a job you may report more than once —
+    the recurring audit that finds the same discrepancy three weeks running.
+    While a task with that key is still open on that consumer you get THAT
+    task back, not a second one; once it closes, the same key opens a new one,
+    because finding it again is a new report.
+
+    The body is Markdown and may cite rules: `(VA-0002)` comes back with that
+    rule's current title when the body is read. Nothing is refused here — a
+    task is prose about work, so a pointer that does not resolve is reported
+    in the text rather than blocking the task."""
+    return registry.task_add(project, consumer, title, body, created_by,
+                             urgent, idem_key)
+
+
+@tool
+def tasks_list(project: str, consumer: str) -> dict:
+    """WHAT IS OPEN FOR YOU, in one call — and what you closed lately, which is
+    the same question with the other filter. This is what replaces the
+    "pending" section a role memory used to carry, and the per-role changelog:
+    every completion cost an outcome, so the closed half reads as a record of
+    what was done.
+
+    The SHORT form: id, title, urgent, age, status. The bodies are read
+    separately with tasks_get, by code — a list that carried the bodies would
+    make the cheapest question in a chat the most expensive one.
+
+    THE SERVER ORDERS: urgent first, then oldest first. That matters when the
+    ceiling bites, because then the order decides what is lost — and what must
+    survive is the work that has been waiting, not the work you filed this
+    morning and still remember.
+
+    A truncated list SAYS SO, with the real total behind it.
+
+    A task open past the staleness threshold comes back MARKED. It has not
+    expired and it never will: a task that ages does not become false, it
+    stays work nobody did, and an automatic expiry would be a drop with no
+    reason, written by the clock. Closing it is your decision, with the reason
+    written."""
+    return registry.task_list(project, consumer)
+
+
+@tool
+def tasks_search(project: str, consumer: str, query: str) -> dict:
+    """Search your tasks, every state included — finding what you already did
+    is the same question as finding what is open.
+
+    Every hit carries THE FRAGMENT THAT MATCHED, next to the code: a list of
+    codes with no fragments tells you that something matched and not what, and
+    the only way on would be one more call per hit. It searches the title, the
+    outcome, the reason and the body, and shows the text as it is STORED."""
+    return registry.task_search(project, consumer, query)
+
+
+@tool
+def tasks_range(project: str, consumer: str, since: str, until: str,
+                on: str) -> dict:
+    """The tasks of a stretch of days, `since` and `until` inclusive
+    (YYYY-MM-DD). This is where a closed task goes on living once it has left
+    the recent window of tasks_list — it is not gone, it is asked for by date.
+
+    `on` says WHICH DATE it filters — `created_at` or `closed_at` — and there
+    is NO DEFAULT, deliberately. "Opened in July" and "closed in July" are two
+    different questions, a changelog wants the second, and a default would
+    answer one of them while you believed the other."""
+    return registry.task_range(project, consumer, since, until, on)
+
+
+@tool
+def tasks_get(project: str, ids: list[str]) -> dict:
+    """The BODIES, by code, in a batch — e.g. ["TK-0003","TK-0011"]. Up to ten
+    per call, and asking for more is REFUSED rather than trimmed: a caller who
+    asked for fifteen and quietly got ten would act on the ten.
+
+    A second ceiling, in bytes, is what actually bounds the answer, and when
+    it bites the truncation is DECLARED with how many came back. Bodies arrive
+    with their citations expanded — `(VA-0002 — its title)` — and one pointing
+    nowhere arrives marked in the text.
+
+    An ID that is not a task says so by name: a rule read here is not a
+    missing task, it is the wrong tool, and rules_get is the right one."""
+    return registry.task_get(project, ids)
+
+
+@tool
+def tasks_complete(project: str, id: str, outcome: str, by: str) -> dict:
+    """Close a task WITH ITS OUTCOME, which is mandatory. That is the whole
+    design of this log: the completed tasks with their outcomes ARE the
+    changelog of a consumer, and one closed in silence is an entry nobody can
+    read back.
+
+    Keep the outcome short and queryable — one or two sentences, what came of
+    it. The long story goes in the project's own history, written by the same
+    hand in the same moment: two gestures, one moment. `by` is your own
+    consumer name.
+
+    A closed task is closed: not amended, not reopened, not re-closed."""
+    return registry.task_complete(project, id, outcome, by)
+
+
+@tool
+def tasks_drop(project: str, id: str, reason: str, by: str) -> dict:
+    """Close a task WITHOUT doing it, with the reason why — the twin of denying
+    a proposal. Deciding not to do something is a decision, and one that
+    leaves no reason gets taken again from scratch the next time somebody
+    reads the same request.
+
+    There is no delete. A dropped task keeps its number, and the number is
+    never handed out again."""
+    return registry.task_drop(project, id, reason, by)
+
+
+@tool
+def tasks_amend(project: str, id: str, by: str, title: str = "", body: str = "",
+                consumer: str = "") -> dict:
+    """Amend a task that is still OPEN: its title, its body, or its OWNER.
+
+    Reassigning is here because a misdirected task is an ordinary event, not an
+    incident — without it the only way out would be dropping and recreating,
+    which breaks the thread between the work and the request that started it.
+    The history keeps both owners.
+
+    `urgent` is not here and cannot be reached from anywhere: it belongs to
+    whoever created the task. A closed task is not amended at all."""
+    return registry.task_amend(project, id, by, title, body, consumer)
+
+
+@tool
+def tasks_overview(project: str, key: str) -> dict:
+    """MAINTENANCE. The log across every consumer at once — open, closed,
+    dropped, urgent and stale per consumer, the oldest still waiting, and the
+    urgent tasks counted BY CREATOR.
+
+    That last count is the guard against urgency inflation, and it is why the
+    view is cross-consumer: if one creator's column is all urgent, what gets
+    corrected is that skill, not the tasks it filed. It also DECLARES the
+    ceilings in force, so the day one of them is exported to the template
+    there is a single place that says which value is commanding."""
+    _admin(project, key)
+    return registry.task_overview(project)
+
+
+# =====================================================================
 # Service
 # =====================================================================
 

@@ -231,6 +231,22 @@ UNGATED_ON_PURPOSE = {
     "rules_propose": "a proposal reaches nobody until its batch is approved, so it "
                      "cannot do harm — and asking a working chat for the maintenance "
                      "code just to file one would put that code in every chat",
+    # The task log, and the reason is rules_propose's turned inside out: a
+    # proposal is ungated because it reaches nobody, a task because it IS the
+    # work. Asking a working chat for the architect key to write down what it
+    # has just finished would put the maintenance credential in every chat of
+    # the project — the one thing the per-project credential model exists to
+    # prevent. What stays gated is the CROSS-CONSUMER view, tasks_overview,
+    # because that is the maintainer's reading and not a worker's.
+    "tasks_add": "opening a task is the work asking for itself: it binds nobody and "
+                 "reaches one consumer, and the key would have to live in every chat",
+    "tasks_complete": "closing your own task with its outcome is the work reporting "
+                      "itself — and the outcome is what the log is read for",
+    "tasks_drop": "deciding not to do your own task is the same gesture as doing it, "
+                  "and it already costs a written reason",
+    "tasks_amend": "amending an OPEN task, including handing it to the right owner, "
+                   "is routine traffic between roles — the closed ones are frozen by "
+                   "the database, not by a credential",
 }
 
 print("\n== the engine, as the seam sees it ==")
@@ -417,7 +433,11 @@ ok(not [n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
 # one that has gone. `_guide` is in there because the two manuals name each
 # other. What still escapes: a prefixless tool that is not a manual — there is
 # none today, and the engine witness below covers every tool anyway.
-NAME_IN_PROSE = re.compile(r"\b(rules_[a-z_]+|[a-z][a-z_]*_guide)\b")
+# `tasks_` joined the shape when the task log arrived. It has to be here and
+# not in a list of the tools that exist: the whole job of this pattern is to
+# catch a name that is no longer a tool, and a pattern built from the tools
+# that are left cannot match one that has gone.
+NAME_IN_PROSE = re.compile(r"\b((?:rules|tasks)_[a-z_]+|[a-z][a-z_]*_guide)\b")
 # Names that read like tools and are not, allowed in prose anywhere. It has
 # to be subtracted in BOTH places the shape is used: naming the server in a
 # manual is a legitimate sentence, and a check that goes red on a legitimate
@@ -1761,6 +1781,131 @@ for _t in TOOLS:
 ok(GUIDE_SRC.count("legend of the domains present") == 1,
    "the manual pins the legend, exactly once",
    GUIDE_SRC.count("legend of the domains present"))
+
+print("\n== the task log: nine tools, one of them maintenance ==")
+
+# F3. The log that replaces both the per-role changelog and the "pending"
+# sections of the role memories. What is pinned here is the SHAPE of the
+# surface — who is gated, what has no default, where the ceilings live —
+# because every one of those is a decision that reads as a detail.
+
+_TASK_TOOLS = sorted(t.name for t in TOOLS if t.name.startswith("tasks_"))
+ok(_TASK_TOOLS == ["tasks_add", "tasks_amend", "tasks_complete", "tasks_drop",
+                   "tasks_get", "tasks_list", "tasks_overview", "tasks_range",
+                   "tasks_search"],
+   f"the task log puts exactly nine tools on the surface", _TASK_TOOLS)
+
+# ONE of them is maintenance, and it is the cross-consumer one. An EQUALITY,
+# so a gate appearing on a worker's tool fails here as loudly as one going
+# missing from the maintainer's: the first would put the architect key in
+# every chat of the project, which is what the credential model exists to
+# stop.
+_TASK_GATED = sorted(t.name for t in TOOLS if t.name.startswith("tasks_")
+                     and any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                             and n.func.id == "_admin" for n in ast.walk(t)))
+ok(_TASK_GATED == ["tasks_overview"],
+   "tasks_overview is the only gated one — the cross-consumer view is the "
+   "maintainer's reading, and the rest cost the project code alone", _TASK_GATED)
+
+# THE CEILINGS ARE NAMED, AND THEY ARE THE ENGINE'S. The spec asked for
+# constants at the top of the module rather than literals scattered through
+# the queries — and, explicitly, never parameters of the tools: a ceiling a
+# caller can raise is not one.
+_TASK_CAPS = ("TASKS_LIST_CAP", "TASKS_GET_IDS", "TASKS_GET_BYTES",
+              "TASKS_RECENT_DAYS", "TASKS_STALE_DAYS")
+_MODULE_ASSIGNS = {t.id for n in ENGINE_TREE.body if isinstance(n, ast.Assign)
+                   for t in n.targets if isinstance(t, ast.Name)}
+for _c in _TASK_CAPS:
+    ok(_c in _MODULE_ASSIGNS, f"{_c} is a named constant at module level in rules.py")
+    ok(RULES_SRC.count(_c) >= 2,
+       f"and it is READ, not just declared: {RULES_SRC.count(_c)} mentions")
+
+# And the mentions are not enough on their own — that check stays green while
+# the WORKING code goes back to literals, because the constant survives in the
+# verdict that reports it. Injected exactly that and the suite did not blink.
+# So: inside the task methods, no bare integer may EQUAL a ceiling. A number
+# written twice is a number that will disagree with itself.
+_CAP_VALUES = {getattr(_rules, c) for c in _TASK_CAPS}
+_TASK_METHODS = [n for n in REGISTRY.body
+                 if isinstance(n, ast.FunctionDef)
+                 and ("task" in n.name or n.name == "_order_and_cap")]
+ok(len(_TASK_METHODS) >= 12, f"the task methods are found: {len(_TASK_METHODS)}")
+for _m in _TASK_METHODS:
+    _lits = sorted({n.value for n in ast.walk(_m)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, int)
+                    and not isinstance(n.value, bool) and n.value in _CAP_VALUES})
+    ok(not _lits, f"Registry.{_m.name} spells its ceilings by NAME, never as a number",
+       f"literals that equal a ceiling: {_lits}")
+_PARAMS = {a.arg for t in TOOLS if t.name.startswith("tasks_")
+           for a in t.args.posonlyargs + t.args.args + t.args.kwonlyargs}
+ok(not (_PARAMS & {"cap", "limit", "max", "ceiling", "n"}),
+   "no tasks_ tool takes its own ceiling as a parameter", sorted(_PARAMS))
+
+# `on` HAS NO DEFAULT, and that is the point of it: "opened in July" and
+# "closed in July" are different questions, and a default answers one of them
+# while the caller believes the other. From the AST, because a default is
+# exactly the kind of thing a later edit adds to be helpful.
+_RANGE = next((t for t in TOOLS if t.name == "tasks_range"), None)
+ok(_RANGE is not None, "tasks_range is on the surface")
+if _RANGE is not None:
+    _pos = [a.arg for a in _RANGE.args.posonlyargs + _RANGE.args.args]
+    _with_default = _pos[len(_pos) - len(_RANGE.args.defaults):] if _RANGE.args.defaults else []
+    ok("on" in _pos and "on" not in _with_default,
+       "and `on` is required: no default may decide which date it filters on",
+       f"defaulted: {_with_default}")
+
+# The engine half of the same decision, since the tool only forwards.
+_ERANGE = METHODS.get("task_range")
+ok(_ERANGE is not None, "the engine has task_range")
+if _ERANGE is not None:
+    _ep = [a.arg for a in _ERANGE.args.posonlyargs + _ERANGE.args.args][1:]
+    _ed = _ep[len(_ep) - len(_ERANGE.args.defaults):] if _ERANGE.args.defaults else []
+    ok("on" not in _ed, "the engine agrees: `on` carries no default", _ed)
+
+# TK is reserved, and the two letter-pair checks that used to be written twice
+# are ONE door now. The literal is counted: a second copy is how a reservation
+# added to one door stops holding on the other.
+ok(getattr(_rules, "RESERVED_DOMAINS", ()) == (getattr(_rules, "TASK_PREFIX", ""),),
+   "RESERVED_DOMAINS is exactly the task prefix",
+   getattr(_rules, "RESERVED_DOMAINS", None))
+ok(RULES_SRC.count(r'r"^[A-Z]{2}$"') == 1,
+   "the domain letter-pair is validated in ONE place, so the reservation cannot "
+   "hold on one door and not the other", RULES_SRC.count(r'r"^[A-Z]{2}$"'))
+_VD = [n for n in ENGINE_TREE.body
+       if isinstance(n, ast.FunctionDef) and n.name == "_valid_domain"]
+ok(len(_VD) == 1, "rules.py defines `_valid_domain` exactly once, at module level "
+                  "— two definitions of what a domain looks like is two "
+                  "reservations, and the last one wins", len(_VD))
+
+# The schema objects are DECLARED, which is what makes the preflight see them:
+# a table or a trigger that exists in SCHEMA and not in these tuples is one the
+# boot would never notice missing.
+for _t in ("tasks", "task_versions", "task_counter"):
+    ok(_t in _rules.TABLES, f"{_t} is declared, so the preflight checks it")
+for _g in ("trg_tasks_ins", "trg_tasks_upd", "trg_tasks_del",
+           "trg_tasks_closed_is_closed", "trg_tasks_frozen", "trg_tasks_counter"):
+    ok(_g in _rules.TRIGGERS, f"{_g} is declared, so the preflight checks it")
+ok("ux_tasks_idem" in _rules.INDEXES,
+   "the idempotency guarantee is an INDEX the preflight verifies", _rules.INDEXES)
+
+# What the docstrings must keep promising, because these are the two places a
+# caller decides how to behave from the description alone.
+for _t in TOOLS:
+    _doc = ast.get_docstring(_t) or ""
+    if _t.name == "tasks_get":
+        ok("REFUSED" in _doc and "DECLARED" in _doc,
+           "tasks_get says the count refuses and the byte ceiling declares")
+    if _t.name == "tasks_add":
+        ok("MANDATORY" in _doc and "created_by" in _doc,
+           "tasks_add says created_by is mandatory")
+        ok("never be changed" in _doc,
+           "and that urgent belongs to whoever created the task")
+    if _t.name == "tasks_complete":
+        ok("mandatory" in _doc and "outcome" in _doc,
+           "tasks_complete says the outcome is mandatory")
+    if _t.name == "tasks_list":
+        ok("urgent first" in _doc and "real total" in _doc,
+           "tasks_list promises the order and the declared total")
 
 print("\n== the web layer speaks to the engine, and never to the database ==")
 
