@@ -1422,7 +1422,7 @@ for value, expect_level, expect_rejected in (
 # DEBUG is listed as inert above, and that claim has to stay true: the day
 # somebody adds a .debug() line, the closed list silently starts hiding output
 # instead of merely not producing any.
-for _f in ("server.py", "rules.py", "preflight.py"):
+for _f in ("server.py", "rules.py", "preflight.py", "web.py"):
     _src = source(os.path.join(HERE, _f))
     ok(".debug(" not in _src,
        f"{_f} contains no .debug() — which is why DEBUG is inert, not offered")
@@ -1911,6 +1911,126 @@ ok(all(r[1] in (("GET",), ("POST",)) for r in _ROUTES),
    "and no route answers both — a page that reads and writes at one address is "
    "a page whose method is the only thing between the two",
    [r for r in _ROUTES if r[1] not in (("GET",), ("POST",))])
+
+print("\n== every page is behind the session, every write behind the master too ==")
+
+# The same law as `_admin` on the MCP side, moved to the door a PERSON comes
+# through — and it needs both halves, because they fail differently. Without
+# the session anybody on the LAN reads the corpus; without the master retyped,
+# a browser left open on the iPad approves rules by being borrowed. The set of
+# writing methods is DERIVED from rules.py, as it is for the tools: a list
+# copied into a second file drifts, and this one would drift towards
+# "unguarded".
+_BUILD_FUNCS = {n.name: n for n in ast.walk(_BUILD or ast.Module(body=[], type_ignores=[]))
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def _local_calls(fn) -> set[str]:
+    return {n.func.id for n in ast.walk(fn)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+
+
+def _reaches(start: str, target: str) -> bool:
+    """Transitively, through the helpers defined inside build(). `_read_page`
+    holds the session check for four pages at once — written once precisely so
+    that adding a page cannot add a page that forgot it — so a check that only
+    looked one level deep would call all four of them unguarded."""
+    seen, stack = set(), [start]
+    while stack:
+        cur = stack.pop()
+        if cur in seen or cur not in _BUILD_FUNCS:
+            continue
+        seen.add(cur)
+        calls = _local_calls(_BUILD_FUNCS[cur])
+        if target in calls:
+            return True
+        stack.extend(calls)
+    return False
+
+
+# The three that are allowed not to ask: login IS the door, logout takes
+# nothing away from anybody, and both are named here rather than inferred so
+# that a fourth cannot join them by accident.
+NO_SESSION_ON_PURPOSE = {
+    "login": "it is the door: asking for a session to get one is a locked room",
+    "logout": "throwing a cookie away can harm nobody, and refusing to do it "
+              "for want of a valid session would leave a stale one in place",
+}
+_ENDPOINTS = [r[2] for r in _ROUTES]
+ok(bool(_ENDPOINTS), "the routes name their endpoints")
+for _e in _ENDPOINTS:
+    if _e in NO_SESSION_ON_PURPOSE:
+        ok(not _reaches(_e, "_session_ok"),
+           f"{_e} asks for no session ON PURPOSE — {NO_SESSION_ON_PURPOSE[_e][:52]}...",
+           "it now checks one: if that is the new decision, drop the exception")
+        continue
+    ok(_reaches(_e, "_session_ok"),
+       f"{_e} is behind the session")
+ok(set(NO_SESSION_ON_PURPOSE) <= set(_ENDPOINTS),
+   "every documented exception names an endpoint that exists",
+   sorted(set(NO_SESSION_ON_PURPOSE) - set(_ENDPOINTS)))
+
+# And the writing ones behind the master as well, retyped for the action.
+for _name, _fn in _BUILD_FUNCS.items():
+    _reached = {n.func.attr for n in ast.walk(_fn)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and isinstance(n.func.value, ast.Name) and n.func.value.id == "registry"}
+    _writes = _reached & MUTATING
+    if not _writes:
+        continue
+    ok(_reaches(_name, "_session_ok"),
+       f"{_name} writes ({', '.join(sorted(_writes))}) and is behind the session")
+    ok(any(ast.unparse(n.func) == "secrets.compare_digest" for n in ast.walk(_fn)
+           if isinstance(n, ast.Call)),
+       f"{_name} writes and retypes the master — a session alone is a browser "
+       f"left open on the iPad")
+
+# The session check is the FIRST statement of the handler, and not conditional.
+# `if request.query_params.get("preview"): ...` in front of it reads like a
+# convenience and is an open page: every check that asks whether _session_ok
+# APPEARS in the function is satisfied by it.
+for _e in _ENDPOINTS:
+    if _e in NO_SESSION_ON_PURPOSE or _e not in _BUILD_FUNCS:
+        continue
+    _body = [x for x in _BUILD_FUNCS[_e].body
+             if not (isinstance(x, ast.Expr) and isinstance(x.value, ast.Constant))]
+    _first = ast.unparse(_body[0]) if _body else "(empty)"
+    ok(_first in ("if not _session_ok(request):\n    return _guest(request)",
+                  "return _read_page(request, render)")
+       or _first.startswith("def render"),
+       f"{_e}: the session check is the first thing it does, or it delegates to "
+       f"the page that does", _first[:60])
+
+# THE THREE GUARDS OF THE ACTION, pinned AS WRITTEN. Everything above pins
+# that they are called; these pin what they say, which is the half that a
+# plausible-looking edit changes. Each was injected and each named its
+# defect: the master check turned into a no-op, the digest comparison
+# removed, the ceiling shifted by one.
+if _ACT is not None:
+    _TESTS = [ast.unparse(n.test) for n in ast.walk(_ACT) if isinstance(n, ast.If)]
+    ok("not secrets.compare_digest((form.get('master') or '').strip(), master)"
+       in _TESTS,
+       "the action's master check is the constant-time comparison, as written",
+       [t[:60] for t in _TESTS])
+    ok("seen != current['digest']" in _TESTS,
+       "and the digest it was handed is compared with the batch's, before "
+       "anything is written", [t[:60] for t in _TESTS])
+    ok("len(ticked) > action_cap" in _TESTS,
+       "and the ceiling refuses MORE than the cap, not as many — one character "
+       "either way is the whole knob", [t[:60] for t in _TESTS])
+
+# The session's own machinery is pinned by NAME too: `_session_ok = lambda r:
+# True` further down, under a flag, leaves every check above green and the UI
+# open. Python gives the name to whatever was bound last, in silence.
+for _n in ("_session_ok", "_sign", "_issue", "_code_of"):
+    _defs = [x for x in ast.walk(_BUILD) if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and x.name == _n] if _BUILD is not None else []
+    ok(len(_defs) == 1, f"build() defines `{_n}` exactly once", len(_defs))
+    _rebound = [ast.unparse(x)[:50] for x in ast.walk(_BUILD or ast.Module(body=[], type_ignores=[]))
+                if isinstance(x, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr))
+                and any(isinstance(t, ast.Name) and t.id == _n
+                        and isinstance(t.ctx, ast.Store) for t in ast.walk(x))]
+    ok(not _rebound, f"and `{_n}` is never bound to anything else", _rebound)
 
 print("\n== the boot serves two servers on one loop ==")
 
