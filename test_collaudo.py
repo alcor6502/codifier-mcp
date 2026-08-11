@@ -28,8 +28,11 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import rules as _rules                  # for the two constants the suite SHIFTS
 from rules import (ALL, FILE_MODE, MAX_BODY_BYTES, MAX_GET_IDS,
-                   Registry, RulesError, RulesFault, VERSION, _plus_days)
+                   Registry, RulesError, RulesFault, VERSION, _plus_days,
+                   TASKS_GET_BYTES, TASKS_GET_IDS, TASKS_LIST_CAP,
+                   TASKS_RECENT_DAYS, TASKS_STALE_DAYS)
 
 # =====================================================================
 # Harness
@@ -2547,6 +2550,362 @@ def the_idempotency_handle_is_an_index():
 
 case("the idempotency key is a partial unique index, per owner and per open task",
      the_idempotency_handle_is_an_index)
+
+# =====================================================================
+head("the task log: the door, and what it costs to close one")
+# =====================================================================
+
+_TL_OUT = R.create_project("Task log", [("Architect", "chat"), ("Advisory", "chat"),
+                                        ("FP-Verifica-Coerenza", "skill")],
+                           {"VA": "vault"})
+TL, TL_KEY = _TL_OUT["code"], _TL_OUT["architect_key"]
+
+
+def anybody_may_open_one_for_anybody_but_nobody_anonymously():
+    """That is how a coherence audit hands each correction to the role that
+    owns it. `created_by` is the door — the lesson of proposed_by."""
+    out = R.task_add(TL, "advisory", "Fix the wording",
+                     "The sentence in (VA-0001) contradicts the one below it.",
+                     "FP-Verifica-Coerenza")
+    assert out["id"] == "TK-0001", out
+    assert out["consumer"] == "Advisory", out          # spelling comes back stored
+    assert out["created_by"] == "FP-Verifica-Coerenza", out
+    try:
+        R.task_add(TL, "advisory", "Anonymous", "body", "")
+        assert False, "a task went in with no author"
+    except RulesError as e:
+        assert "created_by is mandatory" in str(e), e
+    try:
+        R.task_add(TL, "advisory", "Ghost", "body", "nobody-here")
+        assert False, "an unknown consumer signed a task"
+    except RulesError as e:
+        assert "unknown consumer" in str(e), e
+
+
+case("anybody opens one for anybody — and nobody opens one anonymously",
+     anybody_may_open_one_for_anybody_but_nobody_anonymously)
+
+
+def spelling_is_data_here_too():
+    """`ADVISORY`, `advisory` and `Advisory` are ONE owner with ONE spelling —
+    the casefolded unique index decides identity, the stored spelling comes
+    back untouched."""
+    for typed in ("ADVISORY", "advisory", "AdViSoRy"):
+        out = R.task_list(TL, typed)
+        assert out["consumer"] == "Advisory", (typed, out["consumer"])
+    ids = {x["id"] for x in R.task_list(TL, "advisory")["pending"]}
+    assert "TK-0001" in ids, ids
+
+
+case("a consumer typed in any case is the same owner, and answers in its own "
+     "spelling", spelling_is_data_here_too)
+
+
+def closing_costs_a_sentence():
+    tid = R.task_add(TL, "advisory", "Needs a word", "body", "Architect")["id"]
+    try:
+        R.task_complete(TL, tid, "   ", "advisory")
+        assert False, "completed with no outcome"
+    except RulesError as e:
+        assert "outcome is mandatory" in str(e), e
+    try:
+        R.task_drop(TL, tid, "", "advisory")
+        assert False, "dropped with no reason"
+    except RulesError as e:
+        assert "reason is mandatory" in str(e), e
+    out = R.task_complete(TL, tid, "done: the word was 'perimeter'", "advisory")
+    assert out["status"] == "completed" and out["by"] == "Advisory", out
+    # And a closed task is closed, at the door as well as in the schema.
+    for fn, frag in ((lambda: R.task_complete(TL, tid, "again", "advisory"), "already completed"),
+                     (lambda: R.task_drop(TL, tid, "changed my mind", "advisory"), "already completed"),
+                     (lambda: R.task_amend(TL, tid, "advisory", title="rewritten"), "is completed")):
+        try:
+            fn()
+            assert False, "a closed task took a second write"
+        except RulesError as e:
+            assert frag in str(e), (frag, e)
+
+
+case("completed costs an outcome, dropped costs a reason, and closed is closed",
+     closing_costs_a_sentence)
+
+
+def urgency_cannot_be_amended_away():
+    """There is no door at all: `urgent` is not a parameter of task_amend, and
+    an amend with nothing else to change says so by name."""
+    import inspect
+    assert "urgent" not in inspect.signature(R.task_amend).parameters, \
+        "task_amend grew a way to change urgent"
+    tid = R.task_add(TL, "advisory", "Urgent one", "body", "Architect", urgent=True)["id"]
+    try:
+        R.task_amend(TL, tid, "advisory")
+        assert False, "an empty amend was accepted"
+    except RulesError as e:
+        assert "urgent" in str(e), e
+    assert R.task_get(TL, [tid])["found"][0]["urgent"] is True
+
+
+case("urgent has no door: it is the creator's, and no amend reaches it",
+     urgency_cannot_be_amended_away)
+
+
+def a_misdirected_task_is_reassigned_not_recreated():
+    tid = R.task_add(TL, "advisory", "Belongs to the architect",
+                     "This is a vault job.", "Advisory")["id"]
+    out = R.task_amend(TL, tid, "Advisory", consumer="architect")
+    assert out["consumer"] == "Architect" and out["amended"] == ["consumer"], out
+    assert tid in {x["id"] for x in R.task_list(TL, "architect")["pending"]}
+    assert tid not in {x["id"] for x in R.task_list(TL, "advisory")["pending"]}
+    # The thread is not broken: the history says where it came from.
+    v = [(x["version"], x["consumer"]) for x in R.cx.execute(
+        "SELECT version, consumer FROM task_versions WHERE project='Task log' "
+        "AND task_id=? ORDER BY version", (tid,))]
+    assert v == [(1, "Advisory"), (2, "Architect")], v
+    R.task_drop(TL, tid, "bench cleanup", "architect")
+
+
+case("a misdirected task is reassigned, and the history keeps both owners",
+     a_misdirected_task_is_reassigned_not_recreated)
+
+
+def the_idempotency_key_at_the_door():
+    a = R.task_add(TL, "architect", "Same discrepancy", "body", "FP-Verifica-Coerenza",
+                   idem_key="coherence-2026-08-11")
+    b = R.task_add(TL, "architect", "Same discrepancy", "body", "FP-Verifica-Coerenza",
+                   idem_key="coherence-2026-08-11")
+    assert a["created"] is True and b["created"] is False, (a, b)
+    assert a["id"] == b["id"], (a["id"], b["id"])
+    R.task_complete(TL, a["id"], "fixed", "architect")
+    c = R.task_add(TL, "architect", "Same discrepancy, again", "body",
+                   "FP-Verifica-Coerenza", idem_key="coherence-2026-08-11")
+    assert c["created"] is True and c["id"] != a["id"], (a["id"], c["id"])
+    R.task_drop(TL, c["id"], "bench cleanup", "architect")
+
+
+case("the same key on an OPEN task returns it; after it closes, it opens a new one",
+     the_idempotency_key_at_the_door)
+
+
+def the_ID_is_never_handed_out_again():
+    """Not after a close, and not after a prune: an ID that came back would
+    make an old citation point at somebody else's work."""
+    before = R.task_add(TL, "architect", "Burner", "body", "Architect")["id"]
+    R.task_complete(TL, before, "done", "architect")
+    R.prune_tasks(TL, "2099-12-31")
+    after = R.task_add(TL, "architect", "The next one", "body", "Architect")["id"]
+    assert int(after.split("-")[1]) > int(before.split("-")[1]), (before, after)
+    R.task_drop(TL, after, "bench cleanup", "architect")
+
+
+case("a task number is burnt for good — a prune does not rewind the counter",
+     the_ID_is_never_handed_out_again)
+
+
+def the_prune_refuses_to_touch_open_work():
+    """Deleting open work by seniority is the hard expiry this design threw
+    out, wearing the clothes of housekeeping."""
+    tid = R.task_add(TL, "advisory", "Still open", "body", "Architect")["id"]
+    out = R.prune_tasks(TL, "2099-12-31")
+    assert tid not in out["pruned"], out
+    assert out["left_open_untouched"] >= 1, out
+    assert tid in {x["id"] for x in R.task_list(TL, "advisory")["pending"]}
+
+
+case("the prune takes closed tasks only, and says how many it left alone",
+     the_prune_refuses_to_touch_open_work)
+
+
+def a_task_body_expands_its_citations_and_refuses_nothing():
+    """Chosen with Alfredo on 2026-08-11: a task is prose ABOUT work, so the
+    four refusals a rule's body meets do not apply — but reading still hands
+    back the current title, and a pointer that does not resolve is reported in
+    the text instead of at the door."""
+    rid = R.propose(TL, "VA", "R", "The vault rule", "Body.", ["*"], "why", "Architect")["id"]
+    R.approve(TL, R.batch(TL)["digest"])
+    tid = R.task_add(TL, "advisory", "Cite both",
+                     f"Fix ({rid}) and also (VA-0099), and mention ZZ-0001.",
+                     "Architect")["id"]
+    body = R.task_get(TL, [tid])["found"][0]["body"]
+    assert f"({rid} — The vault rule)" in body, body
+    assert "VA-0099 — ⚠ never defined" in body, body
+    assert "ZZ-0001" in body, body       # not a domain here: ordinary prose
+    R.task_drop(TL, tid, "bench cleanup", "advisory")
+
+
+case("a task body expands what it cites, and never refuses a pointer at the door",
+     a_task_body_expands_its_citations_and_refuses_nothing)
+
+
+def the_search_says_WHY_it_matched():
+    tid = R.task_add(TL, "advisory", "Nothing telling in the title",
+                     "The paragraph about the wash-sale window is wrong.",
+                     "Architect")["id"]
+    out = R.task_search(TL, "advisory", "wash-sale")
+    hit = next(x for x in out["hits"] if x["id"] == tid)
+    assert "wash-sale window" in hit["match"], hit
+    assert "…" in hit["match"] or len(hit["match"]) < 130, hit
+    # It reaches the outcome too: "what did I do about X" is the same question.
+    R.task_complete(TL, tid, "rewritten against the 30-day rule", "advisory")
+    out = R.task_search(TL, "advisory", "30-day")
+    hit = next(x for x in out["hits"] if x["id"] == tid)
+    assert "30-day rule" in hit["match"], hit
+
+
+case("every hit carries the fragment that matched — a code with no fragment is "
+     "a second call", the_search_says_WHY_it_matched)
+
+
+def the_range_will_not_guess_which_date():
+    for bad in ("", "whatever", "created"):
+        try:
+            R.task_range(TL, "advisory", "2026-08-01", "2026-08-31", bad)
+            assert False, f"`on` accepted {bad!r}"
+        except RulesError as e:
+            assert "created_at" in str(e) and "closed_at" in str(e), e
+    opened = R.task_range(TL, "advisory", "2026-01-01", "2099-12-31", "created_at")
+    closed = R.task_range(TL, "advisory", "2026-01-01", "2099-12-31", "closed_at")
+    assert opened["total"] > closed["total"], (opened["total"], closed["total"])
+    assert all(x["status"] != "pending" for x in closed["tasks"]), closed["tasks"]
+    # A bare date as the upper bound covers the WHOLE day.
+    assert closed["until"].endswith("T23:59:59Z"), closed["until"]
+    try:
+        R.task_range(TL, "advisory", "31-08-2026", "2026-08-31", "created_at")
+        assert False, "a date in the wrong shape was taken"
+    except RulesError as e:
+        assert "YYYY-MM-DD" in str(e), e
+
+
+case("tasks_range refuses to guess which date it filters on",
+     the_range_will_not_guess_which_date)
+
+
+def the_batch_of_bodies_has_two_ceilings():
+    ids = [R.task_add(TL, "architect", f"Body {i}", "x" * 100, "Architect")["id"]
+           for i in range(TASKS_GET_IDS + 2)]
+    try:
+        R.task_get(TL, ids)
+        assert False, "the batch took more than the ceiling"
+    except RulesError as e:
+        assert str(TASKS_GET_IDS) in str(e) and "refused" in str(e), e
+    out = R.task_get(TL, ids[:TASKS_GET_IDS])
+    assert out["returned"] == TASKS_GET_IDS and out["truncated"] is False, out
+    # The BYTE ceiling is the one that actually bounds it: ten bodies at the
+    # body ceiling would be far over any client's result cap.
+    big = [R.task_add(TL, "architect", f"Big {i}", "y" * (MAX_BODY_BYTES - 100),
+                      "Architect")["id"] for i in range(3)]
+    out = R.task_get(TL, big)
+    assert out["truncated"] is True, out
+    assert out["returned"] < out["requested"] == 3, out
+    assert out["byte_ceiling"] == TASKS_GET_BYTES, out
+    for tid in ids + big:
+        R.task_drop(TL, tid, "bench cleanup", "architect")
+
+
+case("tasks_get REFUSES too many codes and DECLARES a byte truncation",
+     the_batch_of_bodies_has_two_ceilings)
+
+
+def the_cut_falls_on_the_fresh_work():
+    """When the cap bites, the ORDER decides what is lost. Urgent first, then
+    oldest first — so what survives is what has been waiting, which is the
+    reason the list exists."""
+    R.add_consumers(TL, [("Bench", "chat")])
+    made = []
+    for i in range(TASKS_LIST_CAP + 5):
+        made.append(R.task_add(TL, "Bench", f"Task {i:03d}", "body", "Architect",
+                               urgent=(i == TASKS_LIST_CAP + 4))["id"])
+    out = R.task_list(TL, "bench")
+    assert out["pending_total"] == TASKS_LIST_CAP + 5, out["pending_total"]
+    assert out["pending_truncated"] is True, out["pending_truncated"]
+    assert len(out["pending"]) == TASKS_LIST_CAP, len(out["pending"])
+    got = [x["id"] for x in out["pending"]]
+    assert got[0] == made[-1], "the urgent one did not come first"
+    # The five that fell off are the FRESHEST, never the oldest.
+    assert made[0] in got and made[1] in got, "an old task was cut"
+    for late in made[TASKS_LIST_CAP:-1]:
+        assert late not in got, f"{late} survived the cut ahead of an older task"
+
+
+case("the cap cuts the fresh work, never what has been waiting — and says the "
+     "real total", the_cut_falls_on_the_fresh_work)
+
+
+def the_stale_marker_is_a_label_and_not_a_lifecycle():
+    """THE CONSTANT IS MOVED, NOT THE CLOCK. Backdating the row is the obvious
+    way and it is refused by the very trigger that freezes `created_at` —
+    which is the guarantee working, not an obstacle. Waiting a month is not a
+    test either. So the suite shifts the threshold and puts it back."""
+    tid = R.task_add(TL, "advisory", "Long forgotten", "body", "Architect")["id"]
+    fresh = next(x for x in R.task_list(TL, "advisory")["pending"] if x["id"] == tid)
+    assert "stale" not in fresh, fresh
+    _rules.TASKS_STALE_DAYS = 0
+    try:
+        row = next(x for x in R.task_list(TL, "advisory")["pending"] if x["id"] == tid)
+        assert row.get("stale") is True, row
+        assert row["status"] == "pending", "a stale task expired: it must not"
+        assert R.task_overview(TL)["by_consumer"]["Advisory"]["stale"] >= 1
+    finally:
+        _rules.TASKS_STALE_DAYS = TASKS_STALE_DAYS
+    R.task_drop(TL, tid, "bench cleanup", "advisory")
+
+
+case("a task that has gone stale is MARKED, not expired",
+     the_stale_marker_is_a_label_and_not_a_lifecycle)
+
+
+def the_recent_window_hands_over_to_the_range():
+    """A closed task leaves the list once the window has passed, and it is not
+    gone: it is asked for by date. That handover is the whole reason the
+    window may be short. Same manoeuvre as above — the window moves, the
+    closing date cannot, because a closed task is closed."""
+    tid = R.task_add(TL, "advisory", "Ancient history", "body", "Architect")["id"]
+    R.task_complete(TL, tid, "done long ago", "advisory")
+    assert tid in {x["id"] for x in R.task_list(TL, "advisory")["recently_closed"]}
+    _rules.TASKS_RECENT_DAYS = -1              # a window that has already shut
+    try:
+        ids = {x["id"] for x in R.task_list(TL, "advisory")["recently_closed"]}
+        assert tid not in ids, "a task past the window stayed in the list"
+    finally:
+        _rules.TASKS_RECENT_DAYS = TASKS_RECENT_DAYS
+    today = R.task_get(TL, [tid])["found"][0]["closed_at"][:10]
+    found = R.task_range(TL, "advisory", today, today, "closed_at")
+    assert tid in {x["id"] for x in found["tasks"]}, found
+
+
+case("past the window a closed task leaves the list and is found by date",
+     the_recent_window_hands_over_to_the_range)
+
+
+def the_overview_counts_the_urgent_by_CREATOR():
+    """`urgent` has no ceiling and no levels, so the guard against inflation is
+    visibility: an inflated column is a skill to correct, not a set of tasks to
+    downgrade."""
+    out = R.task_overview(TL)
+    assert "FP-Verifica-Coerenza" in out["urgent_created_by"] or \
+           "Architect" in out["urgent_created_by"], out["urgent_created_by"]
+    assert set(out["by_consumer"]) >= {"Architect", "Advisory", "Bench"}, out["by_consumer"]
+    caps = out["caps_in_force"]
+    assert caps["list"] == TASKS_LIST_CAP and caps["get_ids"] == TASKS_GET_IDS, caps
+    assert caps["stale_after_days"] == TASKS_STALE_DAYS, caps
+    assert out["by_consumer"]["Bench"]["pending"] == TASKS_LIST_CAP + 5, out["by_consumer"]
+
+
+case("the overview is cross-consumer, counts urgent by creator, and declares "
+     "the ceilings in force", the_overview_counts_the_urgent_by_CREATOR)
+
+
+def a_rule_ID_handed_to_a_task_reader_says_so():
+    try:
+        R.task_get(TL, ["VA-0001"])
+        assert False, "a rule ID passed for a task"
+    except RulesError as e:
+        assert "not a task ID" in str(e) and "rules_get" in str(e), e
+    out = R.task_get(TL, ["TK-9999"])
+    assert out["never_defined"] == ["TK-9999"] and out["found"] == [], out
+
+
+case("a rule ID read as a task is named as one, not reported missing",
+     a_rule_ID_handed_to_a_task_reader_says_so)
 
 print(f"\n{OK} passed, {FAIL} failed")
 if FAILURES:

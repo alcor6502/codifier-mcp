@@ -276,6 +276,29 @@ def _plus_days(days: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _day_bound(s: str, what: str, end: bool) -> str:
+    """A date the way a person writes one — `2026-07-01` — turned into the
+    instant that makes the comparison mean what they said. A bare date used as
+    an upper bound would silently exclude everything that happened that day,
+    which is the class of off-by-one nobody notices until a month is missing
+    from a changelog. A full stamp is taken as given."""
+    t = (s or "").strip()
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", t):
+        return t + ("T23:59:59Z" if end else "T00:00:00Z")
+    if re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", t):
+        return t
+    raise RulesError(f"{what} {s!r}: a date, YYYY-MM-DD (or a whole stamp, "
+                     "YYYY-MM-DDTHH:MM:SSZ)")
+
+
+def _day_start(s: str, what: str) -> str:
+    return _day_bound(s, what, end=False)
+
+
+def _day_end(s: str, what: str) -> str:
+    return _day_bound(s, what, end=True)
+
+
 def _strip_gloss(s: str) -> str:
     """Take the pointer out of anything reading may have handed back: the
     brackets, and the title the expansion added inside them."""
@@ -774,6 +797,24 @@ CREATE TABLE IF NOT EXISTS task_versions (
   PRIMARY KEY (project, task_id, version)
 );
 
+-- THE HIGH-WATER MARK, and it exists because the obvious counter is wrong.
+-- Deriving the next number from MAX(seq) over `tasks` reads only the rows
+-- that are STILL THERE, so the first prune hands the freed numbers straight
+-- back — and an ID that comes back makes an old citation point at somebody
+-- else's work. Found by the suite, on the case that opens a task, closes it,
+-- prunes and opens another: TK-0004 came back after TK-0007. A separate row
+-- that only ever goes up is the fix, and it is a TRIGGER so it holds for a
+-- row inserted by hand as well.
+CREATE TABLE IF NOT EXISTS task_counter (
+  project TEXT PRIMARY KEY REFERENCES projects(name) ON DELETE CASCADE,
+  last    INTEGER NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_tasks_counter AFTER INSERT ON tasks BEGIN
+  INSERT INTO task_counter (project, last) VALUES (NEW.project, NEW.seq)
+  ON CONFLICT(project) DO UPDATE SET last = MAX(task_counter.last, excluded.last);
+END;
+
 CREATE TRIGGER IF NOT EXISTS trg_tasks_ins AFTER INSERT ON tasks BEGIN
   INSERT INTO task_versions ({_TVCOLS})
   VALUES (NEW.project, NEW.id, {_f(_NEXT_TVERSION, 'NEW')},
@@ -832,7 +873,7 @@ END;
 TABLES = ("projects", "project_domains", "consumers", "consumer_versions",
           "scopes", "scope_members",
           "rules", "rule_scopes", "rule_refs", "rule_versions", "approvals",
-          "tasks", "task_versions")
+          "tasks", "task_versions", "task_counter")
 # Indexes the preflight has to see: only the ones that carry a GUARANTEE, never
 # the ones that carry speed. ux_rules_supersedes is what stops two pending
 # proposals claiming the same victim; the two fold indexes are what makes
@@ -847,7 +888,7 @@ TRIGGERS = ("trg_rules_ins", "trg_rules_upd", "trg_rules_del",
             "trg_consumers_ins", "trg_consumers_upd",
             "trg_managed_no_extra_member", "trg_managed_no_member_update",
             "trg_managed_no_rename", "trg_consumer_no_rename",
-            "trg_tasks_ins", "trg_tasks_upd", "trg_tasks_del",
+            "trg_tasks_counter", "trg_tasks_ins", "trg_tasks_upd", "trg_tasks_del",
             "trg_tasks_closed_is_closed", "trg_tasks_frozen")
 
 
@@ -2455,6 +2496,503 @@ class Registry:
                 "still_cited_by": citing,
                 "note": "the row stays: the ID is never reused and citations must keep "
                         "resolving. Active rules still citing it need fixing."}
+
+    # ---------- the task log ----------
+    #
+    # Work, not law. The task log replaces both the per-role changelog and the
+    # "pending" sections the role memories used to carry, and its whole point
+    # is that "what is open for me?" becomes ONE query — and, because closing
+    # costs an outcome, "what did I do lately?" is the same query with another
+    # filter.
+    #
+    # It writes no file. The project's own Storia stays the long story, told
+    # by whoever completes the work at the moment they complete it: the task
+    # carries the short, queryable outcome, the Storia the why. Two gestures,
+    # one moment.
+
+    def _consumer_id(self, project: str, name: str) -> tuple[int, str]:
+        """The surrogate and the stored spelling, together. Every task lookup
+        goes through the same casefolded resolution the rules use, so
+        `architect` and `Architect` are one owner and the answer carries the
+        spelling its owner chose."""
+        stored = self._consumer(project, name)
+        rid = self.cx.execute(
+            "SELECT id FROM consumers WHERE project=? AND lower(name)=lower(?)",
+            (project, stored)).fetchone()[0]
+        return int(rid), stored
+
+    @staticmethod
+    def _norm_task_id(tid: str) -> str:
+        """A task ID goes through the same door as a rule ID — brackets and a
+        short number tolerated — and then has to BE one. `VA-0002` handed to a
+        task reader is not a task that is missing, it is a rule: saying so is
+        the difference between a broken citation and a wrong tool."""
+        norm = _norm_id(tid)
+        if not norm.startswith(TASK_PREFIX + "-"):
+            raise RulesError(
+                f"{norm} is not a task ID: tasks are {TASK_PREFIX}-NNNN. That looks like "
+                "a RULE — read it with rules_get.")
+        return norm
+
+    def _next_task_seq(self, p: str) -> int:
+        """The LAST NUMBER EVER MINTED, plus one — read from the high-water
+        row, not from the rows that survive. Both are consulted and the larger
+        wins: the counter is maintained by a trigger, and if somebody drops
+        that trigger the surviving rows are still a floor. What must never
+        happen is a number coming back."""
+        alive = int(self.cx.execute(
+            "SELECT IFNULL(MAX(seq), 0) FROM tasks WHERE project=?", (p,)).fetchone()[0])
+        row = self.cx.execute("SELECT last FROM task_counter WHERE project=?",
+                              (p,)).fetchone()
+        n = max(alive, int(row[0]) if row else 0) + 1
+        if n > MAX_SEQ:
+            raise RulesError(f"the task log has burned all {MAX_SEQ} numbers, and IDs are "
+                             "never reused: this needs a decision, not a retry")
+        return n
+
+    def _task_row(self, p: str, tid: str):
+        return self.cx.execute("SELECT * FROM tasks WHERE project=? AND id=?",
+                               (p, tid)).fetchone()
+
+    @staticmethod
+    def _age_days(stamp: str, now: str) -> int:
+        try:
+            a = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")
+            b = datetime.strptime(now, "%Y-%m-%dT%H:%M:%SZ")
+        except (TypeError, ValueError):
+            return 0
+        return max(0, (b - a).days)
+
+    def _task_brief(self, row, now: str) -> dict:
+        """THE SHORT FORM, and it is the default of every list: id, title,
+        urgent, age, status. The body is read separately, by codes — a list
+        that carried the bodies would make "what is open for me?" the most
+        expensive question in the chat instead of the cheapest.
+
+        `stale` appears only when it is true. It is a LABEL on a reading and
+        never a lifecycle: a task does not expire, because an automatic expiry
+        would be a `dropped` with no reason, written by the clock."""
+        age = self._age_days(row["created_at"], now)
+        out = {"id": row["id"], "title": row["title"],
+               "urgent": bool(row["urgent"]),
+               "consumer": row["consumer"] if "consumer" in row.keys() else None,
+               "created_by": row["created_by"],
+               "status": row["status"], "age_days": age}
+        if out["consumer"] is None:
+            out.pop("consumer")
+        if row["status"] == "pending" and age >= TASKS_STALE_DAYS:
+            out["stale"] = True
+        if row["closed_at"]:
+            out["closed_at"] = row["closed_at"]
+        return out
+
+    _TASK_SELECT = ("SELECT t.*, (SELECT c.name FROM consumers c WHERE c.id = t.consumer_id) "
+                    "AS consumer FROM tasks t")
+
+    def _order_and_cap(self, rows, now: str) -> tuple[list, int, bool]:
+        """ORDERED BY THE SERVER, then cut. When the cap bites, the ORDER is
+        what decides which work is lost — so the cut has to fall on the fresh
+        work, which is still in mind, and never on what has gone stale, which
+        is the reason the list exists at all. The client may reorder what it
+        already holds; it cannot get back what was never sent.
+
+        The truncation is always DECLARED, with the real total: without it a
+        chat reads fifty and concludes it has fifty when it has a hundred and
+        thirty — the incident already lived through with the vault's search."""
+        total = len(rows)
+        cut = rows[:TASKS_LIST_CAP]
+        return [self._task_brief(r, now) for r in cut], total, total > TASKS_LIST_CAP
+
+    def task_add(self, code: str, consumer: str, title: str, body: str,
+                 created_by: str, urgent: bool = False, idem_key: str = "") -> dict:
+        """Open a task for a consumer. ANYBODY in the project may open one for
+        ANYBODY: that is how a coherence audit hands each correction to the
+        role that owns it. `created_by` is mandatory — the lesson of
+        proposed_by: omitted, the task would be orphaned in silence."""
+        p = self._project(code)
+        cid, owner = self._consumer_id(p, consumer)
+        if not (created_by or "").strip():
+            raise RulesError(
+                "created_by is mandatory: it is your own consumer name, and it is what "
+                "makes the task attributable. A task nobody signed is a task nobody "
+                "can be asked about.")
+        _, author = self._consumer_id(p, created_by)
+        title = (title or "").strip()
+        body = (body or "").strip()
+        if not title:
+            raise RulesError("the task needs a title")
+        if not body:
+            raise RulesError("the task needs a body: what has to be done, and enough of "
+                             "the why to act on it in three weeks")
+        if len(body.encode()) > MAX_BODY_BYTES:
+            raise RulesError(f"the body is over {MAX_BODY_BYTES} bytes: split the task — "
+                             "same discipline as a rule's body")
+        key = (idem_key or "").strip()
+        if key:
+            # The MECHANICAL cure for duplicates, chosen over discipline
+            # because discipline depends on how each skill happens to be
+            # written: a recurring audit that finds the same discrepancy three
+            # times must not produce three tasks. Partial on `pending`, so
+            # after the task closes the same key opens a new one — finding it
+            # AGAIN is a new report, not a repetition.
+            row = self.cx.execute(
+                "SELECT id FROM tasks WHERE project=? AND consumer_id=? AND idem_key=? "
+                "AND status='pending'", (p, cid, key)).fetchone()
+            if row is not None:
+                return {"project": p, "id": row[0], "consumer": owner, "created": False,
+                        "note": f"idempotency key {key!r} already has an OPEN task on "
+                                f"{owner}: this is that task, not a second one. Once it "
+                                "closes, the same key opens a new one."}
+        seq = self._next_task_seq(p)
+        tid = f"{TASK_PREFIX}-{seq:0{ID_DIGITS}d}"
+        now = _now()
+        self.cx.execute(
+            "INSERT INTO tasks (project,id,seq,title,body,consumer_id,created_by,urgent,"
+            "status,idem_key,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?, 'pending', ?,?,?)",
+            (p, tid, seq, title, body, cid, author, 1 if urgent else 0,
+             key or None, now, now))
+        return {"project": p, "id": tid, "consumer": owner, "created_by": author,
+                "urgent": bool(urgent), "created": True,
+                "note": "cite it in prose the way rules are cited, between round "
+                        f"brackets: ({tid})"}
+
+    def task_list(self, code: str, consumer: str) -> dict:
+        """What is open for you, and what you closed lately — the two halves of
+        the same question. The closed half is the CHANGELOG this log replaced:
+        it is there because every completion cost an outcome."""
+        p = self._project(code)
+        cid, owner = self._consumer_id(p, consumer)
+        now = _now()
+        pend = self.cx.execute(
+            self._TASK_SELECT + " WHERE t.project=? AND t.consumer_id=? AND t.status='pending' "
+            "ORDER BY t.urgent DESC, t.created_at ASC, t.seq ASC", (p, cid)).fetchall()
+        since = _plus_days(-TASKS_RECENT_DAYS)
+        closed = self.cx.execute(
+            self._TASK_SELECT + " WHERE t.project=? AND t.consumer_id=? AND t.status<>'pending' "
+            "AND t.closed_at >= ? ORDER BY t.closed_at DESC", (p, cid, since)).fetchall()
+        p_items, p_total, p_cut = self._order_and_cap(pend, now)
+        c_items, c_total, c_cut = self._order_and_cap(closed, now)
+        return {"project": p, "consumer": owner,
+                "pending": p_items, "pending_total": p_total, "pending_truncated": p_cut,
+                "recently_closed": c_items, "recently_closed_total": c_total,
+                "recently_closed_truncated": c_cut,
+                "window_days": TASKS_RECENT_DAYS, "stale_after_days": TASKS_STALE_DAYS,
+                "cap": TASKS_LIST_CAP,
+                "note": "short form: the bodies are read by code with tasks_get, up to "
+                        f"{TASKS_GET_IDS} at a time. Older closed tasks are not gone — "
+                        "ask for them by date with tasks_range."}
+
+    def task_search(self, code: str, consumer: str, query: str) -> dict:
+        """Search your tasks, every state included: finding what you already
+        did is the same question as finding what is open.
+
+        Each hit carries THE FRAGMENT THAT MATCHED, because a code with no
+        fragment tells you that something matched and not why — and then the
+        only way on is a second call for every hit. The fragment is cut from
+        what is STORED, so it shows the text as it was written; citations are
+        expanded when the body is read whole, not here, where expanding would
+        move the very offsets the fragment was measured on."""
+        p = self._project(code)
+        cid, owner = self._consumer_id(p, consumer)
+        q = (query or "").strip()
+        if not q:
+            raise RulesError("search for what? The query is empty.")
+        now = _now()
+        like = f"%{q}%"
+        rows = self.cx.execute(
+            self._TASK_SELECT + " WHERE t.project=? AND t.consumer_id=? "
+            "AND (t.title LIKE ? OR t.body LIKE ? OR IFNULL(t.outcome,'') LIKE ? "
+            "OR IFNULL(t.reason,'') LIKE ?) "
+            "ORDER BY t.urgent DESC, t.created_at ASC, t.seq ASC",
+            (p, cid, like, like, like, like)).fetchall()
+        items, total, cut = self._order_and_cap(rows, now)
+        for item, row in zip(items, rows):
+            item["match"] = self._fragment(q, row)
+        return {"project": p, "consumer": owner, "query": q,
+                "hits": items, "total": total, "truncated": cut,
+                "cap": TASKS_LIST_CAP}
+
+    @staticmethod
+    def _fragment(q: str, row, width: int = 60) -> str:
+        """The window around the match, whitespace collapsed, with an ellipsis
+        on whichever side was cut. Searched over the fields in the order a
+        reader would want them: what it is, then what came of it, then the
+        body."""
+        for field in ("title", "outcome", "reason", "body"):
+            text = row[field] or ""
+            i = text.lower().find(q.lower())
+            if i < 0:
+                continue
+            a, b = max(0, i - width), min(len(text), i + len(q) + width)
+            frag = " ".join(text[a:b].split())
+            return ("…" if a > 0 else "") + frag + ("…" if b < len(text) else "")
+        return ""
+
+    def task_range(self, code: str, consumer: str, since: str, until: str,
+                   on: str) -> dict:
+        """The tasks of a stretch of days. `on` says WHICH DATE it filters —
+        `created_at` or `closed_at` — and it has NO DEFAULT, on purpose:
+        "opened in July" and "closed in July" are two different questions, and
+        the changelog wants the second one. A default would answer one of them
+        while the caller believed the other."""
+        p = self._project(code)
+        cid, owner = self._consumer_id(p, consumer)
+        col = (on or "").strip().lower()
+        if col not in ("created_at", "closed_at"):
+            raise RulesError(
+                "`on` must say which date to filter: 'created_at' (opened in that "
+                "stretch) or 'closed_at' (closed in it). There is no default, because "
+                "the two are different questions and the wrong one answers silently.")
+        lo, hi = _day_start(since, "since"), _day_end(until, "until")
+        if lo > hi:
+            raise RulesError(f"the range runs backwards: {lo} is after {hi}")
+        now = _now()
+        rows = self.cx.execute(
+            self._TASK_SELECT + f" WHERE t.project=? AND t.consumer_id=? "
+            f"AND t.{col} IS NOT NULL AND t.{col} >= ? AND t.{col} <= ? "
+            "ORDER BY t.urgent DESC, t.created_at ASC, t.seq ASC",
+            (p, cid, lo, hi)).fetchall()
+        items, total, cut = self._order_and_cap(rows, now)
+        return {"project": p, "consumer": owner, "on": col, "since": lo, "until": hi,
+                "tasks": items, "total": total, "truncated": cut,
+                "cap": TASKS_LIST_CAP}
+
+    def task_get(self, code: str, ids) -> dict:
+        """The bodies, in a BATCH — the round trip per body is what would make
+        the short form in the lists a false economy.
+
+        TWO ceilings, and they are not the same one. The COUNT stops at
+        TASKS_GET_IDS and REFUSES above it rather than truncating: a caller who
+        asked for fifteen and silently got ten would act on ten. The BYTE
+        ceiling is the one that actually bounds the answer — ten bodies at the
+        body ceiling is 640,000 characters, far over any client's result cap —
+        and there truncation is the right answer, declared, because the
+        alternative is a result the client parks in a file.
+
+        Bodies come back with their citations EXPANDED: a task that says
+        `(VA-0002)` reads with that rule's current title beside it. Nothing is
+        REFUSED here, unlike a rule's body — a task is prose about work, and a
+        pointer that does not resolve is reported in the text, not at the
+        door."""
+        p = self._project(code)
+        if isinstance(ids, str):
+            ids = [ids]
+        ids = list(ids or [])
+        if not ids:
+            raise RulesError("no IDs: tasks_get reads bodies by code")
+        if len(ids) > TASKS_GET_IDS:
+            raise RulesError(
+                f"{len(ids)} IDs for a ceiling of {TASKS_GET_IDS}: the batch is refused, "
+                "not trimmed — a caller who asked for more and quietly got fewer would "
+                "act on the fewer. Split the call.")
+        found, missing, budget, truncated = [], [], TASKS_GET_BYTES, False
+        for raw in ids:
+            tid = self._norm_task_id(raw)
+            row = self._task_row(p, tid)
+            if row is None:
+                missing.append(tid)
+                continue
+            body = self._expand(p, row["body"])
+            cost = len(body.encode())
+            if found and cost > budget:
+                truncated = True
+                break
+            budget -= cost
+            item = self._task_brief(row, _now())
+            item["consumer"] = self.cx.execute(
+                "SELECT name FROM consumers WHERE id=?", (row["consumer_id"],)).fetchone()[0]
+            item["body"] = body
+            item["created_at"] = row["created_at"]
+            if row["outcome"]:
+                item["outcome"] = row["outcome"]
+            if row["reason"]:
+                item["reason"] = row["reason"]
+            if row["actor"]:
+                item["last_written_by"] = row["actor"]
+            item["versions"] = self.cx.execute(
+                "SELECT COUNT(*) FROM task_versions WHERE project=? AND task_id=?",
+                (p, tid)).fetchone()[0]
+            found.append(item)
+        out = {"project": p, "found": found, "never_defined": missing,
+               "requested": len(ids), "returned": len(found), "truncated": truncated,
+               "byte_ceiling": TASKS_GET_BYTES}
+        if truncated:
+            out["note"] = ("the batch stopped at the byte ceiling: ask for the rest by "
+                           "code. Truncated is DECLARED — a short answer that did not "
+                           "say so would read as a complete one.")
+        return out
+
+    def _close_task(self, code: str, tid: str, by: str, status: str,
+                    outcome: str = "", reason: str = "") -> dict:
+        p = self._project(code)
+        tid = self._norm_task_id(tid)
+        row = self._task_row(p, tid)
+        if row is None:
+            raise RulesError(f"{tid}: never defined in this project")
+        if row["status"] != "pending":
+            raise RulesError(
+                f"{tid} is already {row['status']}: a closed task is not re-closed and "
+                "not reopened. Its outcome is what the log is quoted for — open a new "
+                "task instead.")
+        _, actor = self._consumer_id(p, by)
+        now = _now()
+        self.cx.execute(
+            "UPDATE tasks SET status=?, outcome=?, reason=?, actor=?, closed_at=?, "
+            "updated_at=? WHERE project=? AND id=?",
+            (status, outcome or None, reason or None, actor, now, now, p, tid))
+        return {"project": p, "id": tid, "status": status, "by": actor, "closed_at": now}
+
+    def task_complete(self, code: str, tid: str, outcome: str, by: str) -> dict:
+        """Close a task WITH ITS OUTCOME. The outcome is mandatory and that is
+        the whole design: the completed tasks with their outcomes ARE the
+        consumer's changelog, and one closed without a word is an entry the
+        changelog lost. Keep it short and queryable — the long story goes in
+        the project's Storia, written by the same hand in the same moment."""
+        if not (outcome or "").strip():
+            raise RulesError(
+                "outcome is mandatory on a completion: the completed tasks with their "
+                "outcomes ARE the changelog of this consumer, and one closed in silence "
+                "is an entry nobody can read back. One or two sentences: what came of it.")
+        return self._close_task(code, tid, by, "completed", outcome=outcome.strip())
+
+    def task_drop(self, code: str, tid: str, reason: str, by: str) -> dict:
+        """Close a task WITHOUT doing it, with the reason why. Twin of denying
+        a proposal: deciding not to do something is a decision, and a decision
+        that leaves no reason gets re-taken from scratch the next time."""
+        if not (reason or "").strip():
+            raise RulesError(
+                "reason is mandatory on a drop: closing without doing is a DECISION, and "
+                "one with no reason will be taken again from scratch. Say why it will "
+                "not be done.")
+        return self._close_task(code, tid, by, "dropped", reason=reason.strip())
+
+    def task_amend(self, code: str, tid: str, by: str, title: str = "",
+                   body: str = "", consumer: str = "") -> dict:
+        """Amend a task that is still OPEN: its title, its body, or its OWNER.
+
+        Reassigning is here because a misdirected task is an ordinary event and
+        not an incident: without it the only way out would be drop-and-recreate,
+        which breaks the thread between the work and the request. What cannot
+        move is `urgent` — the creator set it, and whoever receives it has an
+        interest in clearing it."""
+        p = self._project(code)
+        tid = self._norm_task_id(tid)
+        row = self._task_row(p, tid)
+        if row is None:
+            raise RulesError(f"{tid}: never defined in this project")
+        if row["status"] != "pending":
+            raise RulesError(
+                f"{tid} is {row['status']}: a closed task is not amended. What was "
+                "written when it closed is what the log is read for.")
+        _, actor = self._consumer_id(p, by)
+        sets, args, changed = [], [], []
+        if (title or "").strip():
+            sets.append("title=?"); args.append(title.strip()); changed.append("title")
+        if (body or "").strip():
+            b = body.strip()
+            if len(b.encode()) > MAX_BODY_BYTES:
+                raise RulesError(f"the body is over {MAX_BODY_BYTES} bytes: split the task")
+            sets.append("body=?"); args.append(b); changed.append("body")
+        moved_to = ""
+        if (consumer or "").strip():
+            cid, moved_to = self._consumer_id(p, consumer)
+            sets.append("consumer_id=?"); args.append(cid); changed.append("consumer")
+        if not sets:
+            raise RulesError("nothing to amend: pass a title, a body or a consumer. "
+                             "`urgent` is not amendable — it is the creator's.")
+        now = _now()
+        sets += ["actor=?", "updated_at=?"]
+        args += [actor, now, p, tid]
+        self.cx.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE project=? AND id=?",
+                        args)
+        out = {"project": p, "id": tid, "amended": changed, "by": actor}
+        if moved_to:
+            out["consumer"] = moved_to
+        return out
+
+    def task_overview(self, code: str) -> dict:
+        """MAINTENANCE. The log across every consumer at once, which is the one
+        reading a working chat has no business doing: it is how you see that a
+        role is buried, or that one skill marks everything urgent.
+
+        The urgent count is BY CREATOR on purpose. `urgent` has no ceiling and
+        no levels — intermediate levels inflate and stop ordering anything —
+        so the guard against inflation is visibility: if one creator's column
+        is all urgent, the skill gets corrected, not the tasks.
+
+        It also DECLARES the ceilings in force, because the day a ceiling is
+        exported to the template there will be two places a number can live,
+        and this says which one is commanding."""
+        p = self._project(code)
+        now = _now()
+        per_consumer = {}
+        for cid, name in self.cx.execute(
+                "SELECT id, name FROM consumers WHERE project=? ORDER BY name", (p,)):
+            row = self.cx.execute(
+                "SELECT SUM(status='pending'), SUM(status='completed'), "
+                "SUM(status='dropped'), SUM(status='pending' AND urgent=1) "
+                "FROM tasks WHERE project=? AND consumer_id=?", (p, cid)).fetchone()
+            stale = 0
+            for r in self.cx.execute("SELECT created_at FROM tasks WHERE project=? "
+                                     "AND consumer_id=? AND status='pending'", (p, cid)):
+                if self._age_days(r[0], now) >= TASKS_STALE_DAYS:
+                    stale += 1
+            per_consumer[name] = {"pending": row[0] or 0, "completed": row[1] or 0,
+                                  "dropped": row[2] or 0, "urgent_open": row[3] or 0,
+                                  "stale": stale}
+        urgent_by_creator = {r[0]: r[1] for r in self.cx.execute(
+            "SELECT created_by, COUNT(*) FROM tasks WHERE project=? AND urgent=1 "
+            "GROUP BY created_by ORDER BY COUNT(*) DESC, created_by", (p,))}
+        oldest = self.cx.execute(
+            self._TASK_SELECT + " WHERE t.project=? AND t.status='pending' "
+            "ORDER BY t.created_at ASC LIMIT 5", (p,)).fetchall()
+        return {
+            "project": p,
+            "by_consumer": per_consumer,
+            "urgent_created_by": urgent_by_creator,
+            "oldest_open": [self._task_brief(r, now) for r in oldest],
+            "caps_in_force": {"list": TASKS_LIST_CAP, "get_ids": TASKS_GET_IDS,
+                              "get_bytes": TASKS_GET_BYTES,
+                              "recent_window_days": TASKS_RECENT_DAYS,
+                              "stale_after_days": TASKS_STALE_DAYS},
+            "note": "the urgent count is by CREATOR because urgency is the creator's: an "
+                    "inflated column is a skill to correct, not a set of tasks to "
+                    "downgrade.",
+        }
+
+    def prune_tasks(self, code: str, before: str) -> dict:
+        """MAINTENANCE. Remove CLOSED tasks older than a date, and only those.
+
+        It REFUSES anything still pending, and the refusal is the point rather
+        than a safety net: deleting open work by seniority is the hard expiry
+        this design threw out, wearing the clothes of housekeeping. A task that
+        has gone stale is closed by a person, with a reason.
+
+        The counter is NOT rewound — the numbers stay burnt, because an ID that
+        came back would make an old citation point at somebody else's work."""
+        p = self._project(code)
+        cutoff = _day_end(before, "before")
+        open_ones = self.cx.execute(
+            "SELECT COUNT(*) FROM tasks WHERE project=? AND status='pending' "
+            "AND created_at <= ?", (p, cutoff)).fetchone()[0]
+        rows = [r[0] for r in self.cx.execute(
+            "SELECT id FROM tasks WHERE project=? AND status<>'pending' AND closed_at <= ? "
+            "ORDER BY seq", (p, cutoff))]
+        # The task first, then its history — in that order, because deleting
+        # the task WRITES one last version (the safety net that records a hand
+        # deletion), so clearing the history first would leave that row
+        # behind. The counter is not touched by either: it is the one thing
+        # here that only ever goes up.
+        for tid in rows:
+            self.cx.execute("DELETE FROM tasks WHERE project=? AND id=?", (p, tid))
+            self.cx.execute("DELETE FROM task_versions WHERE project=? AND task_id=?",
+                            (p, tid))
+        return {"project": p, "before": cutoff, "pruned": rows,
+                "left_open_untouched": open_ones,
+                "note": "closed tasks only. Open ones are never pruned by age — that "
+                        "would be an expiry with no reason, written by the clock — and "
+                        "the counter is not rewound: the numbers stay burnt."}
 
     # ---------- derivatives ----------
 
