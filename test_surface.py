@@ -1609,6 +1609,142 @@ ok(GUIDE_SRC.count("legend of the domains present") == 1,
    "the manual pins the legend, exactly once",
    GUIDE_SRC.count("legend of the domains present"))
 
+print("\n== the web layer speaks to the engine, and never to the database ==")
+
+WEB = os.path.join(HERE, "web.py")
+WEB_SRC = source_or_none(WEB) or ""
+ok(bool(WEB_SRC), "web.py is there to be read at all")
+WEB_TREE = parse(WEB) if WEB_SRC else ast.Module(body=[], type_ignores=[])
+
+# THE CONTRACT, and it is the one that keeps a road open rather than the one
+# that stops a bug. The layer may call the methods of `Registry` and nothing
+# else: a single SELECT in here would tie the UI to this schema, and the day
+# the UI becomes a second MCP client — written down as the live alternative,
+# not as a fantasy — it would have to be rewritten instead of moved. Nothing
+# at runtime would ever complain, which is exactly why it is checked here.
+_SQL = re.compile(r"\b(SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|PRAGMA|BEGIN|COMMIT)\b")
+# DOCSTRINGS are subtracted, and that is not a loophole: a docstring is the
+# first statement of a module, a class or a function and is never handed to
+# sqlite3. Left in, this check goes red on the very paragraph that explains
+# the ban — and a check that fails on a legitimate sentence gets deleted
+# rather than obeyed, which this file has already paid for twice.
+_DOCS = {id(ast.get_docstring(n, clean=False)) for n in ast.walk(WEB_TREE)
+         if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                           ast.AsyncFunctionDef))}
+_DOCNODES = set()
+for _n in ast.walk(WEB_TREE):
+    if isinstance(_n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+        if (_n.body and isinstance(_n.body[0], ast.Expr)
+                and isinstance(_n.body[0].value, ast.Constant)
+                and isinstance(_n.body[0].value.value, str)):
+            _DOCNODES.add(id(_n.body[0].value))
+_SQLY = sorted({n.value[:40] for n in ast.walk(WEB_TREE)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                and id(n) not in _DOCNODES and _SQL.search(n.value)})
+ok(not _SQLY, "web.py contains no SQL: the contract towards the engine is "
+              "Registry's methods and nothing else", _SQLY)
+_WEB_IMPORTS = set()
+for _n in ast.walk(WEB_TREE):
+    if isinstance(_n, ast.Import):
+        _WEB_IMPORTS |= {a.name.split(".")[0] for a in _n.names}
+    elif isinstance(_n, ast.ImportFrom) and _n.module:
+        _WEB_IMPORTS.add(_n.module.split(".")[0])
+ok("sqlite3" not in _WEB_IMPORTS and "rules" not in _WEB_IMPORTS,
+   "and it does not import sqlite3 or reach into rules.py behind the engine",
+   sorted(_WEB_IMPORTS))
+# And starlette is imported INSIDE build(), never at module level: the
+# preflight imports this file for the port and the publishable ports, and it
+# has to keep running on an image where the web stack is broken.
+ok("starlette" not in {a.name.split(".")[0] for n in WEB_TREE.body
+                       if isinstance(n, ast.Import) for a in n.names}
+   | {n.module.split(".")[0] for n in WEB_TREE.body
+      if isinstance(n, ast.ImportFrom) and n.module},
+   "and starlette is not imported at module level — the preflight reads this file")
+
+print("\n== the master, the session, and the form the browser can fill ==")
+
+_BUILD = next((n for n in WEB_TREE.body if isinstance(n, ast.FunctionDef)
+               and n.name == "build"), None)
+ok(_BUILD is not None, "web.py defines build()")
+if _BUILD is not None:
+    _BARGS = [a.arg for a in _BUILD.args.posonlyargs + _BUILD.args.args
+              + _BUILD.args.kwonlyargs]
+    ok("master" in _BARGS,
+       "and it is HANDED the master: a web layer that read the environment "
+       "itself would be a second place the configuration is decided", _BARGS)
+    ok("log" in _BARGS,
+       "and the service's own logger, or a refusal stops appearing in the log "
+       "everybody reads", _BARGS)
+
+# The comparison on the master is constant-time, like _admin's. `==` on a
+# secret is a different defect, and it is one nothing at runtime reports.
+_CMPS = [n for n in ast.walk(WEB_TREE) if isinstance(n, ast.Call)
+         and ast.unparse(n.func) == "secrets.compare_digest"]
+ok(len(_CMPS) >= 1, "the master is compared with secrets.compare_digest", len(_CMPS))
+ok(not [n for n in ast.walk(WEB_TREE) if isinstance(n, ast.Compare)
+        and any(isinstance(o, (ast.Eq, ast.NotEq)) for o in n.ops)
+        and "master" in ast.unparse(n).lower()],
+   "and never with == or !=",
+   [ast.unparse(n)[:50] for n in ast.walk(WEB_TREE) if isinstance(n, ast.Compare)
+    and any(isinstance(o, (ast.Eq, ast.NotEq)) for o in n.ops)
+    and "master" in ast.unparse(n).lower()])
+
+# The session secret is generated AT BOOT and lives nowhere else. Read from
+# the environment it would survive a restart, which is the property this
+# design deliberately does not want: a reboot invalidates every session, and
+# the cost is typing a password once.
+_TOKENS = [n for n in ast.walk(WEB_TREE) if isinstance(n, ast.Call)
+           and ast.unparse(n.func).startswith("secrets.token_")]
+ok(bool(_TOKENS), "the session secret is generated with secrets.token_*",
+   [ast.unparse(n) for n in _TOKENS])
+ok(_BUILD is not None and any(t in ast.walk(_BUILD) for t in _TOKENS),
+   "and inside build(), so a restart invalidates every session")
+ok(not [n for n in ast.walk(WEB_TREE) if isinstance(n, ast.Call)
+        and ast.unparse(n.func) in ("os.environ.get", "os.getenv")
+        and n.args and isinstance(n.args[0], ast.Constant)
+        and "SECRET" in str(n.args[0].value).upper()],
+   "and it is never read from the environment")
+
+# The cookie is signed, and the signature is checked with a constant-time
+# comparison too — a forged cookie is the whole of the session.
+ok(any(ast.unparse(n.func).startswith("hmac.") for n in ast.walk(WEB_TREE)
+       if isinstance(n, ast.Call)),
+   "the session cookie is signed with hmac")
+
+# One hour of INACTIVITY, and the number is a named constant so the check and
+# the code cannot say different things.
+ok(getattr(__import__("web"), "SESSION_MAX_IDLE", None) == 3600,
+   "the session expires after one hour of inactivity",
+   getattr(__import__("web"), "SESSION_MAX_IDLE", None))
+
+# A form with the password alone is the case where automatic filling goes
+# wrong, and goes wrong in SILENCE — 1Password and the Apple keychain both
+# want a username field to key the entry on. It is hidden and constant: there
+# is only one user.
+ok('autocomplete="username"' in WEB_SRC,
+   "the login form carries a hidden username field, for the password managers")
+ok('autocomplete="current-password"' in WEB_SRC,
+   "and marks the password as the current one")
+
+# Every value that reaches a page goes through html.escape. There is no
+# template engine here — that was the decision — so the escaping is the whole
+# defence, and it has to be visible.
+ok("html.escape" in WEB_SRC, "values reaching a page go through html.escape")
+
+# A refused login leaves ONE line, at WARNING. Not a traceback: a page that
+# answers a wrong password with a stack trace is a page that teaches the
+# person nothing and the log everything. WARNING and not INFO, unlike a wrong
+# admin code: that one can only come from one of Alfredo's own chats, this one
+# can come from anything on the LAN, which is the actor the master exists for
+# — and WARNING is the level that survives LOG_LEVEL=WARNING, which is the
+# setting this line most needs to survive.
+_WEBLOGS = [ast.unparse(n.func) for n in ast.walk(WEB_TREE) if isinstance(n, ast.Call)
+            and ast.unparse(n.func).startswith("log.")]
+ok(bool(_WEBLOGS), "web.py logs through the logger it was handed", _WEBLOGS)
+ok("log.warning" in _WEBLOGS, "and a refused login is a WARNING line", _WEBLOGS)
+ok("log.exception" not in _WEBLOGS and "log.error" not in _WEBLOGS,
+   "and a wrong password is not an error: no traceback", _WEBLOGS)
+
 print("\n== the UI is refused at the edge, not at the first click ==")
 
 # The `web` check is BLOCKING like every other one, and it is the only place

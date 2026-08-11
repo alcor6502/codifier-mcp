@@ -49,6 +49,10 @@ Configuration, all through environment variables:
   WEB_PORT                the port the administration UI listens on (default
                           9443). Resolved in web.port_from_env so the service
                           and the preflight cannot disagree about it
+  WEB_MASTER_CODE         the master of the administration UI. Sibling of
+                          ADMIN_ACCESS_CODE and deliberately NOT the same
+                          secret: that one travels in conversations, this one
+                          never leaves the browser
 """
 from __future__ import annotations
 
@@ -121,6 +125,11 @@ BIND_HOST = os.environ.get("BIND_HOST", "127.0.0.1")
 # Resolved in web.port_from_env for the same reason as the IP filter and the
 # log level: one expression, so the service and the preflight cannot disagree.
 WEB_PORT = web.port_from_env()
+# The administration UI's master. Read HERE, like every other secret, and
+# handed to the web layer: a layer that read its own configuration would be a
+# second place where it is decided. The preflight has already refused a
+# missing one, a placeholder and anything under 12 characters.
+WEB_MASTER = env("WEB_MASTER_CODE")
 BACKUP_DIR = os.environ.get("BACKUP_DIR") or os.path.join(os.path.dirname(DB_PATH), "backup")
 # Resolved in the engine's cidrs_from_env so the service and the preflight can
 # never disagree about what the filter is.
@@ -777,7 +786,7 @@ async def _serve() -> None:
 
     servers = (
         uvicorn.Server(cfg(mcp.http_app(), BIND_HOST, PORT)),
-        uvicorn.Server(cfg(web.build(registry=registry, log=log),
+        uvicorn.Server(cfg(web.build(registry=registry, log=log, master=WEB_MASTER),
                            WEB_BIND_HOST, WEB_PORT)),
     )
     await asyncio.gather(*(s.serve() for s in servers))
