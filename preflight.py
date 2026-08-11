@@ -15,17 +15,23 @@ engine's ROOT drags no FastMCP in, by its own contract: a preflight has to be
 able to run, and to report, on an image where fastmcp is missing or broken.
 
 Its own, because this service keeps a database instead of files:
-  db          it opens, it is whole, it is in WAL
+  db          it opens, it is whole, it is in WAL — and a database from an
+              earlier schema goes RED here, with the cure in the line: there
+              is no migration, a schema change means a wipe
   schema      every table AND trigger is there — a missing trigger raises no
               error, it just stops writing history, and nobody notices
   ownership   the process is root and the database is NOT writable by anyone
               else: a write from the share would bypass the triggers
-  admin_code  ADMIN_ACCESS_CODE present, long enough, not a placeholder
   approval    the one knob the approval lifecycle reads, PROVISIONAL_DAYS,
               validated at the edge instead of at the first approval
   web         the administration UI: its master present, long enough and not a
               placeholder, its port neither publishable by the Funnel nor the
               MCP's own, and its per-action ceiling a number it can mean
+
+ADMIN_ACCESS_CODE has no check any more because it has no reader any more:
+the maintenance credential is the per-project architect key, a hash on the
+project's own row, born at create and reborn at rekey — there is nothing of
+it in the environment to validate.
 
 Selective skip (for local testing only, never in production):
   PREFLIGHT_SKIP="funnel,node_key"
@@ -101,9 +107,10 @@ def c_schema():
         columns = {r[1] for r in cx.execute("PRAGMA table_info(projects)")}
     finally:
         cx.close()
-    if "code" not in columns:
-        raise RuntimeError("table `projects` has no `code` column: this database belongs to an "
-                           "earlier schema. Recreate it, or migrate it, before starting.")
+    if "code" not in columns or "architect_key_hash" not in columns:
+        raise RuntimeError("table `projects` belongs to an earlier schema. There is no "
+                           "migration, by decision: wipe the database and reseed — the "
+                           "corpus goes back in by hand.")
     missing = [x for x in TABLES + INDEXES + TRIGGERS if x not in present]
     if missing:
         raise RuntimeError(f"missing from the schema: {', '.join(missing)} — "
@@ -138,17 +145,6 @@ def c_ownership():
     return f"root, {oct(st.st_mode & 0o777)} (read-only from the share)"
 
 
-@check("admin_code")
-def c_admin_code():
-    v = os.environ.get("ADMIN_ACCESS_CODE", "")
-    if not v or is_placeholder(v):
-        raise RuntimeError("ADMIN_ACCESS_CODE missing or still a placeholder: without it, "
-                           "writing would be open to any chat that connects")
-    if len(v) < 12:
-        raise RuntimeError(f"ADMIN_ACCESS_CODE is {len(v)} characters: too short (>=12)")
-    return f"present ({len(v)} characters)"
-
-
 @check("approval")
 def c_approval():
     """What is left of this check after the signature's exit is the one knob
@@ -165,7 +161,7 @@ def c_approval():
             raise RuntimeError(f"PENDING_CAP={cap!r}: a positive whole number of "
                                "pending proposals")
     return (f"provisional {days or 90} days · pending cap {cap or 5} · "
-            "admin code approves, no signature")
+            "the UI approves, behind the master")
 
 
 @check("web")
@@ -319,7 +315,7 @@ def c_manuals():
     return f"{len(MANUALS)} manual{'s' if len(MANUALS) != 1 else ''}, in the image"
 
 
-CHECKS = [c_db, c_schema, c_writable, c_ownership, c_admin_code, c_approval,
+CHECKS = [c_db, c_schema, c_writable, c_ownership, c_approval,
           c_web, c_oauth, c_token_store, c_funnel, c_node_key, c_cidrs, c_dns,
           c_manuals]
 

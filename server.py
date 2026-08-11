@@ -11,11 +11,16 @@ preflight. Three deliberate differences:
   NAME but an opaque alphanumeric CODE that lives at the top of that project's
   instructions. No read tool lists projects and no error names one: whoever
   lacks the code cannot find the door;
-- writing is a two-step affair. A chat PROPOSES; the batch is approved behind
-  the admin code, against the batch's DIGEST — you approve the batch you read.
-  The ed25519 signature that used to ride on approval left in v2.0.0: the
-  admin UI is the door a person will come through, and until it exists
-  approve/renew/promote stay here as its placeholder.
+- writing is a two-step affair. A chat PROPOSES; the batch is approved in the
+  administration UI, behind the master, against the batch's DIGEST — you
+  approve the batch you read. Since v3.0.0 approve/renew/promote and the
+  master operations (create, registry, rekey, backup) are NOT tools: they
+  left the MCP surface when the UI replaced their placeholder, so the master
+  never travels in a conversation. What stays behind the tools is REDACTION,
+  and it opens per project: the pair (project code, architect key) travels on
+  every maintenance call. ADMIN_ACCESS_CODE is dead — one container-wide code
+  opened the maintenance of every project, which is the defect you discover
+  the day the projects are two.
 
 Every tool that acts on a rule is prefixed `rules_`: the vault's tools (status,
 history, diff, search...) live in the same chat, and two namesakes get confused.
@@ -27,7 +32,6 @@ file, whole, with a stop line where the consumer's part ends.
 Configuration, all through environment variables:
   DB_PATH                 the single database (default /db/rules.db)
   BACKUP_DIR              VACUUM INTO copies (default: <db dir>/backup)
-  ADMIN_ACCESS_CODE       the maintenance code: it travels on every call
   PROVISIONAL_DAYS        how long an approved rule lives (default 90)
   PENDING_CAP             pending proposals a project may hold (default 5).
                           Born optional with a working default in the code:
@@ -49,10 +53,10 @@ Configuration, all through environment variables:
   WEB_PORT                the port the administration UI listens on (default
                           9443). Resolved in web.port_from_env so the service
                           and the preflight cannot disagree about it
-  WEB_MASTER_CODE         the master of the administration UI. Sibling of
-                          ADMIN_ACCESS_CODE and deliberately NOT the same
-                          secret: that one travels in conversations, this one
-                          never leaves the browser
+  WEB_MASTER_CODE         the master of the administration UI — the root of
+                          the deployment: it opens every page, approves,
+                          creates projects, rekeys, backs up. It never
+                          leaves the browser: no tool carries it
   WEB_ACTION_CAP          how many proposals the UI may approve in one action
                           (default 5)
 
@@ -64,7 +68,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import secrets
 import sys
 from pathlib import Path
 
@@ -122,7 +125,6 @@ def env(name: str, default: str | None = None) -> str:
 DB_PATH = env("DB_PATH", "/db/rules.db")
 BASE_URL = env("BASE_URL")
 ALLOWED_LOGIN = env("ALLOWED_GITHUB_LOGIN")
-ADMIN_CODE = env("ADMIN_ACCESS_CODE")
 PORT = int(env("PORT", "3001"))
 # The interface the MCP server listens on INSIDE the container. It is read
 # once, here, because the startup line prints it and 0.0.0.0 is the one field
@@ -178,7 +180,7 @@ mcp = FastMCP("codifier-mcp", auth=auth)
 # `refused` lines is therefore no evidence that no call went malformed.
 #
 # What the payload holds here is not a document body, which is what it is on
-# the twin: it is the PROJECT CODE and the ADMIN CODE, which travel as
+# the twin: it is the PROJECT CODE and the ARCHITECT KEY, which travel as
 # arguments on every maintenance call. One forgotten parameter and both are in
 # the container's log. Measured on this shape, with fastmcp 3.4.5: before,
 # `{'project': 'a3f9…', 'cod': 'TOPSECRET-ADMIN-CODE-24'}` printed twice in one
@@ -225,27 +227,19 @@ mcp.add_middleware(Gate(log=log, allowed_login=ALLOWED_LOGIN,
 _GUIDE = Path(__file__).with_name("reference-guide.md")
 
 
-def _admin(code: str) -> None:
-    """The MAINTENANCE gate: writing, the reads that step outside the caller's
-    own perimeter (status, audit, history, export, the registry index), and the
-    manual that is for whoever maintains the corpus rather than for whoever
-    works under it.
+def _admin(project: str, key: str) -> None:
+    """The MAINTENANCE gate, PER PROJECT since v3.0.0: the pair (project
+    code, architect key) travels on every call — no session, no "mode" left
+    open, and no container-wide code any more. The check lives in the engine
+    (check_architect), because the key is per-project DATA now: a hash on the
+    project's own row, not a variable of the container. The engine resolves
+    the project first, then compares the hash, and answers every failure with
+    ONE message — which half was wrong is not said, on purpose.
 
-    It is not session state: the code travels on every call, so there is no
-    "mode" left open by accident."""
-    if not secrets.compare_digest((code or "").strip(), ADMIN_CODE):
-        # No log line here, and that is a change from v1.2. It used to warn,
-        # on the argument that a run of wrong codes is the only signal that
-        # somebody is trying — but since v1.2 the Gate covers the handshake, so
-        # nobody who is not Alfredo's own GitHub login, from an allowed range,
-        # ever reaches a tool at all. A wrong code can now only come from one
-        # of his own chats, which makes it an ordinary refusal and not a
-        # security signal. The decorator logs it once, at INFO, with the tool
-        # name and the reason — more than this line ever said. Logging here as
-        # well put the same event at two heights, one of them the Gate's.
-        raise RulesError("admin code missing or wrong: this is done only by the chat that "
-                         "MAINTAINS the registry, with the code Alfredo gives it. Do not try "
-                         "to guess it: ask.")
+    No log line here, for the reason v1.2 dropped it: the Gate covers the
+    handshake, so a wrong pair can only come from one of Alfredo's own chats
+    — an ordinary refusal, logged once by the decorator, at INFO."""
+    registry.check_architect(project, key)
 
 
 # =====================================================================
@@ -270,7 +264,7 @@ def reference_guide() -> dict:
     """The manual for this registry, whole. The consumer part comes first —
     the model, the citations, which tool for which job, what the errors mean —
     and ends at a STOP line: a working session can stop there. Below the line
-    live the maintenance tools, which want the admin code, and the craft of
+    live the maintenance tools, which want the architect key, and the craft of
     deciding what deserves to be a rule. Read the first part before your first
     write."""
     try:
@@ -367,7 +361,7 @@ def rules_pending(project: str, consumer: str = "") -> dict:
 
 
 # =====================================================================
-# Proposing — no admin code: a proposal reaches nobody
+# Proposing — no key: a proposal reaches nobody
 # =====================================================================
 
 @tool
@@ -425,54 +419,31 @@ def rules_propose(project: str, domain: str, type: str, title: str, body: str,
 
 
 # =====================================================================
-# Approving — the admin code, and the batch's digest
+# Reading the batch, and denying — the architect key. Approval is the UI's
 # =====================================================================
 
 @tool
-def rules_batch(project: str, code: str) -> dict:
+def rules_batch(project: str, key: str) -> dict:
     """MAINTENANCE. The pending proposals, whole, plus the DIGEST of the batch.
 
     You approve the BATCH, never the single rule: seen side by side, three
     proposals that say the same thing become visible as what they are.
 
-    Pass the digest to rules_approve. If a proposal arrives in between, the
-    digest changes and the stale one is refused — that is on purpose: it is
+    Approval happens in the administration UI — the lot page, behind the
+    master — against this same digest: if a proposal arrives in between, the
+    digest changes and the stale one is refused. That is on purpose: it is
     the proof that what gets approved is the batch that was READ.
 
     Each proposal carries its `reason`: the why you are letting in is on the
     table where the decision happens, not a history call away. A proposal
     that SUPERSEDES a rule shows it here too — approving it also retires
     that rule, and whoever approves must see both halves of the move."""
-    _admin(code)
+    _admin(project, key)
     return registry.batch(project)
 
 
 @tool
-def rules_approve(project: str, digest: str, code: str) -> dict:
-    """MAINTENANCE. Approve the whole batch: the proposals become ACTIVE and
-    PROVISIONAL, with an expiry date.
-
-    Provisional is the point of the whole mechanism. Rules did not pile up
-    because somebody wrote them without permission — they piled up because
-    adding one costs a call and removing one costs a decision nobody takes.
-    Expiry inverts that: staying costs a decision, going is free.
-
-    `digest` must be the current one from rules_batch: it proves the approval
-    covers the batch that was read, not the batch that exists now.
-
-    A proposal carrying `supersedes` does both its moves here, in ONE
-    transaction: the heir goes active and the named rule is retired pointing
-    at it — no window with both in force, no third step to forget. A victim
-    somebody retired in the meantime is a declared no-op in the verdict.
-
-    This tool is the admin UI's placeholder — when the UI arrives it calls
-    the same engine method, and this door closes."""
-    _admin(code)
-    return registry.approve(project, digest)
-
-
-@tool
-def rules_deny(project: str, ids: list[str], reason: str, code: str) -> dict:
+def rules_deny(project: str, ids: list[str], reason: str, key: str) -> dict:
     """MAINTENANCE. Refuse one or more proposals, with a reason. No signature is
     asked for: refusing cannot do harm.
 
@@ -481,33 +452,8 @@ def rules_deny(project: str, ids: list[str], reason: str, code: str) -> dict:
     one. What the refusal buys is the REASON — rules_pending shows it to whoever
     proposed it, so silence becomes an answer and they learn something instead of
     guessing. Reading your own refusals is a habit now, not a guard rail."""
-    _admin(code)
+    _admin(project, key)
     return registry.deny(project, ids, reason)
-
-
-@tool
-def rules_renew(project: str, ids: list[str], code: str, days: int = 0) -> dict:
-    """MAINTENANCE. Push the expiry of provisional rules forward: keeping a
-    rule alive is letting it in again, which is why this is behind the admin
-    code and why renewal is where the corpus is governed.
-
-    The verdict hands back each rule's ORIGINAL reason: the question at
-    renewal — would I file this today, for the reason it was filed for? — is
-    undecidable without the reason in front of you, and the tool puts it
-    there instead of prescribing a habit."""
-    _admin(code)
-    return registry.renew(project, ids, days)
-
-
-@tool
-def rules_promote(project: str, ids: list[str], code: str) -> dict:
-    """MAINTENANCE. From provisional to PERMANENT: no expiry, it never leaves on
-    its own again. Rare and deliberate.
-
-    Think twice: a permanent rule is one you are promising to notice when it
-    goes stale, because nothing else will notice for you."""
-    _admin(code)
-    return registry.promote(project, ids)
 
 
 # =====================================================================
@@ -515,7 +461,7 @@ def rules_promote(project: str, ids: list[str], code: str) -> dict:
 # =====================================================================
 
 @tool
-def rules_fix(project: str, id: str, expected_version: int, reason: str, code: str,
+def rules_fix(project: str, id: str, expected_version: int, reason: str, key: str,
               title: str = "", body: str = "", type: str = "", changelog: str = "") -> dict:
     """MAINTENANCE. Fix a DEFECT in place: a wrong number, a broken pointer, a
     sentence that says something false. Same ID, the rule stays in force, and a
@@ -546,13 +492,13 @@ def rules_fix(project: str, id: str, expected_version: int, reason: str, code: s
     `reason` here is the why of the FIX: it lands in the event column and in
     the history. The rule's own `reason` — the why it was filed — is never
     rewritten by any event."""
-    _admin(code)
+    _admin(project, key)
     return registry.amend(project, id, expected_version, reason,
                           title or None, body or None, type or None, changelog or None)
 
 
 @tool
-def rules_widen(project: str, id: str, scopes: list[str], code: str, reason: str = "") -> dict:
+def rules_widen(project: str, id: str, scopes: list[str], key: str, reason: str = "") -> dict:
     """MAINTENANCE. Make a rule ALSO reach somebody else: one more row, and the
     scope it already belonged to is not touched — that scope has other tenants
     who have nothing to do with this rule.
@@ -560,21 +506,21 @@ def rules_widen(project: str, id: str, scopes: list[str], code: str, reason: str
     This is the difference between moving a rule and widening a group, and they
     are two different things. To change who is in a GROUP, use rules_scope_edit,
     and know that it changes the perimeter of every rule pointing at it."""
-    _admin(code)
+    _admin(project, key)
     return registry.widen(project, id, scopes, reason)
 
 
 @tool
-def rules_narrow(project: str, id: str, scopes: list[str], code: str) -> dict:
+def rules_narrow(project: str, id: str, scopes: list[str], key: str) -> dict:
     """MAINTENANCE. Stop a rule reaching a scope. Symmetric to rules_widen: one
     row less. If it ends up with no scope at all the verdict says so — a rule
     that reaches nobody is not retired, it is invisible, which is worse."""
-    _admin(code)
+    _admin(project, key)
     return registry.narrow(project, id, scopes)
 
 
 @tool
-def rules_retire(project: str, id: str, reason: str, code: str,
+def rules_retire(project: str, id: str, reason: str, key: str,
                  superseded_by: str = "", changelog: str = "") -> dict:
     """MAINTENANCE. Retire a rule: it leaves the consumers' lists, but the row
     STAYS. The ID is never reused and citations must keep resolving. There is no
@@ -583,7 +529,7 @@ def rules_retire(project: str, id: str, reason: str, code: str,
     `superseded_by` when a new rule takes its place (create it first). The
     verdict lists the active rules that still cite this one: those need
     fixing."""
-    _admin(code)
+    _admin(project, key)
     return registry.retire(project, id, reason, superseded_by, changelog)
 
 
@@ -592,27 +538,17 @@ def rules_retire(project: str, id: str, reason: str, code: str,
 # =====================================================================
 
 @tool
-def rules_registry(code: str) -> dict:
-    """MAINTENANCE. The COMPLETE list of projects in the registry, CODES
-    INCLUDED. This is the only door codes come out of, which is why it wants the
-    admin code. It is for Alfredo, to recover a code he has mislaid — working
-    chats already have theirs, at the top of their instructions."""
-    _admin(code)
-    return registry.projects()
-
-
-@tool
-def rules_status(project: str, code: str) -> dict:
+def rules_status(project: str, key: str) -> dict:
     """MAINTENANCE. The verdict on the registry: database integrity, journal
     mode, file permissions, counts by domain and by consumer, how many rules
     have expired without being retired, how many batches were approved. The
-    counts cover every perimeter, which is why it wants the admin code."""
-    _admin(code)
+    counts cover every perimeter, which is why it wants the architect key."""
+    _admin(project, key)
     return registry.status(project)
 
 
 @tool
-def rules_check(project: str, code: str) -> dict:
+def rules_check(project: str, key: str) -> dict:
     """MAINTENANCE. Audit of a project: broken pointers (IDs cited that do not
     exist), and citations made by a rule IN FORCE towards one that is retired,
     denied or still only proposed — plus rules with no perimeter and REDUNDANCY
@@ -633,12 +569,12 @@ def rules_check(project: str, code: str) -> dict:
     number is assigned by the database, so a gap cannot happen — the counter
     does not skip and retiring leaves the row in place. A check that cannot tell
     a fault from a choice is a line you learn to skip."""
-    _admin(code)
+    _admin(project, key)
     return registry.check(project)
 
 
 @tool
-def rules_history(project: str, id: str, code: str) -> dict:
+def rules_history(project: str, id: str, key: str) -> dict:
     """MAINTENANCE. How that rule changed over time: one row per version, with
     date, action and REASON, plus the perimeter in two columns — `scopes` what
     was declared, `consumers` who was actually reached that day.
@@ -646,21 +582,21 @@ def rules_history(project: str, id: str, code: str) -> dict:
     History is written by the database TRIGGERS, not by these tools, so a change
     made by hand with sqlite3 is in here too. It serves whoever MAINTAINS the
     rule, not whoever applies it: the latter only needs the text in force."""
-    _admin(code)
+    _admin(project, key)
     return registry.history(project, id)
 
 
 @tool
-def rules_diff(project: str, id: str, version_a: int, version_b: int, code: str) -> dict:
+def rules_diff(project: str, id: str, version_a: int, version_b: int, key: str) -> dict:
     """MAINTENANCE. What changed between two versions of ONE rule (the numbers
     come from rules_history). Whole versions are kept, not diffs: the comparison
     is computed on the fly between any two, however far apart."""
-    _admin(code)
+    _admin(project, key)
     return registry.compare(project, id, version_a, version_b)
 
 
 @tool
-def rules_export(project: str, code: str, consumer: str = "", expand: bool = False) -> dict:
+def rules_export(project: str, key: str, consumer: str = "", expand: bool = False) -> dict:
     """MAINTENANCE. A Markdown snapshot, to be written into the vault with the
     archivist's write_file. Two uses:
       with `consumer`     only that perimeter, rules in force, widest first
@@ -679,44 +615,12 @@ def rules_export(project: str, code: str, consumer: str = "", expand: bool = Fal
 
     It is a DERIVATIVE: the truth stays in the database and this regenerates. Do
     not edit it and expect the registry to notice."""
-    _admin(code)
+    _admin(project, key)
     return registry.export(project, consumer, expand)
 
 
 @tool
-def rules_project_create(project_code: str, name: str, consumers: list, domains: dict,
-                         code: str, description: str = "") -> dict:
-    """MAINTENANCE. Create a new project. Needed before any rule.
-
-    `project_code`: the handle that project will be addressed by forever — 8 to
-    32 alphanumeric characters, generated by Alfredo, to be put at the top of
-    the project's instructions. It is not the name and cannot be derived from it.
-    `consumers`: [["architect","chat"], ["update-tax","skill"]] — whoever
-    downloads rules. A person is not a consumer: a rule that binds a person says
-    so in its body.
-    `domains`: {"VA":"vault and files", "ST":"structure"} — two uppercase
-    letters each.
-
-    Every consumer is given a scope of its own by the database. A new project
-    does not need a new container: consumers and domains are data."""
-    _admin(code)
-    return registry.create_project(project_code, name, consumers, domains, description)
-
-
-@tool
-def rules_project_rekey(project: str, new_project_code: str, code: str) -> dict:
-    """MAINTENANCE. Change a project's access code (if it ended up somewhere it
-    should not have). The rules are untouched: inside the registry a project is
-    addressed by name, and the code is only the door.
-
-    Update the project's instructions BEFORE closing the chat: the old code no
-    longer reaches anything."""
-    _admin(code)
-    return registry.rekey_project(project, new_project_code)
-
-
-@tool
-def rules_consumers_add(project: str, consumers: list, code: str) -> dict:
+def rules_consumers_add(project: str, consumers: list, key: str) -> dict:
     """MAINTENANCE. Add consumers to a project — chats or skills. Each one gets
     a scope of its own name, made by the database.
 
@@ -733,20 +637,20 @@ def rules_consumers_add(project: str, consumers: list, code: str) -> dict:
     consumer is never RENAMED — a renamed consumer is a different consumer, and
     the rules that reached it need reviewing, not dragging along behind a name.
     Create the new one and retire the old."""
-    _admin(code)
+    _admin(project, key)
     return registry.add_consumers(project, consumers)
 
 
 @tool
-def rules_domains_add(project: str, domains: dict, code: str) -> dict:
+def rules_domains_add(project: str, domains: dict, key: str) -> dict:
     """MAINTENANCE. Add ID domains to a project: {"LQ":"liquidity"}. Two
     uppercase letters each. Only adding, for the same reason."""
-    _admin(code)
+    _admin(project, key)
     return registry.add_domains(project, domains)
 
 
 @tool
-def rules_scope_create(project: str, name: str, members: list[str], code: str) -> dict:
+def rules_scope_create(project: str, name: str, members: list[str], key: str) -> dict:
     """MAINTENANCE. Create a named group of consumers, e.g. "deliberativi" over
     the four chats that deliberate.
 
@@ -755,12 +659,12 @@ def rules_scope_create(project: str, name: str, members: list[str], code: str) -
     a second name for the same set. A group cannot take a consumer's name —
     consumers and scopes share one namespace, and that is the right
     constraint."""
-    _admin(code)
+    _admin(project, key)
     return registry.create_scope(project, name, members)
 
 
 @tool
-def rules_scope_edit(project: str, name: str, code: str,
+def rules_scope_edit(project: str, name: str, key: str,
                      add: list[str] = None, remove: list[str] = None) -> dict:
     """MAINTENANCE. Change who is in a GROUP scope. Careful: this changes the
     perimeter of EVERY rule pointing at it, and the verdict says how many that
@@ -769,25 +673,13 @@ def rules_scope_edit(project: str, name: str, code: str,
     A managed scope — a consumer's singleton, or _ALL_ — is refused: its
     membership is fixed by construction, and the refusal comes from the
     database."""
-    _admin(code)
+    _admin(project, key)
     return registry.edit_scope(project, name, add, remove)
 
 
 # =====================================================================
 # Service
 # =====================================================================
-
-@tool
-def rules_backup(code: str) -> dict:
-    """MAINTENANCE. A quiescent copy of the WHOLE database (VACUUM INTO) into
-    the backup directory: it opens without recovery, and it is the one to take
-    off-site. Safe on a live database.
-
-    In WAL the database is THREE files, so copying one by hand is a corrupt
-    backup. ZFS snapshots stay the main net."""
-    _admin(code)
-    return registry.backup(BACKUP_DIR)
-
 
 # The UI binds 0.0.0.0 and the MCP does not, and the asymmetry is not an
 # oversight. The MCP's legitimate traffic arrives from the Funnel, which runs

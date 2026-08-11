@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-2.1.1-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-29%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-3.0.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-22%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -81,12 +81,13 @@ free.
 **Approval is by batch, against its digest.** Proposals accumulate, and you see
 them together, which is the only moment three near-duplicates are visible as
 such. `rules_batch` returns the pending proposals — each with its reason — and
-a digest over the whole; `rules_approve` demands that digest back, so what gets
-approved is provably the batch that was **read**: a proposal arriving in
-between moves the digest and voids the stale approval. Approval sits behind
-the maintenance code. (An ed25519 signature used to ride on top; it left in
-v2.0.0 — it was the clumsy way of letting a person in instead of a chat, and
-the admin UI solves that at the root.)
+a digest over the whole; the lot page of the administration UI demands that
+digest back, so what gets approved is provably the batch that was **read**: a
+proposal arriving in between moves the digest and voids the stale approval.
+Approval sits in the UI, behind the master — since v3.0.0 it is not a tool,
+so no master-level secret ever travels in a conversation. (An ed25519
+signature used to ride on top; it left in v2.0.0 — it was the clumsy way of
+letting a person in instead of a chat, and the UI solves that at the root.)
 
 Denial needs no digest: refusing cannot do harm. The denied row stays, with
 its reason, and `rules_pending` shows a chat its own refusals — so the same idea
@@ -165,7 +166,7 @@ transaction, and whoever approves reads both halves of the move.
 
 The digest covers what you were **looking at**, not what you ticked. If a
 proposal arrives while you read, the action comes back refused with the page as
-it now is — the same contract `rules_approve` has always had.
+it now is — the same digest contract the MCP tool used to carry.
 
 Beside it, four readings that write nothing: the rules in force for a chosen
 consumer, exactly as that consumer's chat reads them, brief first; a rule's
@@ -176,9 +177,12 @@ One master, from the template, and one hour of inactivity. A restart of the
 service invalidates every session, deliberately: the session secret is
 generated at boot and stored nowhere.
 
-**The MCP surface did not move in this version — no reconnection is needed.**
-`rules_approve`, `rules_renew` and `rules_promote` are still tools, behind the
-maintenance code, and stay there until the page replaces them.
+**The MCP surface moved in v3.0.0 — reconnect the connector and test in a
+new conversation.** Seven tools left it: approve, renew and promote went to
+the lot and pending pages, and the master operations — create, registry
+index, rekey, backup — live in the UI behind the master. 22 tools remain,
+and maintenance opens with the pair: project code plus that project's
+architect key, generated on the project's receipt.
 
 ## Installing
 
@@ -212,12 +216,14 @@ and warns is a service whose warnings nobody reads.
   shape of the surface did. Note that neither check covers the OAuth routes
   themselves: a stranger outside the allowed ranges can still complete a login.
   What they cannot do is speak MCP.
-- **The maintenance code travels on every call** that writes: no session, so no
-  mode is left open by accident. Reading your own rules and filing a proposal
-  are both free — a working chat never needs the code.
+- **The architect key travels on every call** that writes, paired with the
+  project code: no session, no mode left open by accident, and no
+  container-wide code — the key is per project, kept as a hash on the
+  project's own row. Reading your own rules and filing a proposal are both
+  free — a working chat never needs the key.
 - **One manual, with a stop line.** `reference_guide` takes no arguments at
   all — anyone the gate lets in reads it. The consumer part comes first and
-  ends at a stop line; the maintenance tools past it want the code on every
+  ends at a stop line; the maintenance tools past it want the key on every
   call. The separate legislator's manual of v1.4 was folded in: its door
   protected an hygiene that had no readers, since the manual is read by three
   chats and the skills do not read it at all.
@@ -225,7 +231,7 @@ and warns is a service whose warnings nobody reads.
   arguments before any tool runs and logs what it rejected, with the arguments
   in the line — a record that obeys no LOG_LEVEL of ours and leaves no
   `refused` line, so a clean log is no evidence it did not happen. Here those
-  arguments are the project code and the maintenance code. From v2.1.1 the
+  arguments are the project code and the architect key. From v2.1.1 the
   payload is redacted and the diagnosis is not: the tool, the parameter and the
   rule that was broken all survive.
 - **The process runs as root and the database is 0644.** This is the opposite of

@@ -260,7 +260,7 @@ CALLS = [n for n in ast.walk(SERVER_TREE)
          if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
          and isinstance(n.func.value, ast.Name) and n.func.value.id == "registry"]
 
-ok(len(CALLS) >= 25, f"{len(CALLS)} calls into the engine found in server.py")
+ok(len(CALLS) >= 20, f"{len(CALLS)} calls into the engine found in server.py")
 
 for call in CALLS:
     name = call.func.attr
@@ -493,20 +493,32 @@ _ADMIN = sole_binding("_admin", (ast.FunctionDef, ast.AsyncFunctionDef),
                       "the last binding wins and every gated tool calls the name")
 
 # And the BODY of the gate, because everything else here pins the name, the
-# count and the call site while leaving what it does unconstrained. A decorator
-# that skips it, or a `if os.environ.get("DEV"): return` in front of the
-# comparison, are two lines that read like conveniences and open the registry:
-# both measured green before this. The comparison is constant-time on purpose —
-# `==` on a secret is a different defect — so it is pinned as written.
+# count and the call site while leaving what it does unconstrained. Since
+# v3.0.0 the gate DELEGATES to the engine — the key is per-project data, so
+# the check lives where the data lives — and what is pinned here is the
+# delegation, as written: one statement, straight through, nothing before it
+# and nothing conditional around it. The comparison itself is pinned in the
+# ENGINE below, same doctrine.
 if _ADMIN is not None:
     _gbody = [s for s in _ADMIN.body
               if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
-    _guard = _gbody[0] if _gbody else None
-    ok(isinstance(_guard, ast.If)
-       and ast.unparse(_guard.test).startswith("not secrets.compare_digest(")
-       and any(isinstance(r, ast.Raise) for r in ast.walk(_guard)),
-       "and its first act is the constant-time comparison, and it raises",
-       ast.unparse(_guard)[:70] if _guard else "(empty)")
+    ok(len(_gbody) == 1
+       and ast.unparse(_gbody[0]) == "registry.check_architect(project, key)",
+       "and its whole body is the delegation to the engine, as written",
+       ast.unparse(_gbody[0])[:70] if _gbody else "(empty)")
+
+# The engine half: check_architect resolves the project FIRST (one message
+# for every failure), compares with secrets.compare_digest — `==` on a secret
+# is a different defect — and raises. Pinned on the source of rules.py.
+_CHK = next((n for n in ast.walk(ENGINE_TREE)
+             if isinstance(n, ast.FunctionDef) and n.name == "check_architect"), None)
+ok(_CHK is not None, "check_architect exists in the engine")
+if _CHK is not None:
+    _chk_src = ast.unparse(_CHK)
+    ok("secrets.compare_digest(" in _chk_src,
+       "check_architect compares in constant time")
+    ok(_chk_src.count("RulesError(ERR_MAINT)") >= 2,
+       "and every failure raises the SAME message: code and key are not told apart")
 
 # And it is called UNCONDITIONALLY, first thing. `if code: _admin(code)` reads
 # like making an argument optional and is an open door: every check that asks
@@ -524,9 +536,9 @@ for _t in TOOLS:
     # `_admin(code)` would go red on `_admin(code=code)`, which changes
     # nothing, and a check that fails on a harmless edit gets deleted.
     _params = [a.arg for a in _t.args.posonlyargs + _t.args.args]
-    _accept = {f"_admin({p})" for p in _params} | {f"_admin({p}={p})" for p in _params}
-    ok(_first in _accept,
-       f"{_t.name}: the gate is the first statement, and it is not conditional",
+    ok("project" in _params and "key" in _params
+       and _first == "_admin(project, key)",
+       f"{_t.name}: the gate is the first statement, the pair passed straight through",
        _first[:60])
 
 # =====================================================================
@@ -717,9 +729,9 @@ if _REF is not None:
 # consumer's part ends where it stands. COUNTED, not `in`-tested — a rewrite
 # that leaves a second copy behind, with a contradicting line between them, is
 # exactly what `in` cannot see.
-ok(GUIDE_SRC.count("⛔ STOP — everything below requires the maintenance code") == 1,
+ok(GUIDE_SRC.count("⛔ STOP — everything below requires the ARCHITECT KEY") == 1,
    "the manual carries the stop line, exactly once",
-   GUIDE_SRC.count("⛔ STOP — everything below requires the maintenance code"))
+   GUIDE_SRC.count("⛔ STOP — everything below requires the ARCHITECT KEY"))
 
 # The legislator's part has to stay APPLICABLE, and that is not something a
 # test can judge. What it can hold is the shape the applicability rests on: the
@@ -1367,15 +1379,16 @@ ok("<PostArgs/>" in TEMPLATE,
 # variable introduced later means editing every existing install by hand. These
 # go in now, inert or not.
 for var in ("PROVISIONAL_DAYS", "WEB_PORT", "WEB_MASTER_CODE", "WEB_ACTION_CAP",
-            "LOG_LEVEL", "ALLOWED_CIDRS", "DB_PATH", "BACKUP_DIR", "ADMIN_ACCESS_CODE"):
+            "LOG_LEVEL", "ALLOWED_CIDRS", "DB_PATH", "BACKUP_DIR"):
     ok(f'Target="{var}"' in TEMPLATE, f"template declares {var}")
 
-# The master is the TWIN of ADMIN_ACCESS_CODE, and the spec says so in those
-# words: mandatory, masked, and blocked at boot while it is a placeholder. It
-# is the one new variable that cannot be "born optional with a working default
-# in the code" — a default for a master IS the placeholder the preflight
-# refuses. Required in the template moves the failure from a container that
-# will not boot to a form that will not save.
+# The master: mandatory, masked, and blocked at boot while it is a
+# placeholder. It is the one variable that cannot be "born optional with a
+# working default in the code" — a default for a master IS the placeholder
+# the preflight refuses. Required in the template moves the failure from a
+# container that will not boot to a form that will not save. (Its old
+# sibling ADMIN_ACCESS_CODE died in v3.0.0: the maintenance credential is
+# the per-project architect key now, data rather than environment.)
 _MASTER_FIELD = re.search(r'<Config[^>]*Target="WEB_MASTER_CODE"[^>]*>', TEMPLATE)
 ok(_MASTER_FIELD is not None, "the master is a field of the template")
 if _MASTER_FIELD:
@@ -1385,8 +1398,8 @@ if _MASTER_FIELD:
     # the pairing is half of what says they are two secrets of the same kind
     # and not one secret with two homes.
     ok('Name="Web UI Master Code"' in _f,
-       "and it is named as the Admin Access Code's sibling", _f[:60])
-    ok('Mask="true"' in _f, "and it is masked, like the maintenance code", _f[:80])
+       "and it keeps the name every install already knows", _f[:60])
+    ok('Mask="true"' in _f, "and it is masked, as a secret is", _f[:80])
     ok('Required="true"' in _f,
        "and required: a master with a working default is the open door", _f[:80])
 # The ceiling is the other kind of new variable: optional, with the default in
@@ -1406,7 +1419,7 @@ for _dead in ("not built yet", "read-only web interface", "VACUUM INTO snapshot"
 
 # Every variable the service reads through env() without a default is one the
 # service cannot start without.
-for var in ("BASE_URL", "ALLOWED_GITHUB_LOGIN", "ADMIN_ACCESS_CODE",
+for var in ("BASE_URL", "ALLOWED_GITHUB_LOGIN",
             "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "JWT_SIGNING_KEY"):
     ok(f'Target="{var}"' in TEMPLATE, f"template declares the mandatory {var}")
 
@@ -1620,28 +1633,37 @@ for _dead in ("DEBUG, INFO, WARNING, ERROR", "DEBUG, INFO, WARNING and ERROR"):
 
 print("\n== the signature left, whole ==")
 
-# Decided 2026-08-10: sign.py, the key knobs and the signature parameter all
-# leave; approve/renew/promote stay on the MCP behind the admin code until the
-# UI exists. The digest stays — it is the check that you approve the batch you
-# read, and it was never the signature's.
+# Decided 2026-08-10, completed in v3.0.0: sign.py and the signature left
+# with v2.0.0, and now the seven migrating tools left too — approve, renew
+# and promote to the lot and pending pages, the master operations (create,
+# registry, rekey, backup) to the UI behind the master. NOT EXPOSED AT ALL is
+# the guarantee, written the way rules_propose documents its own exception:
+# the engine methods stay (it is what lets the suites run without a server),
+# and who exposes them changed. The digest stays with the lot page — it was
+# never the signature's.
 ok(not os.path.exists(os.path.join(HERE, "sign.py")),
    "sign.py is gone from the repository")
 for _tok in ("APPROVAL_PUBKEY", "APPROVAL_GRACE_UNTIL"):
     for _fname, _src2 in (("codifier-mcp.xml", TEMPLATE), ("server.py", SERVER_SRC),
                           ("rules.py", RULES_SRC), ("preflight.py", PREFLIGHT_SRC)):
         ok(_tok not in _src2, f"{_fname} no longer knows {_tok}")
-for _tname in ("rules_approve", "rules_renew", "rules_promote"):
-    _t2 = next((t for t in TOOLS if t.name == _tname), None)
-    ok(_t2 is not None, f"{_tname} is still on the surface: the UI is not built yet")
-    if _t2 is not None:
-        _p2 = [a.arg for a in _t2.args.posonlyargs + _t2.args.args]
-        ok("signature" not in _p2, f"{_tname} takes no signature", _p2)
-        ok("code" in _p2, f"{_tname} still wants the admin code", _p2)
-_APPR = next((t for t in TOOLS if t.name == "rules_approve"), None)
-if _APPR is not None:
-    _p3 = [a.arg for a in _APPR.args.posonlyargs + _APPR.args.args]
-    ok("digest" in _p3,
-       "rules_approve still wants the digest: you approve the batch you READ", _p3)
+for _tname in ("rules_approve", "rules_renew", "rules_promote",
+               "rules_registry", "rules_project_create", "rules_project_rekey",
+               "rules_backup"):
+    ok(next((t for t in TOOLS if t.name == _tname), None) is None,
+       f"{_tname} is NOT a tool any more: it lives in the UI, behind the master")
+# And the container-wide code died with them: no reader, no variable, no
+# check. A template that still offered the field would grow a secret nobody
+# consumes — the placeholder defect, inverted.
+# The prose may still tell the story; what must be gone is the READER and
+# the template FIELD — a field nobody consumes is the placeholder defect,
+# inverted.
+for _fname, _src2 in (("server.py", SERVER_SRC), ("preflight.py", PREFLIGHT_SRC)):
+    ok('"ADMIN_ACCESS_CODE"' not in _src2,
+       f"{_fname} no longer reads ADMIN_ACCESS_CODE")
+ok('Target="ADMIN_ACCESS_CODE"' not in TEMPLATE and
+   "ADMIN_ACCESS_CODE" not in TEMPLATE,
+   "the template no longer offers the ADMIN_ACCESS_CODE field")
 ok("cryptography" not in source(os.path.join(HERE, "requirements.txt"))
    and "cryptography" not in DOCKERFILE,
    "no cryptography dependency survives outside the engine's own")

@@ -17,9 +17,9 @@ This is a **registry of rules**, and it exists to make one question a query:
 **One database, N projects.** A project is a column, not a table, so `VA-0002` of
 one project and `VA-0002` of another coexist with separate histories. You address
 a project by an opaque **CODE**, never by its name — the code sits at the top of
-that project's instructions. No tool you can reach without the maintenance code
-lists projects, and no error names one: a missing code and a wrong code give the
-identical answer.
+that project's instructions. No tool lists projects — the index lives in the
+administration UI, behind the master — and no error names one: a missing code
+and a wrong code give the identical answer.
 
 **Consumers** are whoever downloads rules: chats *and* skills. A skill is not a
 chat, but it acts, and what acts is under rules — calling `rules_list` is the
@@ -162,7 +162,7 @@ all.
    made by hand with `sqlite3` is in there too. Whole versions are kept, not
    diffs.
 4. **A new rule reaches nobody until its batch is approved.** Which is why
-   proposing needs no maintenance code, and why you can stop keeping a note
+   proposing needs no key, and why you can stop keeping a note
    about a proposal you filed: `rules_pending` has the answer.
 5. **An approved rule is PROVISIONAL and expires.** Staying costs a decision,
    going is free.
@@ -175,7 +175,7 @@ has to do anything for a rule to go; somebody has to decide for it to stay.
 
 ## PROPOSING
 
-`rules_propose` files a proposal, and needs no maintenance code: a proposal
+`rules_propose` files a proposal, and needs no key: a proposal
 reaches nobody, so it cannot do harm. It takes the **domain**, not the number,
 and gives the number back. Seven things are required: `domain`, `type` (`R`
 binding, `M` method, `F` technical fact), `title`, `body`, `scopes`, `reason`
@@ -263,7 +263,7 @@ Each of these has a right answer that already exists.
   is fine — that one is stripped for you.
 - **Do not try to cite a rule that is still a proposal.** It is refused, and the
   cure is to wait for it to be approved, not to work around it.
-- **Do not guess the admin code.** Ask for it.
+- **Do not guess the architect key.** Ask for it.
 
 ## WHEN SOMETHING REFUSES
 
@@ -286,15 +286,26 @@ code, and it stays there. The reason is **sequence**, not importance.
 
 ---
 
-> **⛔ STOP — everything below requires the maintenance code. A consumer can
-> stop here.**
+> **⛔ STOP — everything below requires the ARCHITECT KEY of the project. A
+> consumer can stop here.**
 
 ---
 
 # PART TWO — MAINTENANCE
 
-The maintenance code travels **on every call**: there is no session and no
-"unlocked" state anybody can leave open. What it opens is everything below.
+Maintenance opens with a PAIR: the project code and that project's **architect
+key**, together, **on every call** — there is no session and no "unlocked"
+state anybody can leave open, and there is no container-wide code any more:
+the key is per project, born on the receipt when the project is created and
+reborn at rekey. Every failure gets ONE answer — which half was wrong is not
+said, on purpose.
+
+The key opens REDACTION: fixing, widening, narrowing, retiring, the audits,
+the history, the export, consumers, domains and scopes. It does not open
+**promulgation** — approving, denying from the lot, renewing, promoting — nor
+the master operations — creating a project, the registry index, rekey, backup.
+Those live in the administration UI, behind the master, and are not tools:
+redacting and promulgating stopped being the same power in v3.0.0.
 
 ## THE LIFE OF A RULE
 
@@ -304,26 +315,27 @@ The maintenance code travels **on every call**: there is no session and no
         └──> denied  (with a reason, and the row STAYS)
 
 **`rules_batch`** returns the pending proposals — each with its `reason` — and
-a **digest** over the whole. **`rules_approve`** demands that digest back: it
-proves the approval covers the batch that was **read**, not the batch that
-exists now. If a proposal arrives in between, the digest moves and the stale
-one is refused — *"that digest is not the current one"* means exactly that:
-ask for the batch again and re-read it. You approve the batch, never the
-single rule: seen side by side, three proposals that say the same thing become
+a **digest** over the whole. **Approval happens on the LOT PAGE of the UI**,
+behind the master, against that same digest: it proves the approval covers
+the batch that was **read**, not the batch that exists now. If a proposal
+arrives in between, the digest moves and the stale reading is refused — ask
+for the batch again and re-read it. You approve the batch, never the single
+rule: seen side by side, three proposals that say the same thing become
 visible as what they are.
 
 **`rules_deny`** refuses one or more proposals, with a reason — no digest,
 because refusing cannot do harm. The row stays, the ID is burnt, and
-`rules_pending` shows the refusal to whoever filed it.
+`rules_pending` shows the refusal to whoever filed it. The lot page denies
+too: what is left unticked when the action fires is denied with the reason
+typed on the page.
 
-**`rules_renew`** pushes the expiry forward: keeping a rule alive is letting it
-in again, which is why renewal is where the corpus is governed. Its verdict
-hands back each rule's ORIGINAL reason, and `rules_pending` carries the same
-reason on the expiring list — the renewal question is undecidable without the
-why in front of you, and the tool puts it there instead of prescribing a
-habit. **`rules_promote`** makes a rule permanent — rare and deliberate: a
-permanent rule is one you promise to notice when it goes stale, because
-nothing else will notice for you.
+**Renewal and promotion live in the UI as well**, on the pending page:
+keeping a rule alive is letting it in again, which is why renewal sits where
+the approving happens. The expiring queue carries each rule's ORIGINAL
+reason — the renewal question is undecidable without the why in front of
+you, and the page puts it there instead of prescribing a habit. Promotion is
+rare and deliberate: a permanent rule is one you promise to notice when it
+goes stale, because nothing else will notice for you.
 
 ## WHERE THE WHY LIVES
 
@@ -334,10 +346,7 @@ in the history. So the why is readable exactly where the deciding happens:
 **`rules_batch` carries it on every proposal**, which is what makes an
 approval worth deciding, and **`rules_export` carries it on every rule**,
 which is what a renewal pass reads. Version 1 of `rules_history` keeps it
-too, as it always did. One caveat on a database migrated from before this:
-rows whose `reason` an event had already overwritten stay overwritten — the
-migration converts nothing, and for those rows version 1 of the history is
-still where the truth survives.
+too, as it always did.
 
 ## CHANGING THE CORPUS
 
@@ -386,19 +395,24 @@ still where the truth survives.
   editing it changes nothing, the truth is the database, and it regenerates.
   With a consumer it is that perimeter, widest first; without, the whole
   project, retired rules included.
-- **`rules_registry`** — every project, codes included: the only door codes
-  come out of. **`rules_project_create` · `rules_project_rekey` ·
-  `rules_consumers_add` · `rules_domains_add` · `rules_scope_create`** —
-  creation and custody. Consumers and domains are data: a new project does not
-  need a new container. A consumer may be born WITH its `brief` — its
+- **`rules_consumers_add` · `rules_domains_add` · `rules_scope_create`** —
+  custody of who and what. Consumers and domains are data: a new project does
+  not need a new container. A consumer may be born WITH its `brief` — its
   mandate, returned at the head of its `rules_list` — and on a consumer that
   already exists, `rules_consumers_add` with a brief updates it: that is the
   door briefs are written through. Versioned by trigger, hand edits included;
   a mandate is not a rule — it is not violable and not shared, and modelling
-  it as one would fatten the corpus the expiry mechanism keeps small.
-- **`rules_backup`** — a quiescent copy of the whole database (`VACUUM INTO`):
-  it opens without recovery, and it is the one to take off-site. In WAL the
-  database is three files, so copying one by hand is a corrupt backup.
+  it as one would fatten the corpus the expiry mechanism keeps small. Names
+  keep the SPELLING they were first given, byte for byte; identity is the
+  casefolded form, so `Architect` and `architect` are one consumer — and a
+  consumer is never renamed: create the new one, retire the old.
+- **The master operations are NOT tools.** Creating a project, the registry
+  index (codes included), rekey and backup live in the administration UI,
+  behind the master, so no master-level secret ever travels in a
+  conversation. A project is born with a RECEIPT — its code and its
+  architect key, shown once: code to the top of the project instructions,
+  key to the password manager. Losing either costs a rekey, which
+  regenerates the pair.
 
 ---
 
@@ -615,8 +629,8 @@ the execution. It does not need an expiry date; it needs running.
 
 ### The test at renewal
 
-`rules_renew` is where the corpus is actually governed, and the question there
-is not the obvious one.
+The renewal — the expiring queue on the UI's pending page — is where the
+corpus is actually governed, and the question there is not the obvious one.
 
 > **Not: "is it still true?"** — almost everything is still true.
 > **But: "would I file this today, for the reason it was filed for?"**

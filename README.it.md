@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/versione-2.1.1-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-29%20tool-8A63D2.svg">
+<img src="https://img.shields.io/badge/versione-3.0.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-22%20tool-8A63D2.svg">
 
 **Le regole di un progetto in un registro invece che sparse nei Markdown — così
 una chat può rispondere in una chiamata a «sotto quali regole sto?».**
@@ -81,10 +81,13 @@ lasciarla andare è gratis.
 **Si approva a lotti, contro il loro digest.** Le proposte si accumulano, e le
 vedi tutte insieme, che è l'unico momento in cui salta all'occhio che tre
 dicono la stessa cosa. `rules_batch` restituisce le proposte pendenti — ognuna
-col suo perché — e un digest sull'insieme; `rules_approve` rivuole quel digest,
+col suo perché — e un digest sull'insieme; la pagina del lotto della UI
+rivuole quel digest,
 quindi ciò che viene approvato è provabilmente il lotto che è stato **letto**:
 una proposta che arriva nel mezzo sposta il digest e invalida l'approvazione
-stantia. L'approvazione sta dietro il codice di manutenzione. (Sopra viaggiava
+stantia. L'approvazione sta nella UI, dietro la master — dalla v3.0.0 non è
+un tool, così nessun segreto master viaggia mai in una conversazione. (Sopra
+viaggiava
 una firma ed25519; è uscita nella v2.0.0 — era il modo goffo di far entrare una
 persona invece di una chat, e la UI di amministrazione risolve il problema alla
 radice.)
@@ -167,7 +170,7 @@ transazione, e chi approva legge le due metà della mossa.
 
 Il digest copre quello che stavi **guardando**, non quello che hai spuntato. Se
 una proposta arriva mentre leggi, l'azione torna respinta con la pagina com'è
-adesso — lo stesso contratto che `rules_approve` ha sempre avuto.
+adesso — lo stesso contratto del digest che aveva il tool MCP.
 
 Accanto, quattro letture che non scrivono niente: le regole in forza per un
 consumer, esattamente come le legge la sua chat, brief in testa; il dettaglio
@@ -178,10 +181,13 @@ Una master, dal template, e un'ora di inattività. Un riavvio del servizio
 invalida tutte le sessioni, di proposito: il segreto della sessione nasce a
 caso a ogni boot e non è scritto da nessuna parte.
 
-**La superficie MCP non si è mossa in questa versione — non serve
-riconnettere.** `rules_approve`, `rules_renew` e `rules_promote` sono ancora
-tool, dietro il codice di manutenzione, e ci restano finché la pagina non li
-sostituisce.
+**La superficie MCP si è mossa nella v3.0.0 — riconnettere il connettore e
+provare in una chat nuova.** Sette tool l'hanno lasciata: approve, renew e
+promote sono passati alle pagine del lotto e dei pendenti, e le operazioni
+master — creazione, indice, rekey, backup — vivono nella UI dietro la
+master. Restano 22 tool, e la manutenzione si apre con la coppia: codice di
+progetto più la chiave d'architetto di quel progetto, generata sulla
+ricevuta del progetto.
 
 ## Installazione
 
@@ -215,22 +221,24 @@ avvisa è un servizio di cui nessuno legge gli avvisi.
   uscita, ma la forma della superficie sì. Nessuno dei due controlli copre le
   rotte OAuth: un estraneo fuori dagli intervalli ammessi può completare il
   login lo stesso. Quello che non può fare è parlare MCP.
-- **Il codice di manutenzione viaggia a ogni chiamata** che scrive: nessuna
-  sessione, quindi nessuna modalità rimasta aperta per sbaglio. Leggere le
-  proprie regole e depositare una proposta sono gratis — una chat di lavoro il
-  codice non ce l'ha mai.
+- **La chiave d'architetto viaggia a ogni chiamata** che scrive, in coppia
+  col codice di progetto: nessuna sessione, nessuna modalità rimasta aperta,
+  e nessun codice a livello di container — la chiave è per progetto, tenuta
+  come hash sulla riga del progetto stesso. Leggere le proprie regole e
+  depositare una proposta sono gratis — una chat di lavoro la chiave non ce
+  l'ha mai.
 - **Un manuale solo, con la riga di stop.** `reference_guide` non prende
   nessun argomento: chiunque il gate lasci entrare lo legge. La parte per i
   consumer viene prima e finisce a una riga di stop; i tool di manutenzione
-  oltre la riga vogliono il codice a ogni chiamata. Il manuale del legislatore
+  oltre la riga vogliono la chiave a ogni chiamata. Il manuale del legislatore
   della v1.4 è stato riassorbito: la sua porta proteggeva un'igiene senza
   lettori — il manuale lo leggono tre chat, e le skill non lo leggono affatto.
 - **Una chiamata malformata non stampa quello che portava.** FastMCP valida gli
   argomenti prima che parta qualunque tool e logga quello che ha rifiutato, con
   gli argomenti dentro la riga — un record che non obbedisce a nessun LOG_LEVEL
   nostro e non lascia nessuna riga `refused`, quindi un log pulito non prova che
-  non sia successo. Qui quegli argomenti sono il codice di progetto e il codice
-  di manutenzione. Dalla v2.1.1 il carico è redatto e la diagnosi no: restano il
+  non sia successo. Qui quegli argomenti sono il codice di progetto e la chiave
+  d'architetto. Dalla v2.1.1 il carico è redatto e la diagnosi no: restano il
   tool, il parametro e la regola violata.
 - **Il processo gira come root e il database è 644.** È l'opposto del gemello
   vault, di proposito: dalla share si legge e non si tocca, perché una scrittura

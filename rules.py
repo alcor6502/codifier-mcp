@@ -58,11 +58,12 @@ import functools
 import hashlib
 import os
 import re
+import secrets
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 
-VERSION = "2.1.1"
+VERSION = "3.0.0"
 
 TYPES = ("R", "M", "F")                 # R binding · M method · F technical fact
 ALL = "_ALL_"                           # reaches every consumer, present and future
@@ -151,6 +152,37 @@ MAX_GET_IDS = 50
 ERR_PROJECT = ("project not specified: this needs the project CODE, the one at the top "
                "of its instructions. Without it the registry does not answer — and there "
                "is no way to list projects: either you have it, or you ask for it.")
+
+# One message for every way maintenance can fail to open — wrong code, wrong
+# key, missing either. Which half was wrong is not said, on purpose: telling
+# them apart would confirm a valid code to whoever holds only that.
+ERR_MAINT = ("maintenance refused: the project code or the architect key is missing "
+             "or wrong — and which one is not said, on purpose. Maintenance is done "
+             "by the chat that maintains this project, with the key Alfredo gives "
+             "it. Do not guess it: ask.")
+
+# What the registry GENERATES. The code is the door and lives at the top of
+# the project instructions; the architect key is the maintenance privilege
+# and lives in a password manager. Both are generated HERE — `rekey` included
+# — because a credential a person invents is the only kind that ends up weak,
+# and one generator means one format. The alphabet drops the four lookalike
+# characters (I/l, O/0): these get read aloud and retyped once, at the
+# receipt.
+CODE_LEN = 16
+KEY_LEN = 24
+_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"
+
+
+def _gen(n: int) -> str:
+    return "".join(secrets.choice(_ALPHABET) for _ in range(n))
+
+
+def _key_hash(key: str) -> str:
+    """sha256 and nothing slower, deliberately: the key is generated at high
+    entropy by _gen, never chosen by a person, so a KDF would buy nothing
+    against the only attack that exists — reading the file and brute-forcing
+    a 24-character random string, which sha256 already makes absurd."""
+    return hashlib.sha256((key or "").strip().encode()).hexdigest()
 
 
 class RulesError(Exception):
@@ -302,10 +334,17 @@ def _f(sql: str, row: str) -> str:
 
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS projects (
-  name        TEXT PRIMARY KEY,
-  code        TEXT NOT NULL UNIQUE,      -- opaque handle: the only way in
-  description TEXT,
-  created     TEXT NOT NULL
+  name               TEXT PRIMARY KEY,
+  code               TEXT NOT NULL UNIQUE,  -- opaque handle: the only way in
+  architect_key_hash TEXT NOT NULL,     -- sha256 of the maintenance key. The
+                                        -- key itself exists only on the
+                                        -- receipt that showed it once: this
+                                        -- file is readable from the share,
+                                        -- and a credential in clear here
+                                        -- would make every reader an
+                                        -- architect of every project
+  description        TEXT,
+  created            TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS project_domains (
@@ -814,32 +853,37 @@ class Registry:
             "approval": {"provisional_days": self.provisional_days},
         }
 
-    def create_project(self, code: str, name: str, consumers, domains,
+    def create_project(self, name: str, consumers=None, domains=None,
                        description: str = "") -> dict:
-        code = (code or "").strip()
-        if not RE_CODE.match(code):
-            raise RulesError("project code: 8 to 32 alphanumeric characters, nothing else")
+        """Create a project. The CODE and the ARCHITECT KEY are GENERATED
+        here and returned ONCE, on this receipt: from then on the key exists
+        only as a hash. Consumers and domains are OPTIONAL — a project may be
+        born empty, because seeding it (domains, then consumers, then the
+        rules one by one) is the Architect's first job, done with the very
+        key this call hands out."""
         name = (name or "").strip()
         if not name:
             raise RulesError("the project needs a name")
         if self.cx.execute("SELECT 1 FROM projects WHERE name=?", (name,)).fetchone():
             raise RulesError(f"a project named {name!r} already exists")
-        if self.cx.execute("SELECT 1 FROM projects WHERE code=?", (code,)).fetchone():
-            raise RulesError("that code is already in use")
         if isinstance(domains, (list, tuple)):
             domains = {d: "" for d in domains}
-        if not domains:
-            raise RulesError("declare at least one domain, e.g. {'VA': 'vault and files'}")
+        domains = domains or {}
         for d in domains:
             if not re.match(r"^[A-Z]{2}$", d):
                 raise RulesError(f"domain {d!r}: exactly two uppercase letters")
-        cons = self._normalise_consumers(consumers)
-        if not cons:
-            raise RulesError("declare at least one consumer, e.g. [['architect','chat']]")
+        cons = self._normalise_consumers(consumers or [])
+        while True:
+            code = _gen(CODE_LEN)
+            if not self.cx.execute("SELECT 1 FROM projects WHERE code=?",
+                                   (code,)).fetchone():
+                break
+        key = _gen(KEY_LEN)
         try:
             self.cx.execute("BEGIN")
-            self.cx.execute("INSERT INTO projects (name, code, description, created) "
-                            "VALUES (?,?,?,?)", (name, code, description or None, _now()))
+            self.cx.execute("INSERT INTO projects (name, code, architect_key_hash, "
+                            "description, created) VALUES (?,?,?,?,?)",
+                            (name, code, _key_hash(key), description or None, _now()))
             for d, desc in domains.items():
                 self.cx.execute("INSERT INTO project_domains (project, domain, description) "
                                 "VALUES (?,?,?)", (name, d, desc or None))
@@ -853,9 +897,12 @@ class Registry:
         except Exception:
             self.cx.execute("ROLLBACK")
             raise
-        return {"created": name, "code": code, "consumers": [c for c, _, _ in cons],
-                "domains": sorted(domains), "note": "put the code at the top of the "
-                "project instructions: it is the only way to reach this registry"}
+        return {"created": name, "code": code, "architect_key": key,
+                "consumers": [c for c, _, _ in cons], "domains": sorted(domains),
+                "note": "TWO secrets, TWO destinations, shown ONCE: the code goes at "
+                        "the top of the project instructions, the architect key in "
+                        "the password manager. Neither can be read back — losing "
+                        "either costs a rekey, which regenerates the pair."}
 
     @staticmethod
     def _normalise_consumers(consumers) -> list[tuple[str, str, str]]:
@@ -889,17 +936,48 @@ class Registry:
                 out.append((cname, kind, brief))
         return out
 
-    def rekey_project(self, code: str, new_code: str) -> dict:
+    def rekey_project(self, code: str) -> dict:
+        """Regenerate the PAIR — code and architect key, always together, and
+        GENERATED here rather than passed in: rekey used to take the new code
+        from the caller, which made it the one place left where a credential
+        was a person's invention. One generator, one format, one receipt —
+        `create` and `rekey` hand out the same two lines. The cost, accepted:
+        the two secrets break for different reasons and the pair pays for
+        both — but they live in a password manager, where "I lost one" does
+        not happen."""
         p = self._project(code)
-        new_code = (new_code or "").strip()
-        if not RE_CODE.match(new_code):
-            raise RulesError("new code: 8 to 32 alphanumeric characters")
-        if self.cx.execute("SELECT 1 FROM projects WHERE code=?", (new_code,)).fetchone():
-            raise RulesError("that code is already in use")
-        self.cx.execute("UPDATE projects SET code=? WHERE name=?", (new_code, p))
-        return {"project": p, "rekeyed": True,
-                "note": "update the project instructions BEFORE closing this chat: "
-                        "the old code no longer reaches anything"}
+        while True:
+            new_code = _gen(CODE_LEN)
+            if not self.cx.execute("SELECT 1 FROM projects WHERE code=?",
+                                   (new_code,)).fetchone():
+                break
+        new_key = _gen(KEY_LEN)
+        self.cx.execute("UPDATE projects SET code=?, architect_key_hash=? WHERE name=?",
+                        (new_code, _key_hash(new_key), p))
+        return {"project": p, "code": new_code, "architect_key": new_key,
+                "rekeyed": True,
+                "note": "TWO secrets, TWO destinations, shown ONCE: code to the "
+                        "project instructions, key to the password manager — and "
+                        "do both BEFORE closing this page: the old pair no longer "
+                        "reaches anything."}
+
+    def check_architect(self, code: str, key: str) -> str:
+        """The maintenance gate, per project. It resolves the project from
+        its code FIRST, then compares the key's hash on that row — in that
+        order, and with ONE message for every failure, because an answer
+        that told a wrong key apart from a wrong code would confirm a valid
+        code to whoever holds only that. It is not session state: the pair
+        travels on every call."""
+        try:
+            p = self._project(code)
+        except RulesError:
+            raise RulesError(ERR_MAINT) from None
+        row = self.cx.execute("SELECT architect_key_hash FROM projects WHERE name=?",
+                              (p,)).fetchone()
+        if not row or not row[0] or not secrets.compare_digest(
+                row[0], _key_hash(key)):
+            raise RulesError(ERR_MAINT)
+        return p
 
     def add_consumers(self, code: str, consumers) -> dict:
         """Adds consumers — and writes BRIEFS. On a consumer that already
