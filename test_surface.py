@@ -2211,23 +2211,31 @@ if _MAIN is not None:
 ok("not built yet" not in SERVER_SRC,
    "and it no longer says the UI is not built yet")
 
-print("\n== the preflight declares the migration it performs ==")
+print("\n== the preflight refuses an earlier schema, out loud ==")
 
-# The preflight opens Registry(DB) BEFORE the server, so the migration happens
-# in there — and at v1.6.0 it happened in silence: the server's "schema
-# migrated at open" line never appeared, because by the time the server opened
-# the file there was nothing left to migrate. A declaration whose only
-# possible reader is switched off is not a declaration. So the preflight says
-# it itself, and this proves it on a database that really migrates.
+# THERE IS NO MIGRATION (decided 2026-08-11): a schema change means a wipe,
+# because the corpus goes back in by hand. What the preflight owes an old
+# database is a RED LINE with the cure in it — not a half-upgrade, and not a
+# boot that pretends the file is fine. The db check opens Registry(DB), and
+# Registry is where the refusal lives: this proves the refusal reaches the
+# preflight's own verdict.
+import sqlite3 as _sq3                                          # noqa: E402
 import subprocess                                               # noqa: E402
 import tempfile                                                 # noqa: E402
 
-_md = tempfile.mkdtemp(prefix="preflight-migrate-")
+_md = tempfile.mkdtemp(prefix="preflight-oldschema-")
 _mdb = os.path.join(_md, "rules.db")
-_r0 = _rules.Registry(_mdb)
-_r0.cx.execute("ALTER TABLE approvals ADD COLUMN signature TEXT")
-_r0.cx.execute("ALTER TABLE approvals ADD COLUMN signed INTEGER NOT NULL DEFAULT 1")
-_r0.close()
+_cx0 = _sq3.connect(_mdb)
+_cx0.executescript("""
+  CREATE TABLE projects (name TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE,
+                         description TEXT, created TEXT NOT NULL);
+  CREATE TABLE consumers (project TEXT NOT NULL, name TEXT NOT NULL,
+                          kind TEXT NOT NULL, brief TEXT, created TEXT NOT NULL,
+                          PRIMARY KEY (project, name));
+  CREATE TABLE rules (project TEXT NOT NULL, id TEXT NOT NULL,
+                      PRIMARY KEY (project, id));
+""")
+_cx0.close()
 _env = dict(os.environ, DB_PATH=_mdb)
 _out = subprocess.run(
     [sys.executable, "-c",
@@ -2235,10 +2243,10 @@ _out = subprocess.run(
      "from mcp_common_engine import RESULTS; "
      "print(RESULTS[-1])"],
     capture_output=True, text=True, env=_env, cwd=HERE, timeout=60)
-ok(_out.returncode == 0, "the db check runs against a database that migrates",
-   (_out.stderr or _out.stdout)[:120])
-ok("migrated: approvals.signature dropped" in _out.stdout,
-   "and its line DECLARES what the open migrated", _out.stdout[:200])
+ok("False" in _out.stdout, "the db check goes RED on an earlier schema",
+   _out.stdout[:200])
+ok("earlier schema" in _out.stdout and "wipe" in _out.stdout,
+   "and the red line names the disease AND the cure", _out.stdout[:200])
 
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

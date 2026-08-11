@@ -29,7 +29,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from rules import (ALL, FILE_MODE, MAX_BODY_BYTES, MAX_GET_IDS,
-                   Registry, RulesError, VERSION, _plus_days)
+                   Registry, RulesError, RulesFault, VERSION, _plus_days)
 
 # =====================================================================
 # Harness
@@ -190,16 +190,22 @@ case("a group scope is created by hand",
      lambda: R.create_scope(FP, "deliberativi", ["architect", "advisory", "alt-funds", "tax"]))
 ok(R._breadth(NAME_FP, "deliberativi") == 4, "deliberativi is worth 4")
 
+# The hand-written INSERTs below address the SURROGATE ids, because that is
+# what the schema crosses now: the names live in one place each.
+SID_TAX = R.cx.execute("SELECT id FROM scopes WHERE project=? AND name='tax'",
+                       (NAME_FP,)).fetchone()[0]
+CID_ADV = R.cx.execute("SELECT id FROM consumers WHERE project=? AND name='advisory'",
+                       (NAME_FP,)).fetchone()[0]
 refuses("managed scope refuses a second member — FROM THE DATABASE",
-        lambda: R.cx.execute("INSERT INTO scope_members (project, scope, consumer) "
-                             "VALUES (?,?,?)", (NAME_FP, "tax", "advisory")),
+        lambda: R.cx.execute("INSERT INTO scope_members (scope_id, consumer_id) "
+                             "VALUES (?,?)", (SID_TAX, CID_ADV)),
         "managed scope", sqlite3.IntegrityError)
 refuses("a managed scope is not renamed — FROM THE DATABASE",
-        lambda: R.cx.execute("UPDATE scopes SET name='x' WHERE project=? AND name='tax'",
-                             (NAME_FP,)), "managed scope", sqlite3.IntegrityError)
+        lambda: R.cx.execute("UPDATE scopes SET name='x' WHERE id=?", (SID_TAX,)),
+        "managed scope", sqlite3.IntegrityError)
 refuses("a managed scope's membership is not moved — FROM THE DATABASE",
-        lambda: R.cx.execute("UPDATE scope_members SET consumer='advisory' "
-                             "WHERE project=? AND scope='tax'", (NAME_FP,)),
+        lambda: R.cx.execute("UPDATE scope_members SET consumer_id=? WHERE scope_id=?",
+                             (CID_ADV, SID_TAX)),
         "managed scope", sqlite3.IntegrityError)
 refuses("a consumer is not renamed — FROM THE DATABASE",
         lambda: R.cx.execute("UPDATE consumers SET name='x' WHERE project=? AND name='tax'",
@@ -219,6 +225,49 @@ refuses("edit_scope refuses a managed scope",
         lambda: R.edit_scope(FP, "tax", add=["advisory"]), "managed scope", RulesError)
 refuses("edit_scope on a scope that is not there",
         lambda: R.edit_scope(FP, "ghosts", add=["tax"]), "no scope named", RulesError)
+
+# =====================================================================
+head("spelling is data: stored as given, folded for identity")
+# =====================================================================
+
+# A project of its own, so nothing here moves the counts the rest of the
+# suite relies on (breadth of _ALL_, consumers per project, and so on).
+SPELL = "SpellLab12345"
+R.create_project(SPELL, "Spelling Lab",
+                 [("Architect", "chat"), ("FP-Update-Tax", "skill")], {"VA": "vault"})
+
+
+def spelling_survives_whole():
+    """A name comes back EXACTLY as it was first given — byte for byte. The
+    old engine lowercased in silence, which rewrote what the owner typed;
+    that rewriting is extinct, and this is the case that notices if it
+    creeps back."""
+    stored = [c["name"] for c in R.project_info(SPELL)["consumers"]]
+    assert "Architect" in stored and "FP-Update-Tax" in stored, stored
+    assert "architect" not in stored and "fp-update-tax" not in stored, stored
+    scopes = [s["name"] for s in R.project_info(SPELL)["scopes"]]
+    assert "FP-Update-Tax" in scopes, scopes
+
+
+case("a mixed-case name is stored as given, singleton included", spelling_survives_whole)
+
+
+def identity_is_folded():
+    """`ARCHITECT` and `Architect` are ONE consumer: any spelling resolves,
+    and every answer carries the STORED spelling, not the caller's."""
+    lst = R.list_rules(SPELL, "ARCHITECT")
+    assert lst["consumer"] == "Architect", lst["consumer"]
+    out = R.add_consumers(SPELL, [("architect", "chat")])
+    assert out["added"] == [], out
+    assert out["already_there"] == ["Architect"], out
+
+
+case("identity is casefolded, the stored spelling answers", identity_is_folded)
+
+refuses("the fold index refuses a duplicate spelling — FROM THE DATABASE",
+        lambda: R.cx.execute("INSERT INTO consumers (project, name, kind, created) "
+                             "VALUES (?,?,?,?)", ("Spelling Lab", "ARCHITECT", "chat", "now")),
+        "", sqlite3.IntegrityError)
 
 # =====================================================================
 head("proposing: a proposal reaches nobody, and the NUMBER is not yours")
@@ -1415,7 +1464,7 @@ case("export: whole project, and the block for one consumer, widest first",
 def backup_is_a_quiescent_copy():
     b = R.backup(os.path.join(D, "bk"))
     cx = sqlite3.connect(b["backup"])
-    assert cx.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 5
+    assert cx.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 6
     assert cx.execute("SELECT COUNT(DISTINCT project) FROM rules").fetchone()[0] == 4
     assert cx.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     cx.close()
@@ -1468,8 +1517,8 @@ case("status: two paths to the same number, and they agree",
 
 def the_registry_lists_projects_only_here():
     e = R.projects()
-    assert e["count"] == 5
-    assert {p["code"] for p in e["projects"]} == {FP, HT, CASA, EMPTY, CNT}
+    assert e["count"] == 6
+    assert {p["code"] for p in e["projects"]} == {FP, HT, CASA, EMPTY, CNT, SPELL}
     assert {p["name"]: p["active_rules"] for p in e["projects"]}["Empty"] == 0
 
 
@@ -1488,7 +1537,7 @@ def reopen_finds_everything_where_it_was():
     r3 = Registry(DB)
     s = r3.status(FP)
     assert s["database"]["integrity"] == "ok" and s["database"]["journal_mode"] == "wal"
-    assert r3.projects()["count"] == 5
+    assert r3.projects()["count"] == 6
     assert r3.history(FP, "VA-0001")["count"] == versions
     assert [x["id"] for x in r3.list_rules(FP, "tax")["rules"]] == listed
     r3.close()
@@ -1501,113 +1550,43 @@ case("reopen: WAL, whole, three projects, history and lists intact",
 head("the upgrade: a database shaped like the versions before this one")
 # =====================================================================
 
-# The migration DROPS the relic columns and converts nothing. legacy_id was
-# the ledger of a bulk-import world: with the import gone the old->new
-# mapping lives in the migration files, outside the registry, and the column
-# would be a relic conserved in the clean system — the exact thing the
-# seeding pass exists to kill. The signature columns went with the signature.
-# Bodies, IDs, versions and refs are untouched: a migration is not code, it
-# is the work, and this method's whole job is to leave the work alone.
+# THERE IS NO MIGRATION, and that is a decision (2026-08-11), not a gap: a
+# schema change means a WIPE, because the corpus goes back in by hand through
+# the same door as any other rule. What the engine owes an old database is a
+# loud refusal — IF NOT EXISTS would otherwise half-apply the new schema over
+# the old and produce a file that is neither.
 
 OLD_DB = os.path.join(D, "legacy.db")
 
 
-_OLD_TRG_UPD = """
-CREATE TRIGGER trg_rules_upd AFTER UPDATE ON rules BEGIN
-  INSERT INTO rule_versions (project, rule_id, version, type, title, body,
-    status, permanence, expires_at, superseded_by, changelog, scopes, consumers,
-    ts, action, reason)
-  VALUES (NEW.project, NEW.id,
-          (SELECT IFNULL(MAX(version),0)+1 FROM rule_versions
-            WHERE project = NEW.project AND rule_id = NEW.id),
-          NEW.type, NEW.title, NEW.body, NEW.status, NEW.permanence,
-          NEW.expires_at, NEW.superseded_by, NEW.changelog,
-          (SELECT IFNULL(GROUP_CONCAT(scope, ', '), '') FROM
-            (SELECT scope FROM rule_scopes
-              WHERE project = NEW.project AND rule_id = NEW.id ORDER BY scope)),
-          '', NEW.updated_at, 'amended', NEW.reason);
-END"""
+def an_earlier_schema_is_refused_not_converted():
+    cx = sqlite3.connect(OLD_DB)
+    cx.executescript("""
+      CREATE TABLE projects (name TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE,
+                             description TEXT, created TEXT NOT NULL);
+      CREATE TABLE consumers (project TEXT NOT NULL, name TEXT NOT NULL,
+                              kind TEXT NOT NULL, brief TEXT, created TEXT NOT NULL,
+                              PRIMARY KEY (project, name));
+      CREATE TABLE rules (project TEXT NOT NULL, id TEXT NOT NULL,
+                          PRIMARY KEY (project, id));
+    """)
+    cx.close()
+    try:
+        Registry(OLD_DB)
+        raise AssertionError("an old-schema database was opened without a word")
+    except RulesFault as e:
+        assert "earlier schema" in str(e), e
+        assert "wipe" in str(e), e
+    # And NOTHING of the new schema was half-applied over it: the file is
+    # exactly as old as it was, so the refusal can fire again next boot.
+    cx = sqlite3.connect(OLD_DB)
+    cols = {r[1] for r in cx.execute("PRAGMA table_info(consumers)")}
+    cx.close()
+    assert "id" not in cols, "the refusal came after a half-upgrade"
 
 
-def a_v16_database_loses_the_relic_columns_and_nothing_else():
-    o = Registry(OLD_DB)
-    o.create_project("Ll11Mm22Nn33", "Legacy", [("architect", "chat")],
-                     {"PE": "perimeter", "VA": "vault"})
-    # Written the way the old engine wrote it: the ID chosen by the caller, the
-    # citations bare, because that is what its parser read.
-    for rid, dom, seq, body in (("PE-99", "PE", 99, "The guinea pig. See VA-07."),
-                                ("VA-07", "VA", 7, "Cited by PE-99, in prose.")):
-        o.cx.execute("BEGIN")
-        o.cx.execute("INSERT INTO rule_scopes (project, rule_id, scope) VALUES (?,?,?)",
-                     ("Legacy", rid, ALL))
-        o.cx.execute(
-            "INSERT INTO rules (project, id, domain, seq, type, title, body, status, "
-            "permanence, reason, updated_at) "
-            "VALUES (?,?,?,?,'R',?,?,'active','provisional','legacy',"
-            "'2026-01-01T00:00:00Z')",
-            ("Legacy", rid, dom, seq, rid, body))
-        o.cx.execute("COMMIT")
-    o.cx.execute("INSERT INTO rule_refs (project, src, dst) VALUES ('Legacy','PE-99','VA-07')")
-    # Shape the file like a v1.6.0 database: the legacy_id column WITH data in
-    # it and its partial unique index, and the signature columns on approvals.
-    o.cx.execute("ALTER TABLE rules ADD COLUMN legacy_id TEXT")
-    o.cx.execute("UPDATE rules SET legacy_id='OLD-99' "
-                 "WHERE project='Legacy' AND id='PE-99'")
-    o.cx.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_rules_legacy "
-                 "ON rules(project, legacy_id) WHERE legacy_id IS NOT NULL")
-    o.cx.execute("ALTER TABLE approvals ADD COLUMN signature TEXT")
-    o.cx.execute("ALTER TABLE approvals ADD COLUMN signed INTEGER NOT NULL DEFAULT 1")
-    # And neither the brief nor its versions table: a real v1.6.0 had no
-    # trace of them. This is what the shape was missing at the 2.0.0 install:
-    # with consumer_versions still standing the reopen had nothing to
-    # rebuild, and `repaired == []` could never catch the autoindex that
-    # rides in WITH the table — the false REBUILT the log showed on
-    # 2026-08-10, sixth of its line, found at the Apply and not by a suite.
-    o.cx.execute("DROP TRIGGER trg_consumers_ins")
-    o.cx.execute("DROP TRIGGER trg_consumers_upd")
-    o.cx.execute("DROP TABLE consumer_versions")
-    o.cx.execute("ALTER TABLE consumers DROP COLUMN brief")
-    # Photographed AFTER the reshape: the reshape itself writes history (the
-    # UPDATE above goes through the trigger, as it must), the migration none.
-    before = {r[0]: r[1] for r in o.cx.execute(
-        "SELECT id, body FROM rules WHERE project='Legacy'")}
-    versions = o.cx.execute("SELECT COUNT(*) FROM rule_versions WHERE project='Legacy'"
-                            ).fetchone()[0]
-    o.close()
-
-    n = Registry(OLD_DB)
-    assert n.repaired == [], f"an upgrade is not a repair: {n.repaired}"
-    assert n.migrated == ["consumers.brief",
-                          "rules.legacy_id dropped",
-                          "approvals.signature dropped",
-                          "approvals.signed dropped"], n.migrated
-    after = {r[0]: r[1] for r in n.cx.execute(
-        "SELECT id, body FROM rules WHERE project='Legacy'")}
-    assert after == before, "not one ID and not one body moved"
-    assert n.cx.execute("SELECT COUNT(*) FROM rule_versions WHERE project='Legacy'"
-                        ).fetchone()[0] == versions, "and no version was invented"
-    assert n.cx.execute("SELECT src, dst FROM rule_refs WHERE project='Legacy'"
-                        ).fetchone()[0:2] == ("PE-99", "VA-07")
-    cols = {r[1] for r in n.cx.execute("PRAGMA table_info(rules)")}
-    assert "legacy_id" not in cols, sorted(cols)
-    idx = {r[0] for r in n.cx.execute(
-        "SELECT name FROM sqlite_master WHERE type='index'")}
-    assert "ux_rules_legacy" not in idx, sorted(idx)
-    # The counter still walks past the old numbers: nothing about the drop
-    # touched the sequence.
-    out = n.propose("Ll11Mm22Nn33", "VA", "R", "The first rule of the new corpus",
-                    "Body.", ["*"], "the seeding starts", "architect")
-    assert out["id"] == "VA-0008", out
-    n.close()
-
-    again = Registry(OLD_DB)
-    assert again.migrated == [], f"the migration ran twice: {again.migrated}"
-    assert again.repaired == []
-    again.close()
-
-
-case("a v1.6.0-shaped database loses the relic columns, and nothing else moves",
-     a_v16_database_loses_the_relic_columns_and_nothing_else)
+case("an earlier schema is refused out loud, never converted",
+     an_earlier_schema_is_refused_not_converted)
 
 # =====================================================================
 head("the engine is used from a THREAD POOL, not from here")
@@ -1913,94 +1892,6 @@ case("the maintenance reading carries the why: batch and export",
      the_maintenance_reading_carries_the_why)
 
 
-C1M_DB = os.path.join(D, "c1-migration.db")
-
-def an_old_database_gains_the_event_column_and_the_new_trigger():
-    o = Registry(C1M_DB)
-    o.create_project("Mm11Nn22Oo33", "Migration bench", [("architect", "chat")],
-                     {"VA": "vault"})
-    rid = o.propose("Mm11Nn22Oo33", "VA", "R", "Old-world rule", "Body.", ["*"],
-                    "the original why", "architect")["id"]
-    b = o.batch("Mm11Nn22Oo33")
-    o.approve("Mm11Nn22Oo33", b["digest"])
-    cols = {r[1] for r in o.cx.execute("PRAGMA table_info(rules)")}
-    assert "event" in cols, \
-        "the rules table has no `event` column: the events still live in `reason`"
-    # Reshape the file the way v1.5.0 left it: no `event` column, the update
-    # trigger copying NEW.reason into the history, `reason` already
-    # overwritten by the last event, the legacy_id column with its index, and
-    # the signature columns still on approvals. The dirt is PART of the shape.
-    o.cx.execute("DROP TRIGGER trg_rules_upd")
-    o.cx.execute("UPDATE rules SET reason='approved' "
-                 "WHERE project='Migration bench'")
-    o.cx.execute("ALTER TABLE rules DROP COLUMN event")
-    o.cx.execute(_OLD_TRG_UPD)
-    o.cx.execute("ALTER TABLE rules ADD COLUMN legacy_id TEXT")
-    o.cx.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_rules_legacy "
-                 "ON rules(project, legacy_id) WHERE legacy_id IS NOT NULL")
-    o.cx.execute("DROP INDEX ux_rules_supersedes")
-    o.cx.execute("ALTER TABLE rules DROP COLUMN supersedes")
-    o.cx.execute("ALTER TABLE approvals ADD COLUMN signature TEXT")
-    o.cx.execute("ALTER TABLE approvals ADD COLUMN signed INTEGER NOT NULL DEFAULT 1")
-    # And neither the brief nor its versions table: a real v1.6.0 had no
-    # trace of them. This is what the shape was missing at the 2.0.0 install:
-    # with consumer_versions still standing the reopen had nothing to
-    # rebuild, and `repaired == []` could never catch the autoindex that
-    # rides in WITH the table — the false REBUILT the log showed on
-    # 2026-08-10, sixth of its line, found at the Apply and not by a suite.
-    o.cx.execute("DROP TRIGGER trg_consumers_ins")
-    o.cx.execute("DROP TRIGGER trg_consumers_upd")
-    o.cx.execute("DROP TABLE consumer_versions")
-    o.cx.execute("ALTER TABLE consumers DROP COLUMN brief")
-    versions = o.cx.execute("SELECT COUNT(*) FROM rule_versions "
-                            "WHERE project='Migration bench'").fetchone()[0]
-    o.close()
-
-    n = Registry(C1M_DB)
-    assert n.repaired == [], \
-        f"an upgrade is not a repair — the supersedes index rode in with its " \
-        f"column and must not be reported: {n.repaired}"
-    assert n.migrated == ["rules.event", "rules.supersedes",
-                          "consumers.brief",
-                          "rules.legacy_id dropped",
-                          "trg_rules_upd",
-                          "approvals.signature dropped",
-                          "approvals.signed dropped"], n.migrated
-    assert "supersedes" in {r[1] for r in n.cx.execute("PRAGMA table_info(rules)")}
-    assert "ux_rules_supersedes" in {r[0] for r in n.cx.execute(
-        "SELECT name FROM sqlite_master WHERE type='index'")}
-    # NOTHING was converted: the reason v1.5.0 dirtied stays dirty. It is
-    # gym data and it dies with the reset — a migration that rewrote it would
-    # be inventing a why nobody wrote.
-    r = n.cx.execute("SELECT reason, event FROM rules "
-                     "WHERE project='Migration bench' AND id=?", (rid,)).fetchone()
-    assert r["reason"] == "approved", f"the migration touched reason: {r['reason']!r}"
-    assert r["event"] is None, f"the migration invented an event: {r['event']!r}"
-    assert n.cx.execute("SELECT COUNT(*) FROM rule_versions "
-                        "WHERE project='Migration bench'").fetchone()[0] == versions, \
-        "the migration invented a version"
-    # The NEW trigger must be in place, not the old one it replaced: the next
-    # event has to land in the history as the event, not as the frozen reason.
-    n.renew("Mm11Nn22Oo33", [rid])
-    r = n.cx.execute("SELECT reason, event FROM rules "
-                     "WHERE project='Migration bench' AND id=?", (rid,)).fetchone()
-    assert r["reason"] == "approved" and r["event"] == "renewed", dict(r)
-    last = n.cx.execute("SELECT reason FROM rule_versions "
-                        "WHERE project='Migration bench' AND rule_id=? "
-                        "ORDER BY version DESC LIMIT 1", (rid,)).fetchone()
-    assert last["reason"] == "renewed", \
-        f"the update trigger still copies the frozen reason: {last['reason']!r}"
-    n.close()
-
-    again = Registry(C1M_DB)
-    assert again.migrated == [], f"the migration ran twice: {again.migrated}"
-    assert again.repaired == []
-    again.close()
-
-
-case("an old database gains the event column and the rebuilt trigger, "
-     "and nothing else moves",
-     an_old_database_gains_the_event_column_and_the_new_trigger)
 
 
 # =====================================================================
@@ -2139,8 +2030,8 @@ def approve_swaps_the_two_in_one_transaction():
     assert new["status"] == "active", dict(new)
     # The heir DECLARES its scopes: nothing was inherited from the victim.
     scopes = [r[0] for r in R.cx.execute(
-        "SELECT scope FROM rule_scopes WHERE project=? AND rule_id=?",
-        (SUP_NAME, heir))]
+        "SELECT s.name FROM rule_scopes rs JOIN scopes s ON s.id=rs.scope_id "
+        "WHERE rs.project=? AND rs.rule_id=?", (SUP_NAME, heir))]
     assert scopes == ["advisory"], scopes
     # And the reading expands the retired rule pointing forward.
     probe = R.propose(SUP, "VA", "R", "Probe", f"See ({OLD_RULE}).", ["*"],

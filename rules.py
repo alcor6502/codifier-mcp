@@ -126,7 +126,13 @@ RE_CITE_GLOSSED = re.compile(
 GLOSS_SEP = " — "
 
 RE_CODE = re.compile(r"^[A-Za-z0-9]{8,32}$")
-RE_NAME = re.compile(r"^[a-z0-9][a-z0-9 _-]{0,40}$")
+# Spelling is DATA: a name is stored exactly as it was first given and comes
+# back the same, byte for byte. What is unique is the CASEFOLDED form — see
+# ux_consumers_fold / ux_scopes_fold — so `Architect` and `architect` are one
+# identity with one spelling, never two rows. The old pattern forced
+# lowercase, which silently rewrote what the owner typed: that rewriting is
+# extinct, not configurable.
+RE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _-]{0,40}$")
 
 FILE_MODE = 0o644                       # root writes, everyone else reads
 DIR_MODE = 0o755
@@ -219,13 +225,24 @@ def _norm_id(rid: str) -> str:
     return f"{m.group(1)}-{int(m.group(2)):0{ID_DIGITS}d}"
 
 
-def _norm_name(name: str, what: str) -> str:
-    s = (name or "").strip().lower()
+def _valid_name(name: str, what: str) -> str:
+    """Validate a name and hand it back UNTOUCHED. There is no normalisation
+    here on purpose: the spelling is the author's, and identity is decided by
+    the casefolded unique index, not by rewriting the input."""
+    s = (name or "").strip()
     if not RE_NAME.match(s):
         raise RulesError(
-            f"invalid {what} name {name!r}: lowercase letters, digits, space, '-' and '_', "
+            f"invalid {what} name {name!r}: letters, digits, space, '-' and '_', "
             "max 41 characters, and it cannot start with a separator")
     return s
+
+
+def _fold(name: str) -> str:
+    """The comparison form of a name. ONE definition, because two ideas of
+    what makes names equal is how `Architect` and `architect` become two
+    consumers. It matches SQLite's lower() — ASCII — which is what the unique
+    indexes use: the two sides of the boundary must agree."""
+    return (name or "").strip().lower()
 
 
 def _norm_scope_list(scopes) -> list[str]:
@@ -237,8 +254,8 @@ def _norm_scope_list(scopes) -> list[str]:
         if t.lower() in ALL_ALIASES:
             t = ALL
         elif t != ALL:
-            t = _norm_name(t, "scope")
-        if t not in out:
+            t = _valid_name(t, "scope")
+        if _fold(t) not in [_fold(x) for x in out]:
             out.append(t)
     return out
 
@@ -252,21 +269,24 @@ def _norm_scope_list(scopes) -> list[str]:
 #   consumers who was REACHED    (resolved and expanded)
 # A version is a photograph: if only the scope name were stored, changing the
 # membership of that scope tomorrow would rewrite what was true yesterday.
-_SCOPES_OF = """(SELECT IFNULL(GROUP_CONCAT(scope, ','), '') FROM
-    (SELECT scope FROM rule_scopes
-      WHERE project = {R}.project AND rule_id = {R}.id ORDER BY scope))"""
+_SCOPES_OF = """(SELECT IFNULL(GROUP_CONCAT(nm, ','), '') FROM
+    (SELECT sc.name AS nm FROM rule_scopes rs
+       JOIN scopes sc ON sc.id = rs.scope_id
+      WHERE rs.project = {R}.project AND rs.rule_id = {R}.id ORDER BY sc.name))"""
 
 _CONSUMERS_OF = """(SELECT IFNULL(GROUP_CONCAT(c, ','), '') FROM
-    (SELECT DISTINCT m.consumer AS c
-       FROM rule_scopes s
-       JOIN scope_members m ON m.project = s.project AND m.scope = s.scope
-      WHERE s.project = {R}.project AND s.rule_id = {R}.id
+    (SELECT DISTINCT k.name AS c
+       FROM rule_scopes rs
+       JOIN scope_members m ON m.scope_id = rs.scope_id
+       JOIN consumers k ON k.id = m.consumer_id
+      WHERE rs.project = {R}.project AND rs.rule_id = {R}.id
       UNION
      SELECT k.name FROM consumers k
       WHERE k.project = {R}.project
         AND EXISTS (SELECT 1 FROM rule_scopes z
+                      JOIN scopes zs ON zs.id = z.scope_id
                      WHERE z.project = {R}.project AND z.rule_id = {R}.id
-                       AND z.scope = '_ALL_')
+                       AND zs.name = '_ALL_')
       ORDER BY 1))"""
 
 _NEXT_VERSION = """(SELECT IFNULL(MAX(version), 0) + 1 FROM rule_versions
@@ -305,13 +325,18 @@ CREATE TABLE IF NOT EXISTS project_domains (
 -- describes itself in its own file, and a copy here would be verified by
 -- nobody. That is a discipline, not a branch in the code.
 CREATE TABLE IF NOT EXISTS consumers (
+  id      INTEGER PRIMARY KEY,
   project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
-  name    TEXT NOT NULL,
+  name    TEXT NOT NULL,                -- exactly as first given: spelling is DATA
   kind    TEXT NOT NULL CHECK (kind IN ('chat','skill')),
   brief   TEXT,
-  created TEXT NOT NULL,
-  PRIMARY KEY (project, name)
+  created TEXT NOT NULL
 );
+
+-- Identity is the CASEFOLDED name; the spelling above is the author's and is
+-- never rewritten. `Architect` and `architect` are one consumer, not two.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_consumers_fold
+    ON consumers(project, lower(name));
 
 -- A brief is identity, and a silent change to a role's identity is exactly
 -- the class of change this registry exists to record: the history IS the
@@ -331,19 +356,21 @@ CREATE TABLE IF NOT EXISTS consumer_versions (
 -- Named sets of consumers. managed=1 means the row was generated (a consumer's
 -- singleton, or _ALL_) and must keep telling the truth about its own name.
 CREATE TABLE IF NOT EXISTS scopes (
+  id      INTEGER PRIMARY KEY,
   project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
   name    TEXT NOT NULL,
-  managed INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (project, name)
+  managed INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS ux_scopes_fold
+    ON scopes(project, lower(name));
+
+-- Membership crosses the INTEGERS: the names stay in one place each, and a
+-- spelling can never disagree with itself across a join.
 CREATE TABLE IF NOT EXISTS scope_members (
-  project  TEXT NOT NULL,
-  scope    TEXT NOT NULL,
-  consumer TEXT NOT NULL,
-  PRIMARY KEY (project, scope, consumer),
-  FOREIGN KEY (project, scope)    REFERENCES scopes(project, name)    ON DELETE CASCADE,
-  FOREIGN KEY (project, consumer) REFERENCES consumers(project, name) ON DELETE CASCADE
+  scope_id    INTEGER NOT NULL REFERENCES scopes(id)    ON DELETE CASCADE,
+  consumer_id INTEGER NOT NULL REFERENCES consumers(id) ON DELETE CASCADE,
+  PRIMARY KEY (scope_id, consumer_id)
 );
 
 CREATE TABLE IF NOT EXISTS rules (
@@ -391,14 +418,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_rules_supersedes
 -- BEFORE the rule, inside one transaction, so the AFTER INSERT trigger on
 -- rules already sees a complete perimeter to photograph.
 CREATE TABLE IF NOT EXISTS rule_scopes (
-  project TEXT NOT NULL,
-  rule_id TEXT NOT NULL,
-  scope   TEXT NOT NULL,
-  PRIMARY KEY (project, rule_id, scope),
+  project  TEXT NOT NULL,
+  rule_id  TEXT NOT NULL,
+  scope_id INTEGER NOT NULL REFERENCES scopes(id)
+      DEFERRABLE INITIALLY DEFERRED,
+  PRIMARY KEY (project, rule_id, scope_id),
   FOREIGN KEY (project, rule_id) REFERENCES rules(project, id)
-      ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
-  FOREIGN KEY (project, scope) REFERENCES scopes(project, name)
-      DEFERRABLE INITIALLY DEFERRED
+      ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE TABLE IF NOT EXISTS rule_refs (
@@ -439,8 +465,8 @@ CREATE TABLE IF NOT EXISTS approvals (
   PRIMARY KEY (project, digest, approved_at)
 );
 
-CREATE INDEX IF NOT EXISTS ix_scope_members ON scope_members(project, consumer);
-CREATE INDEX IF NOT EXISTS ix_rule_scopes   ON rule_scopes(project, scope);
+CREATE INDEX IF NOT EXISTS ix_scope_members ON scope_members(consumer_id);
+CREATE INDEX IF NOT EXISTS ix_rule_scopes   ON rule_scopes(scope_id);
 CREATE INDEX IF NOT EXISTS ix_refs_dst      ON rule_refs(project, dst);
 CREATE INDEX IF NOT EXISTS ix_rules_status  ON rules(project, status);
 
@@ -501,11 +527,15 @@ END;
 
 -- Every consumer needs a scope holding itself alone, or no rule could be
 -- addressed to it. The database makes it, so it exists even for a consumer
--- inserted by hand.
+-- inserted by hand. The singleton takes the consumer's OWN spelling, and the
+-- membership is written by SELECT rather than last_insert_rowid(): inside a
+-- trigger that value is not worth trusting.
 CREATE TRIGGER IF NOT EXISTS trg_consumer_scope AFTER INSERT ON consumers BEGIN
   INSERT INTO scopes (project, name, managed) VALUES (NEW.project, NEW.name, 1);
-  INSERT INTO scope_members (project, scope, consumer)
-       VALUES (NEW.project, NEW.name, NEW.name);
+  INSERT INTO scope_members (scope_id, consumer_id)
+       SELECT s.id, NEW.id FROM scopes s
+        WHERE s.project = NEW.project AND s.managed = 1
+          AND lower(s.name) = lower(NEW.name);
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_consumers_ins AFTER INSERT ON consumers BEGIN
@@ -524,20 +554,23 @@ CREATE TRIGGER IF NOT EXISTS trg_consumers_upd AFTER UPDATE ON consumers BEGIN
           NEW.kind, NEW.brief, strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'amended');
 END;
 
--- A managed scope must keep telling the truth about its own name.
+-- A managed scope must keep telling the truth about its own name. The one
+-- legitimate member of a singleton is the consumer whose spelling it carries;
+-- _ALL_ is managed too and names no consumer, so it takes no member at all.
 CREATE TRIGGER IF NOT EXISTS trg_managed_no_extra_member
 BEFORE INSERT ON scope_members
-WHEN (SELECT managed FROM scopes
-       WHERE project = NEW.project AND name = NEW.scope) = 1
- AND NEW.consumer <> NEW.scope
+WHEN (SELECT managed FROM scopes WHERE id = NEW.scope_id) = 1
+ AND NOT EXISTS (SELECT 1 FROM scopes s
+                   JOIN consumers c ON c.id = NEW.consumer_id
+                  WHERE s.id = NEW.scope_id AND s.project = c.project
+                    AND lower(s.name) = lower(c.name))
 BEGIN
   SELECT RAISE(ABORT, 'managed scope: it is a consumer singleton and takes no other member');
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_managed_no_member_update
 BEFORE UPDATE ON scope_members
-WHEN (SELECT managed FROM scopes
-       WHERE project = OLD.project AND name = OLD.scope) = 1
+WHEN (SELECT managed FROM scopes WHERE id = OLD.scope_id) = 1
 BEGIN
   SELECT RAISE(ABORT, 'managed scope: its membership is not editable');
 END;
@@ -564,9 +597,10 @@ TABLES = ("projects", "project_domains", "consumers", "consumer_versions",
           "rules", "rule_scopes", "rule_refs", "rule_versions", "approvals")
 # Indexes the preflight has to see: only the ones that carry a GUARANTEE, never
 # the ones that carry speed. ux_rules_supersedes is what stops two pending
-# proposals claiming the same victim, and a constraint nobody checks is a
-# constraint that is not there.
-INDEXES = ("ux_rules_supersedes",)
+# proposals claiming the same victim; the two fold indexes are what makes
+# `Architect` and `architect` one identity while the spelling stays the
+# author's. A constraint nobody checks is a constraint that is not there.
+INDEXES = ("ux_rules_supersedes", "ux_consumers_fold", "ux_scopes_fold")
 TRIGGERS = ("trg_rules_ins", "trg_rules_upd", "trg_rules_del",
             "trg_scope_link_ins", "trg_scope_link_del", "trg_consumer_scope",
             "trg_consumers_ins", "trg_consumers_upd",
@@ -644,127 +678,38 @@ class Registry:
         self._migrate()
         self.cx.executescript(SCHEMA)
         after = {r[0] for r in self.cx.execute("SELECT name FROM sqlite_master")}
-        # What the migration itself caused to appear is subtracted: a repair
-        # means "a trigger vanished and history stopped being written" —
-        # something to worry about — and an upgrade arriving is not that. The
-        # supersedes index rides in with its column, so it is new exactly when
-        # the column is.
-        _upgrade = set()
-        if "rules.supersedes" in self.migrated:
-            _upgrade |= {"ux_rules_supersedes"}
-        if "consumers.brief" in self.migrated:
-            _upgrade |= {"consumer_versions", "trg_consumers_ins",
-                         "trg_consumers_upd"}
-        # A table SQLite creates brings its PRIMARY KEY autoindex along —
-        # sqlite_autoindex_<table>_N — a name nobody wrote in the schema, so
-        # a subtraction by written names misses it. At the 2.0.0 install this
-        # printed a false `REBUILT: sqlite_autoindex_consumer_versions_1` at
-        # the one boot that migrated: exactly the wolf this subtraction
-        # exists not to cry. Whatever table rides in with an upgrade, its
-        # autoindexes ride with it.
-        _upgrade |= {n for n in (after - before)
-                     if any(n.startswith(f"sqlite_autoindex_{t}_")
-                            for t in _upgrade)}
-        self.repaired = [] if fresh else sorted((after - before) - _upgrade)
+        # With migration gone (a schema change means a wipe, by decision),
+        # whatever appears on an EXISTING database is a repair — a trigger
+        # somebody dropped by hand, rebuilt — and nothing else. The upgrade
+        # subtraction that used to live here left with the ALTER ladder.
+        self.repaired = [] if fresh else sorted(after - before)
         self._fix_modes()
 
     # ---------- housekeeping ----------
 
     def _migrate(self) -> None:
-        """What has to change on an existing database: the columns that moved
-        with this version, and the one trigger whose subject moved with them.
-        Nothing else.
+        """THERE IS NO MIGRATION, and that is a decision (2026-08-11), not a
+        gap: the corpus goes back in by hand through the same door as any
+        other rule, so a database from an earlier schema is WIPED, never
+        converted. What this method does is refuse to run on one, out loud,
+        instead of letting IF NOT EXISTS half-apply the new schema over the
+        old and produce a database that is neither.
 
-        `CREATE TABLE IF NOT EXISTS` is a no-op on a table that is already
-        there, so a schema change never reaches a database in service through
-        executescript: it happens here, declared. On a fresh database there is
-        nothing to migrate and the schema creates everything whole.
-
-        AND IT DOES NOT CONVERT ANYTHING. An earlier version of this method
-        widened the old two-digit IDs across every table and rewrote the bodies
-        to match. It was deleted, and the reason is the same one that killed
-        the bulk import: A MIGRATION IS NOT CODE, IT IS THE WORK. The rules go
-        back in one at a time, by hand, each one read and decided. Converting
-        prose by pattern invents citations that were never citations, and
-        converting IDs behind the author's back moves the very pointers the
-        pass exists to re-decide. The `legacy_id` column this engine once
-        offered that pass went the way of the import that justified it: the
-        old->new mapping lives in the migration files, outside the registry.
-
-        Kept declarative on purpose: whatever happens here must also be in
-        SCHEMA, or a fresh install and an upgraded one stop being the same
-        thing."""
+        The v2.x ALTER TABLE ladder that used to live here left with the
+        decision: an upgraded database and a fresh one must be the same
+        thing, and with a wipe at every schema change they are — by
+        construction rather than by care."""
         self.migrated: list[str] = []
         have = {r[0] for r in self.cx.execute("SELECT name FROM sqlite_master "
                                               "WHERE type='table'")}
-        if "rules" not in have:
-            return
-        cols = {r[1] for r in self.cx.execute("PRAGMA table_info(rules)")}
-        for name, decl in (("event", "TEXT"), ("supersedes", "TEXT")):
-            if name not in cols:
-                try:
-                    self.cx.execute(f"ALTER TABLE rules ADD COLUMN {name} {decl}")
-                except sqlite3.OperationalError as e:
-                    # Two processes opening the database for the first time
-                    # after an upgrade: the loser must not die at __init__.
-                    if "duplicate column" not in str(e).lower():
-                        raise
-                else:
-                    self.migrated.append(f"rules.{name}")
-        # The consumer gains its brief: identity next to the rules it binds.
-        # The versions table and its two triggers ride in through the
-        # executescript right after this, subtracted from `repaired` above.
-        if "consumers" in have:
-            ccols = {r[1] for r in self.cx.execute("PRAGMA table_info(consumers)")}
-            if "brief" not in ccols:
-                try:
-                    self.cx.execute("ALTER TABLE consumers ADD COLUMN brief TEXT")
-                except sqlite3.OperationalError as e:
-                    if "duplicate column" not in str(e).lower():
-                        raise
-                else:
-                    self.migrated.append("consumers.brief")
-        # legacy_id leaves with the import: the index first, because a column
-        # under a partial index cannot be dropped while the index stands.
-        if "legacy_id" in cols:
-            self.cx.execute("DROP INDEX IF EXISTS ux_rules_legacy")
-            try:
-                self.cx.execute("ALTER TABLE rules DROP COLUMN legacy_id")
-            except sqlite3.OperationalError as e:
-                # The same two-process race as the ADD above.
-                if "no such column" not in str(e).lower():
-                    raise
-            else:
-                self.migrated.append("rules.legacy_id dropped")
-        if "rules.event" in self.migrated:
-            # The history trigger changed subject with the column: it used to
-            # copy NEW.reason into the version row, and from here on reason
-            # never moves, so it copies NEW.event. CREATE TRIGGER IF NOT
-            # EXISTS never replaces a body — the old trigger must go, and the
-            # executescript right after this puts the new one in its place.
-            # Declared, because a trigger swap on a database in service
-            # happens once.
-            self.cx.execute("DROP TRIGGER IF EXISTS trg_rules_upd")
-            self.migrated.append("trg_rules_upd")
-        # The signature left in v2.0.0, and its two columns leave WITH it —
-        # out of the schema, not dead in place. A dead column kept "until the
-        # reset" would be reborn by the reset itself, because the reset
-        # recreates the schema from this code. Dropped, so a fresh install and
-        # an upgraded one stay the same thing; the rows above them — what was
-        # approved, when — are untouched.
-        if "approvals" in have:
-            acols = {r[1] for r in self.cx.execute("PRAGMA table_info(approvals)")}
-            for name in ("signature", "signed"):
-                if name in acols:
-                    try:
-                        self.cx.execute(f"ALTER TABLE approvals DROP COLUMN {name}")
-                    except sqlite3.OperationalError as e:
-                        # Same two-process race as the ADD above: the loser
-                        # must not die at __init__.
-                        if "no such column" not in str(e).lower():
-                            raise
-                    else:
-                        self.migrated.append(f"approvals.{name} dropped")
+        if "consumers" not in have:
+            return                        # fresh, or pre-schema: nothing to judge
+        cols = {r[1] for r in self.cx.execute("PRAGMA table_info(consumers)")}
+        if "id" not in cols:
+            raise RulesFault(
+                f"{self.path} belongs to an earlier schema (consumers has no "
+                "surrogate id). There is no migration, by decision: wipe the "
+                "database and reseed — the corpus goes back in by hand.")
 
     def _fix_modes(self) -> None:
         """0644 is DELIBERATE: whoever mounts the share reads and does not touch."""
@@ -801,15 +746,20 @@ class Registry:
         return row[0]
 
     def _consumer(self, project: str, name: str) -> str:
-        n = (name or "").strip().lower()
+        """Resolve a consumer by its CASEFOLDED name and hand back the STORED
+        spelling. The caller may type `architect` and the registry answers
+        with `Architect`: identity is folded, spelling is data, and every
+        answer carries the spelling the owner chose."""
+        n = _fold(name)
         allowed = [r[0] for r in self.cx.execute(
             "SELECT name FROM consumers WHERE project=? ORDER BY name", (project,))]
         if not n:
             raise RulesError(f"consumer not specified. This project has: {', '.join(allowed)}")
-        if n not in allowed:
-            raise RulesError(
-                f"unknown consumer {name!r}. This project has: {', '.join(allowed) or '(none)'}")
-        return n
+        for stored in allowed:
+            if _fold(stored) == n:
+                return stored
+        raise RulesError(
+            f"unknown consumer {name!r}. This project has: {', '.join(allowed) or '(none)'}")
 
     def _domains(self, project: str) -> list[str]:
         return [r[0] for r in self.cx.execute(
@@ -924,18 +874,18 @@ class Registry:
                 cname = vals[0] if vals else ""
                 kind = vals[1] if len(vals) > 1 else "chat"
                 brief = vals[2] if len(vals) > 2 else ""
-            cname = _norm_name(cname, "consumer")
+            cname = _valid_name(cname, "consumer")
             kind = (kind or "chat").strip().lower()
             if kind not in KINDS:
                 raise RulesError(f"kind {kind!r}: it must be one of {', '.join(KINDS)}")
-            if cname == ALL.lower() or cname == ALL:
+            if _fold(cname) in ALL_ALIASES or cname == ALL:
                 raise RulesError(f"{ALL} is reserved and is not a consumer name")
             brief = (brief or "").strip()
             if len(brief.encode()) > MAX_BODY_BYTES:
                 raise RulesError(
                     f"the brief of {cname!r} is over {MAX_BODY_BYTES} bytes: split it — "
                     "same discipline as a rule's body")
-            if cname not in [c for c, _, _ in out]:
+            if _fold(cname) not in [_fold(c) for c, _, _ in out]:
                 out.append((cname, kind, brief))
         return out
 
@@ -958,17 +908,26 @@ class Registry:
         a consumer stays impossible — it would orphan the rules aimed at it."""
         p = self._project(code)
         cons = self._normalise_consumers(consumers)
-        added, brief_set = [], []
+        added, brief_set, already = [], [], []
         for cname, kind, brief in cons:
-            if self.cx.execute("SELECT 1 FROM consumers WHERE project=? AND name=?",
-                               (p, cname)).fetchone():
+            row = self.cx.execute(
+                "SELECT id, name FROM consumers WHERE project=? AND lower(name)=?",
+                (p, _fold(cname))).fetchone()
+            if row:
+                # The consumer EXISTS — under the stored spelling, whatever
+                # spelling the call used. Only the brief is written; the name
+                # is never touched, because spelling is data. And the no-op
+                # is DECLARED, stored spelling included: an `added: []` that
+                # said nothing was how a gloss went missing in silence once.
                 if brief:
-                    self.cx.execute("UPDATE consumers SET brief=? WHERE project=? "
-                                    "AND name=?", (brief, p, cname))
-                    brief_set.append(cname)
+                    self.cx.execute("UPDATE consumers SET brief=? WHERE id=?",
+                                    (brief, row["id"]))
+                    brief_set.append(row["name"])
+                else:
+                    already.append(row["name"])
                 continue
-            if self.cx.execute("SELECT 1 FROM scopes WHERE project=? AND name=?",
-                               (p, cname)).fetchone():
+            if self.cx.execute("SELECT 1 FROM scopes WHERE project=? AND lower(name)=?",
+                               (p, _fold(cname))).fetchone():
                 raise RulesError(
                     f"a scope named {cname!r} already exists: a consumer and a scope share "
                     "one namespace, because every consumer gets a scope with its own name")
@@ -976,25 +935,45 @@ class Registry:
                             "VALUES (?,?,?,?,?)", (p, cname, kind, brief or None, _now()))
             added.append(cname)
         return {"project": p, "added": added, "brief_set": brief_set,
+                "already_there": already,
                 "note": "each new one also got a scope of its own, made by the database"}
 
     def add_domains(self, code: str, domains) -> dict:
+        """Adds domains — and UPDATES the gloss of one that already exists,
+        declaring it. The 'only adding' rule covers the LETTERS (removing a
+        domain would orphan its IDs), not the glosses, which are for humans
+        and correcting one orphans nothing. What a tool does not do, it says:
+        the old shape returned `added: []` on an existing domain and silently
+        dropped the new gloss — a verdict that read like success."""
         p = self._project(code)
         if isinstance(domains, (list, tuple)):
             domains = {d: "" for d in domains}
-        added = []
+        added, updated = [], []
         for d, desc in (domains or {}).items():
             if not re.match(r"^[A-Z]{2}$", d):
                 raise RulesError(f"domain {d!r}: exactly two uppercase letters")
-            if self.cx.execute("SELECT 1 FROM project_domains WHERE project=? AND domain=?",
-                               (p, d)).fetchone():
+            row = self.cx.execute("SELECT description FROM project_domains "
+                                  "WHERE project=? AND domain=?", (p, d)).fetchone()
+            if row:
+                if desc and desc != (row["description"] or ""):
+                    self.cx.execute("UPDATE project_domains SET description=? "
+                                    "WHERE project=? AND domain=?", (desc, p, d))
+                    updated.append(d)
                 continue
             self.cx.execute("INSERT INTO project_domains (project, domain, description) "
                             "VALUES (?,?,?)", (p, d, desc or None))
             added.append(d)
-        return {"project": p, "added": added}
+        return {"project": p, "added": added, "updated": updated}
 
     # ---------- scopes ----------
+
+    def _scope_id(self, project: str, scope: str):
+        """Casefolded name to surrogate id, or None. The one lookup every
+        scope reference goes through, so there is one idea of equality."""
+        row = self.cx.execute(
+            "SELECT id FROM scopes WHERE project=? AND lower(name)=?",
+            (project, _fold(scope))).fetchone()
+        return row[0] if row else None
 
     def _breadth(self, project: str, scope: str) -> int:
         """How many consumers a scope reaches. _ALL_ is not a listed set: it must
@@ -1002,25 +981,29 @@ class Registry:
         if scope == ALL:
             return self.cx.execute("SELECT COUNT(*) FROM consumers WHERE project=?",
                                    (project,)).fetchone()[0]
-        return self.cx.execute("SELECT COUNT(*) FROM scope_members WHERE project=? AND scope=?",
-                               (project, scope)).fetchone()[0]
+        return self.cx.execute(
+            "SELECT COUNT(*) FROM scope_members m JOIN scopes s ON s.id=m.scope_id "
+            "WHERE s.project=? AND lower(s.name)=?",
+            (project, _fold(scope))).fetchone()[0]
 
     def _members(self, project: str, scope: str) -> list[str]:
         if scope == ALL:
             return [r[0] for r in self.cx.execute(
                 "SELECT name FROM consumers WHERE project=? ORDER BY name", (project,))]
         return [r[0] for r in self.cx.execute(
-            "SELECT consumer FROM scope_members WHERE project=? AND scope=? ORDER BY consumer",
-            (project, scope))]
+            "SELECT c.name FROM scope_members m "
+            "  JOIN scopes s ON s.id=m.scope_id JOIN consumers c ON c.id=m.consumer_id "
+            " WHERE s.project=? AND lower(s.name)=? ORDER BY c.name",
+            (project, _fold(scope)))]
 
     def create_scope(self, code: str, name: str, members) -> dict:
         p = self._project(code)
-        name = _norm_name(name, "scope")
-        if self.cx.execute("SELECT 1 FROM scopes WHERE project=? AND name=?",
-                           (p, name)).fetchone():
+        name = _valid_name(name, "scope")
+        if self.cx.execute("SELECT 1 FROM scopes WHERE project=? AND lower(name)=?",
+                           (p, _fold(name))).fetchone():
             raise RulesError(f"a scope named {name!r} already exists")
-        if self.cx.execute("SELECT 1 FROM consumers WHERE project=? AND name=?",
-                           (p, name)).fetchone():
+        if self.cx.execute("SELECT 1 FROM consumers WHERE project=? AND lower(name)=?",
+                           (p, _fold(name))).fetchone():
             raise RulesError(f"{name!r} is a consumer: its singleton scope already exists")
         members = [self._consumer(p, m) for m in (members or [])]
         if len(members) < 2:
@@ -1031,9 +1014,13 @@ class Registry:
         try:
             self.cx.execute("INSERT INTO scopes (project, name, managed) VALUES (?,?,0)",
                             (p, name))
+            sid = self.cx.execute("SELECT id FROM scopes WHERE project=? AND lower(name)=?",
+                                  (p, _fold(name))).fetchone()[0]
             for m in members:
-                self.cx.execute("INSERT INTO scope_members (project, scope, consumer) "
-                                "VALUES (?,?,?)", (p, name, m))
+                self.cx.execute(
+                    "INSERT INTO scope_members (scope_id, consumer_id) "
+                    "SELECT ?, id FROM consumers WHERE project=? AND lower(name)=?",
+                    (sid, p, _fold(m)))
             self.cx.execute("COMMIT")
         except Exception:
             self.cx.execute("ROLLBACK")
@@ -1044,23 +1031,29 @@ class Registry:
         """Careful: this changes the perimeter of EVERY rule pointing at this
         scope. To widen a single rule use widen_rule instead."""
         p = self._project(code)
-        name = _norm_name(name, "scope")
-        row = self.cx.execute("SELECT managed FROM scopes WHERE project=? AND name=?",
-                              (p, name)).fetchone()
+        name = _valid_name(name, "scope")
+        row = self.cx.execute("SELECT id, name, managed FROM scopes "
+                              "WHERE project=? AND lower(name)=?",
+                              (p, _fold(name))).fetchone()
         if row is None:
             raise RulesError(f"no scope named {name!r} in this project")
         if row["managed"]:
             raise RulesError(f"{name!r} is a managed scope (a consumer singleton, or {ALL}): "
                              "its membership is fixed by construction")
+        sid, name = row["id"], row["name"]
         for m in (add or []):
-            c = self._consumer(p, m)
-            self.cx.execute("INSERT OR IGNORE INTO scope_members (project, scope, consumer) "
-                            "VALUES (?,?,?)", (p, name, c))
+            self._consumer(p, m)
+            self.cx.execute(
+                "INSERT OR IGNORE INTO scope_members (scope_id, consumer_id) "
+                "SELECT ?, id FROM consumers WHERE project=? AND lower(name)=?",
+                (sid, p, _fold(m)))
         for m in (remove or []):
-            self.cx.execute("DELETE FROM scope_members WHERE project=? AND scope=? AND consumer=?",
-                            (p, name, (m or '').strip().lower()))
-        n = self.cx.execute("SELECT COUNT(*) FROM rule_scopes WHERE project=? AND scope=?",
-                            (p, name)).fetchone()[0]
+            self.cx.execute(
+                "DELETE FROM scope_members WHERE scope_id=? AND consumer_id IN "
+                "(SELECT id FROM consumers WHERE project=? AND lower(name)=?)",
+                (sid, p, _fold(m)))
+        n = self.cx.execute("SELECT COUNT(*) FROM rule_scopes WHERE scope_id=?",
+                            (sid,)).fetchone()[0]
         return {"project": p, "scope": name, "members": self._members(p, name),
                 "rules_affected": n}
 
@@ -1071,7 +1064,8 @@ class Registry:
 
     def _scopes_of(self, p: str, rid: str) -> list[str]:
         return [r[0] for r in self.cx.execute(
-            "SELECT scope FROM rule_scopes WHERE project=? AND rule_id=? ORDER BY scope", (p, rid))]
+            "SELECT s.name FROM rule_scopes rs JOIN scopes s ON s.id=rs.scope_id "
+            " WHERE rs.project=? AND rs.rule_id=? ORDER BY s.name", (p, rid))]
 
     def _version(self, p: str, rid: str) -> int:
         r = self.cx.execute("SELECT IFNULL(MAX(version),0) FROM rule_versions "
@@ -1121,11 +1115,12 @@ class Registry:
     def _reaching(self, p: str, consumer: str) -> dict[str, tuple[int, list[str]]]:
         """rule_id -> (breadth of the widest scope it arrives through, scopes)."""
         rows = self.cx.execute(
-            "SELECT s.rule_id, s.scope FROM rule_scopes s "
-            " WHERE s.project = :p AND (s.scope = :all OR EXISTS ("
-            "   SELECT 1 FROM scope_members m WHERE m.project = :p "
-            "     AND m.scope = s.scope AND m.consumer = :c))",
-            {"p": p, "c": consumer, "all": ALL}).fetchall()
+            "SELECT rs.rule_id, sc.name AS scope FROM rule_scopes rs "
+            "  JOIN scopes sc ON sc.id = rs.scope_id "
+            " WHERE rs.project = :p AND (sc.name = :all OR EXISTS ("
+            "   SELECT 1 FROM scope_members m JOIN consumers k ON k.id = m.consumer_id "
+            "    WHERE m.scope_id = rs.scope_id AND lower(k.name) = :c))",
+            {"p": p, "c": _fold(consumer), "all": ALL}).fetchall()
         out: dict[str, tuple[int, list[str]]] = {}
         cache: dict[str, int] = {}
         for r in rows:
@@ -1236,9 +1231,10 @@ class Registry:
 
     def _holders(self, p: str, rid: str) -> list[str]:
         rows = self.cx.execute(
-            "SELECT DISTINCT m.consumer FROM rule_scopes s "
-            "  JOIN scope_members m ON m.project=s.project AND m.scope=s.scope "
-            " WHERE s.project=? AND s.rule_id=? ORDER BY m.consumer", (p, rid)).fetchall()
+            "SELECT DISTINCT c.name FROM rule_scopes rs "
+            "  JOIN scope_members m ON m.scope_id=rs.scope_id "
+            "  JOIN consumers c ON c.id=m.consumer_id "
+            " WHERE rs.project=? AND rs.rule_id=? ORDER BY c.name", (p, rid)).fetchall()
         return [r[0] for r in rows]
 
     def search(self, code: str, text: str, consumer: str) -> dict:
@@ -1636,17 +1632,23 @@ class Registry:
         return (row["title"] or "").replace("(", "[").replace(")", "]")
 
     def _check_scopes(self, p: str, scopes: list[str]) -> list[str]:
+        """Resolve every scope reference and hand back the STORED spellings:
+        what goes into a verdict is the name the owner chose, whatever
+        spelling the call arrived with."""
         if not scopes:
             raise RulesError("a rule with no perimeter reaches nobody: give at least one "
                              f"scope, or {ALL} if it binds everyone")
+        out = []
         for s in scopes:
-            if not self.cx.execute("SELECT 1 FROM scopes WHERE project=? AND name=?",
-                                   (p, s)).fetchone():
+            row = self.cx.execute("SELECT name FROM scopes WHERE project=? AND lower(name)=?",
+                                  (p, _fold(s))).fetchone()
+            if row is None:
                 raise RulesError(
                     f"{s!r} is neither a consumer nor a scope of this project. "
                     "Every consumer has a scope with its own name; groups are made "
                     "with create_scope.")
-        return scopes
+            out.append(row["name"])
+        return out
 
     def _split_id(self, p: str, rid: str) -> tuple[str, int]:
         m = RE_ID.match(rid)
@@ -1744,8 +1746,7 @@ class Registry:
                 "makes the proposal YOURS. Omitted, the proposal would be an orphan — "
                 "rules_pending could never show it to whoever filed it — and a silent "
                 "orphan is exactly the class of error this registry refuses at the door.")
-        by = _norm_name(proposed_by, "consumer")
-        self._consumer(p, by)
+        by = self._consumer(p, proposed_by)
         # IMMEDIATE, not the default deferred: the write lock is taken BEFORE
         # the counter is read, so nobody can read the same MAX(seq) in between.
         # A plain BEGIN would upgrade from read to write halfway through, and in
@@ -1775,8 +1776,10 @@ class Registry:
             seq = self._next_seq(p, dom)
             rid = f"{dom}-{seq:0{ID_DIGITS}d}"
             for s in scopes:
-                self.cx.execute("INSERT INTO rule_scopes (project, rule_id, scope) VALUES (?,?,?)",
-                                (p, rid, s))
+                self.cx.execute(
+                    "INSERT INTO rule_scopes (project, rule_id, scope_id) "
+                    "SELECT ?, ?, id FROM scopes WHERE project=? AND lower(name)=?",
+                    (p, rid, p, _fold(s)))
             self.cx.execute(
                 "INSERT INTO rules (project, id, domain, seq, type, title, body, status, "
                 "permanence, changelog, source, reason, proposed_by, supersedes, "
@@ -2083,11 +2086,12 @@ class Registry:
         scopes = self._check_scopes(p, _norm_scope_list(scopes))
         added = []
         for s in scopes:
+            sid = self._scope_id(p, s)
             if self.cx.execute("SELECT 1 FROM rule_scopes WHERE project=? AND rule_id=? "
-                               "AND scope=?", (p, rid, s)).fetchone():
+                               "AND scope_id=?", (p, rid, sid)).fetchone():
                 continue
-            self.cx.execute("INSERT INTO rule_scopes (project, rule_id, scope) VALUES (?,?,?)",
-                            (p, rid, s))
+            self.cx.execute("INSERT INTO rule_scopes (project, rule_id, scope_id) "
+                            "VALUES (?,?,?)", (p, rid, sid))
             added.append(s)
         return {"project": p, "id": rid, "added": added,
                 "scopes": self._scopes_of(p, rid), "reaches": self._holders(p, rid)}
@@ -2099,8 +2103,10 @@ class Registry:
             raise RulesError(f"{rid}: never defined in this project")
         removed = []
         for s in _norm_scope_list(scopes):
-            n = self.cx.execute("DELETE FROM rule_scopes WHERE project=? AND rule_id=? "
-                                "AND scope=?", (p, rid, s)).rowcount
+            n = self.cx.execute(
+                "DELETE FROM rule_scopes WHERE project=? AND rule_id=? AND scope_id IN "
+                "(SELECT id FROM scopes WHERE project=? AND lower(name)=?)",
+                (p, rid, p, _fold(s))).rowcount
             if n:
                 removed.append(s)
         left = self._scopes_of(p, rid)
