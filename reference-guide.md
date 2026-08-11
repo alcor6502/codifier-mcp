@@ -303,9 +303,11 @@ said, on purpose.
 The key opens REDACTION: fixing, widening, narrowing, retiring, the audits,
 the history, the export, consumers, domains and scopes. It does not open
 **promulgation** — approving, denying from the lot, renewing, promoting — nor
-the master operations — creating a project, the registry index, rekey, backup.
-Those live in the administration UI, behind the master, and are not tools:
-redacting and promulgating stopped being the same power in v3.0.0.
+the master operations — creating a project, the registry index, rekey. Those
+live in the administration UI, behind the master, and are not tools: redacting
+and promulgating stopped being the same power in v3.0.0. The backup is in that
+UI as well, on its maintenance page, and it is the one thing there that asks
+for no master.
 
 ## THE LIFE OF A RULE
 
@@ -407,9 +409,10 @@ too, as it always did.
   casefolded form, so `Architect` and `architect` are one consumer — and a
   consumer is never renamed: create the new one, retire the old.
 - **The master operations are NOT tools.** Creating a project, the registry
-  index (codes included), rekey and backup live in the administration UI,
-  behind the master, so no master-level secret ever travels in a
-  conversation. A project is born with a RECEIPT — its code and its
+  index (codes included) and rekey live in the administration UI, behind the
+  master, so no master-level secret ever travels in a conversation. The
+  backup lives there too, on the maintenance page, and asks for no master:
+  it changes nothing and its copy lands on the server's disk. A project is born with a RECEIPT — its code and its
   architect key, shown once: code to the top of the project instructions,
   key to the password manager. Losing either costs a rekey, which
   regenerates the pair.

@@ -180,7 +180,9 @@ generated at boot and stored nowhere.
 **The MCP surface moved in v3.0.0 — reconnect the connector and test in a
 new conversation.** Seven tools left it: approve, renew and promote went to
 the lot and pending pages, and the master operations — create, registry
-index, rekey, backup — live in the UI behind the master. 22 tools remain,
+index, rekey — live in the UI behind the master. The backup went to the UI
+too, on its **maintenance** page, and asks for no master: `VACUUM INTO`
+changes nothing and the copy lands on the server's disk. 22 tools remain,
 and maintenance opens with the pair: project code plus that project's
 architect key, generated on the project's receipt.
 

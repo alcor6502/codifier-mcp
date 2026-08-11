@@ -14,9 +14,10 @@ preflight. Three deliberate differences:
 - writing is a two-step affair. A chat PROPOSES; the batch is approved in the
   administration UI, behind the master, against the batch's DIGEST — you
   approve the batch you read. Since v3.0.0 approve/renew/promote and the
-  master operations (create, registry, rekey, backup) are NOT tools: they
-  left the MCP surface when the UI replaced their placeholder, so the master
-  never travels in a conversation. What stays behind the tools is REDACTION,
+  master operations (create, registry, rekey) are NOT tools: they left the
+  MCP surface when the UI replaced their placeholder, so the master never
+  travels in a conversation. The backup left with them and lives on the UI's
+  maintenance page, where the session is the whole of what it needs. What stays behind the tools is REDACTION,
   and it opens per project: the pair (project code, architect key) travels on
   every maintenance call. ADMIN_ACCESS_CODE is dead — one container-wide code
   opened the maintenance of every project, which is the defect you discover

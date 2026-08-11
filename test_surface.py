@@ -2056,14 +2056,15 @@ for _n in ast.walk(WEB_TREE):
         _ROUTES.append((_path, _meth, ast.unparse(_n.args[1]) if len(_n.args) > 1 else "?"))
 ok(bool(_ROUTES), f"web.py declares its routes explicitly: {len(_ROUTES)}")
 _POSTS = sorted(r for r in _ROUTES if "POST" in r[1])
-ok([(r[0], r[2]) for r in _POSTS] == [("/admin/backup", "admin_backup"),
-                                      ("/admin/create", "admin_create"),
+ok([(r[0], r[2]) for r in _POSTS] == [("/admin/create", "admin_create"),
                                       ("/admin/rekey", "admin_rekey"),
                                       ("/login", "login"), ("/logout", "logout"),
+                                      ("/maintenance/backup", "maintenance_backup"),
                                       ("/p/{project}/batch", "batch_action"),
                                       ("/p/{project}/pending", "pending_action")],
    "and exactly seven of them take POST: the door, the exit, and the five "
-   "actions — the lot, renewal/promotion, and the three master operations",
+   "actions — the lot, renewal/promotion, the two master operations, and the "
+   "backup, which is on maintenance because it handles no secret",
    [(r[0], r[2]) for r in _POSTS])
 ok(all(r[1] in (("GET",), ("POST",)) for r in _ROUTES),
    "and no route answers both — a page that reads and writes at one address is "
@@ -2143,6 +2144,36 @@ for _name, _fn in _BUILD_FUNCS.items():
        f"{_name} writes and retypes the master — a session alone is a browser "
        f"left open on the iPad")
 
+# And the mirror image, because the interesting half of a rule is its
+# exceptions. `backup` is NOT in MUTATING — VACUUM INTO produces a file and
+# changes nothing in the database — so the loop above never looks at the
+# handler that runs it, and dropping the master from it left no red line
+# anywhere. That silence is what this block ends: the decision is named here,
+# with its reason, and the day somebody puts the master back the suite says so
+# and the decision gets taken again instead of drifting.
+NO_MASTER_ON_PURPOSE = {
+    "maintenance_backup": "VACUUM INTO is a reading: it changes nothing and the "
+                          "copy lands on the server's disk, not in the browser, "
+                          "so the master would have defended against one extra "
+                          "file in a directory — and a master typed where it "
+                          "guards nothing is a master typed without looking",
+}
+ok(set(NO_MASTER_ON_PURPOSE) <= set(_ENDPOINTS),
+   "every master-free endpoint named here exists",
+   sorted(set(NO_MASTER_ON_PURPOSE) - set(_ENDPOINTS)))
+for _name, _why in NO_MASTER_ON_PURPOSE.items():
+    _fn = _BUILD_FUNCS.get(_name)
+    ok(_fn is not None and not [n for n in ast.walk(_fn) if isinstance(n, ast.Call)
+                                and ast.unparse(n.func) == "secrets.compare_digest"],
+       f"{_name} asks for no master ON PURPOSE — {_why[:56]}...",
+       "it now compares one: if that is the new decision, drop the exception")
+    _reached = {n.func.attr for n in ast.walk(_fn or ast.Module(body=[], type_ignores=[]))
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and isinstance(n.func.value, ast.Name) and n.func.value.id == "registry"}
+    ok(not (_reached & MUTATING),
+       f"and the exception holds only while {_name} writes nothing",
+       sorted(_reached & MUTATING))
+
 # The session check is the FIRST statement of the handler, and not conditional.
 # `if request.query_params.get("preview"): ...` in front of it reads like a
 # convenience and is an open page: every check that asks whether _session_ok
@@ -2189,6 +2220,87 @@ for _n in ("_session_ok", "_sign", "_issue", "_code_of"):
                 and any(isinstance(t, ast.Name) and t.id == _n
                         and isinstance(t.ctx, ast.Store) for t in ast.walk(x))]
     ok(not _rebound, f"and `{_n}` is never bound to anything else", _rebound)
+
+print("\n== the log reaches the browser from memory, and cannot grow ==")
+
+import logging                                                  # noqa: E402
+
+# THE SHAPE IS THE GUARANTEE. A page that shows log lines has exactly two ways
+# of being wrong, and neither of them fails at runtime: it grows without a
+# ceiling until the process dies, or it goes looking for the lines somewhere
+# else — a file that needs a path and permissions, or the docker socket, which
+# is a hole a page on the LAN must not be able to reach through. Both are
+# checked from the source, because both work perfectly on the day they are
+# written.
+_WEBMOD = __import__("web")
+ok(getattr(_WEBMOD, "LOG_RING_LINES", None) == 200,
+   "web.py declares how many lines the ring holds, and it is a named constant",
+   getattr(_WEBMOD, "LOG_RING_LINES", None))
+_RING = getattr(_WEBMOD, "LogRing", None)
+ok(_RING is not None and issubclass(_RING, logging.Handler),
+   "and LogRing is a logging.Handler: the lines arrive by being logged, so it "
+   "has no source of its own and cannot show what the console does not")
+if _RING is not None:
+    _r = _RING(lines=5)
+    for _i in range(8):
+        _r.emit(logging.LogRecord("codifier-mcp", logging.INFO, "x", 1,
+                                  "line %s", (_i,), None))
+    ok(len(_r.lines) == 5, "the ring is BOUNDED — measured, not declared: eight "
+                           "lines into a ring of five leaves five", len(_r.lines))
+    ok("line 0" not in "\n".join(_r.lines) and "line 7" in "\n".join(_r.lines),
+       "and it is the OLDEST that falls out", list(_r.lines))
+    ok(_r.lines.maxlen == 5, "and maxlen is what does it, so it cannot grow")
+    ok("Z " in _r.lines[-1], "and every line carries its zone: the container's "
+                             "clock is not the reader's", _r.lines[-1])
+
+# It is hung on the logger the service HANDED IN — a ring on a logger of its
+# own is how a line stops appearing in the log everybody reads — and a stale
+# one is taken off first, or the probes, which call build() many times, would
+# see every line twice with nothing to say so.
+if _BUILD is not None:
+    _HANDLER_CALLS = {ast.unparse(n.func) for n in ast.walk(_BUILD)
+                      if isinstance(n, ast.Call)}
+    ok("log.addHandler" in _HANDLER_CALLS,
+       "the ring is attached inside build(), to the logger it was handed")
+    ok("log.removeHandler" in _HANDLER_CALLS,
+       "and an older one is taken off first: two rings on one logger is every "
+       "line twice")
+
+# NOWHERE ELSE. No file is opened, no process is run: the ring is the only
+# source, and these are the two shortcuts somebody reaches for when 200 lines
+# in memory feel like not enough.
+_OPENS = sorted({ast.unparse(n.func) for n in ast.walk(WEB_TREE)
+                 if isinstance(n, ast.Call)
+                 and ast.unparse(n.func) in ("open", "os.popen")
+                 or (isinstance(n, ast.Call)
+                     and ast.unparse(n.func).startswith(("subprocess.",
+                                                         "pathlib.Path")))})
+ok(not _OPENS, "web.py opens no file and runs no process for the log", _OPENS)
+# Docstrings subtracted, for the reason the SQL check subtracts them: left in,
+# this goes red on the very paragraph that explains why the socket is out of
+# bounds — and a check that fails on a legitimate sentence gets deleted rather
+# than obeyed. Comments never reach the AST at all, so they are free.
+_DOCKERY = sorted({n.value[:40] for n in ast.walk(WEB_TREE)
+                   if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                   and id(n) not in _DOCNODES
+                   and ("docker" in n.value.lower() or "/var/log" in n.value)})
+ok(not _DOCKERY,
+   "and it never reaches for docker or a log file: neither the socket nor a "
+   "path on disk is something a page on the LAN gets to hold", _DOCKERY)
+
+# NEWEST FIRST, and the count on the page is READ from the ring rather than
+# written a second time. Both are one edit away from being wrong and neither
+# would ever fail.
+_MAINT = _WEB_FUNCS.get("_maintenance_html")
+ok(_MAINT is not None, "web.py builds the maintenance page in one place")
+if _MAINT is not None:
+    _MSRC = ast.unparse(_MAINT)
+    ok("reversed(" in _MSRC,
+       "and it shows the most recent first — a log is read to answer 'what just "
+       "happened', and that answer is at the top of a page")
+    ok("ring.lines.maxlen" in _MSRC and "200" not in _MSRC,
+       "and the ceiling on the page is read from the ring, never spelled out "
+       "twice")
 
 print("\n== the boot serves two servers on one loop ==")
 

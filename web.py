@@ -27,6 +27,15 @@ there is one person. The hidden username field on the form is for the password
 managers, which key an entry on a user and fill a password-only form wrong, in
 silence.
 
+TWO PAGES THAT LOOK ALIKE AND ARE NOT. `/admin` handles SECRETS — it creates
+projects, regenerates pairs and prints the codes — so the master is retyped for
+every action there. `/maintenance` handles none: the backup is a `VACUUM INTO`
+that changes nothing and drops a file on the server's disk, and the log is a
+ring in memory. A master retyped where it defends nothing does not add a guard,
+it teaches the hand to type it without looking — which is the habit the lot
+page was invented to prevent.
+
+
 Configuration, all through environment variables:
   WEB_PORT          the port this server listens on (default 9443). It must be
                     one the Funnel CANNOT publish and it must not collide with
@@ -42,9 +51,11 @@ from __future__ import annotations
 
 import hmac
 import html
+import logging
 import os
 import secrets
 import time
+from collections import deque
 
 # ---------------------------------------------------------------------
 # Configuration, resolved HERE and read from here by everybody.
@@ -89,6 +100,46 @@ SESSION_COOKIE = "codifier_admin"
 # is exactly the day somebody would otherwise approve eleven things in one
 # gesture — and the preflight refuses a value it cannot mean.
 DEFAULT_ACTION_CAP = 5
+
+# How many lines the maintenance page can show, and the ONLY place the number
+# lives: the page renders it from here rather than spelling it out a second
+# time.
+LOG_RING_LINES = 200
+
+
+class LogRing(logging.Handler):
+    """The last lines of the service's own log, IN MEMORY.
+
+    A ring and not a file, and it is the whole design rather than a shortcut.
+    A file would need a path, a rotation, permissions and a place in the
+    template, and it would be a second copy of something the console already
+    has; reading the container's log through docker would need the socket,
+    which is a hole a page on the LAN must not be able to reach through. A
+    `deque` with a `maxlen` cannot grow, cannot be forgotten and dies with the
+    process — which is also its honest limit, written on the page: a restart
+    empties it.
+
+    It records exactly what the logger emits and nothing more. It has no
+    source of its own, so it cannot show anything the console does not already
+    show, and LOG_LEVEL governs it for free.
+    """
+
+    def __init__(self, lines: int = LOG_RING_LINES):
+        super().__init__()
+        formatter = logging.Formatter("%(asctime)sZ %(levelname)s %(message)s",
+                                      "%Y-%m-%d %H:%M:%S")
+        # UTC, and said so on every line. The container's clock is not the
+        # reader's, and a time with no zone is the kind of detail that is only
+        # ever noticed while something is going wrong.
+        formatter.converter = time.gmtime
+        self.setFormatter(formatter)
+        self.lines: deque[str] = deque(maxlen=lines)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.lines.append(self.format(record))
+        except Exception:                                    # pragma: no cover
+            self.handleError(record)
 
 
 def port_from_env() -> int:
@@ -283,6 +334,16 @@ def build(*, registry, log, master: str, action_cap: int, refusal,
     # typing a password once.
     secret = secrets.token_bytes(32)
 
+    # The ring is hung on the logger the service handed in — not on a logger
+    # of its own, which is how a line stops appearing in the log everybody
+    # reads. An older one is taken OFF first: the service calls build() once,
+    # the probes call it many times, and two rings on one logger is every line
+    # twice with nothing to say so.
+    for _stale in [h for h in log.handlers if isinstance(h, LogRing)]:
+        log.removeHandler(_stale)
+    ring = LogRing()
+    log.addHandler(ring)
+
     def _sign(payload: str) -> str:
         return hmac.new(secret, payload.encode(), "sha256").hexdigest()
 
@@ -317,6 +378,7 @@ def build(*, registry, log, master: str, action_cap: int, refusal,
         return HTMLResponse(_login_page(), status_code=401)
 
     NAV = ("<a href='/'>projects</a><a href='/admin'>deployment</a>"
+           "<a href='/maintenance'>maintenance</a>"
            "<form class='inline' method='post' action='/logout'>"
            "<button type='submit'>sign out</button></form>")
 
@@ -596,10 +658,12 @@ def build(*, registry, log, master: str, action_cap: int, refusal,
 
     # ---------- the master operations: the deployment page ----------
     #
-    # Create, the registry index (codes included), rekey and backup — the
-    # operations that left the MCP surface in v3.0.0 so that no master-level
-    # secret would ever travel in a conversation. Same contract as the lot:
-    # a session to see the page, the master RETYPED once per action to act.
+    # Create, the registry index (codes included) and rekey — the operations
+    # that left the MCP surface in v3.0.0 so that no master-level secret would
+    # ever travel in a conversation. Same contract as the lot: a session to see
+    # the page, the master RETYPED once per action to act. The backup used to
+    # be here and is not any more: it handles no secret, so it went where the
+    # things that handle none live.
 
     def _receipt_html(name: str, code: str, key: str) -> str:
         """TWO secrets, TWO destinations, shown ONCE — and the destinations
@@ -660,13 +724,9 @@ def build(*, registry, log, master: str, action_cap: int, refusal,
                "<p><button type='submit'>Regenerate the pair</button></p></form>"
                "<p class='note'>Code AND key, always together: the old pair "
                "dies the moment you click.</p>" if rows else "")
-            + "<h2>Backup</h2>"
-              "<form method='post' action='/admin/backup'>"
-              "<label for='bmaster'>Master — once for this action</label>"
-              "<input id='bmaster' type='password' name='master' "
-              "autocomplete='current-password' required>"
-              "<p><button type='submit'>VACUUM INTO a quiescent copy</button></p>"
-              "</form>")
+            + "<p class='note'>The backup has moved to "
+              "<a href='/maintenance'>maintenance</a>: it handles no secret, so "
+              "it does not belong on the page that does.</p>")
         response = HTMLResponse(_page("Deployment", body, nav=NAV))
         _issue(response)
         return response
@@ -725,31 +785,82 @@ def build(*, registry, log, master: str, action_cap: int, refusal,
                                   _receipt_html(out["project"], out["code"],
                                                 out["architect_key"]), nav=NAV))
 
-    async def admin_backup(request):
+    # ---------- maintenance: what needs no secret ----------
+    #
+    # The page for the operations that touch NO secret — the backup, which is
+    # a reading, and the log, which is a reading of a reading. Kept apart from
+    # deployment on purpose: that page creates projects, regenerates pairs and
+    # shows the codes, so the master retyped there means something. A page
+    # where the master would defend nothing is a page where retyping it teaches
+    # the habit of typing it without looking, which is the habit the lot exists
+    # to prevent.
+
+    def _maintenance_html(*, message: str = "", good: str = "") -> str:
+        head = ((f"<p class='bad'>{_esc(message)}</p>" if message else "")
+                + (f"<p class='ok'>{_esc(good)}</p>" if good else ""))
+        # NEWEST FIRST. A log is read from a browser to answer "what just
+        # happened", and that answer is at the bottom of a file and at the top
+        # of a page. The number of lines is READ from the ring, never spelled
+        # out here: two places that agree today are two places.
+        seen = list(ring.lines)
+        tail = ("<pre>" + _esc("\n".join(reversed(seen))) + "</pre>" if seen
+                else "<p class='note'>Nothing logged since the service "
+                     "started.</p>")
+        return (head
+                + "<h2>Backup</h2>"
+                  "<form method='post' action='/maintenance/backup'>"
+                  "<p><button type='submit'>VACUUM INTO a quiescent "
+                  "copy</button></p></form>"
+                  "<p class='note'>No master, and that is a decision rather "
+                  "than an omission: this changes nothing and the copy lands "
+                  "on the server's disk, not in this browser, so a master "
+                  "retyped here would have defended against one extra file in "
+                  "a directory. The operations that do handle a secret stay on "
+                  "the <a href='/admin'>deployment</a> page.</p>"
+                + f"<h2>The log — the last {len(seen)} of "
+                  f"{_esc(ring.lines.maxlen)} lines</h2>"
+                + "<p class='note'>Newest first. In memory and nowhere else: "
+                  "the oldest line falls out when the ring is full, and a "
+                  "restart empties it. These are the service's OWN lines and "
+                  "only those — the startup line is printed before this buffer "
+                  "exists, the preflight runs in another process, and fastmcp "
+                  "keeps its records on a logger of its own. For those three "
+                  "the console is still the place. LOG_LEVEL decides what "
+                  "arrives here exactly as it decides what reaches the "
+                  "console.</p>"
+                + tail)
+
+    async def maintenance_page(request):
         if not _session_ok(request):
             return _guest(request)
-        form = await request.form()
-        # The master, RETYPED for the action, compared in constant time —
-        # inline, not delegated: the guard is pinned as written, and a
-        # session alone is a browser left open on the iPad.
-        if not secrets.compare_digest((form.get("master") or "").strip(), master):
-            log.warning("refused web backup: wrong master, from %s",
-                        _client(request))
-            return HTMLResponse(
-                _page("Deployment", "<p class='bad'>Wrong master. Nothing was "
-                                    "changed.</p>", nav=NAV), status_code=401)
+        response = HTMLResponse(_page("Maintenance", _maintenance_html(), nav=NAV))
+        _issue(response)
+        return response
+
+    async def maintenance_backup(request):
+        if not _session_ok(request):
+            return _guest(request)
+        # NO MASTER HERE, and it is written down rather than left to be
+        # noticed. `VACUUM INTO` is a READING: it changes nothing, and the file
+        # it produces lands on the server's disk. The session is the whole of
+        # what this needs. `test_surface` pins the exception BY NAME, so
+        # putting the master back is a decision somebody has to take on
+        # purpose rather than a line that drifts back in.
         try:
             out = registry.backup(backup_dir)
         except refusal as e:
             log.info("refused web backup: %s", e)
-            return HTMLResponse(_page("Deployment",
-                                      f"<p class='bad'>{_esc(e)}</p>", nav=NAV),
+            return HTMLResponse(_page("Maintenance",
+                                      _maintenance_html(message=str(e)), nav=NAV),
                                 status_code=400)
-        body = (f"<p class='ok'>Quiescent copy written: "
-                f"<code>{_esc(out['backup'])}</code> — {_esc(out['bytes'])} "
-                f"bytes. It opens without recovery, and it is the one to take "
-                f"off-site.</p><p><a href='/admin'>Back</a></p>")
-        return HTMLResponse(_page("Deployment", body, nav=NAV))
+        # Logged, and therefore visible on the page that ordered it: a copy
+        # taken off-site is the kind of thing you want to be able to date
+        # afterwards.
+        log.info("backup written: %s — %s bytes", out["backup"], out["bytes"])
+        return HTMLResponse(_page("Maintenance", _maintenance_html(
+            good=f"Quiescent copy written: {out['backup']} — {out['bytes']} "
+                 f"bytes. It opens without recovery, and it is the one to take "
+                 f"off-site."), nav=NAV))
 
     # ---------- the consultation: it reads, and only reads ----------
 
@@ -1021,7 +1132,8 @@ def build(*, registry, log, master: str, action_cap: int, refusal,
         Route("/admin", admin_page, methods=["GET"]),
         Route("/admin/create", admin_create, methods=["POST"]),
         Route("/admin/rekey", admin_rekey, methods=["POST"]),
-        Route("/admin/backup", admin_backup, methods=["POST"]),
+        Route("/maintenance", maintenance_page, methods=["GET"]),
+        Route("/maintenance/backup", maintenance_backup, methods=["POST"]),
         Route("/p/{project}/", project_home, methods=["GET"]),
         Route("/p/{project}/batch", batch_page, methods=["GET"]),
         Route("/p/{project}/batch", batch_action, methods=["POST"]),

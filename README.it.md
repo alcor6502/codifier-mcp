@@ -184,8 +184,10 @@ caso a ogni boot e non è scritto da nessuna parte.
 **La superficie MCP si è mossa nella v3.0.0 — riconnettere il connettore e
 provare in una chat nuova.** Sette tool l'hanno lasciata: approve, renew e
 promote sono passati alle pagine del lotto e dei pendenti, e le operazioni
-master — creazione, indice, rekey, backup — vivono nella UI dietro la
-master. Restano 22 tool, e la manutenzione si apre con la coppia: codice di
+master — creazione, indice, rekey — vivono nella UI dietro la master. Anche
+il backup è passato alla UI, nella sua pagina **maintenance**, e la master
+non la chiede: `VACUUM INTO` non cambia niente e la copia atterra sul disco
+del server. Restano 22 tool, e la manutenzione si apre con la coppia: codice di
 progetto più la chiave d'architetto di quel progetto, generata sulla
 ricevuta del progetto.
 
