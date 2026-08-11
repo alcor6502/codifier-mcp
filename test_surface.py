@@ -1907,6 +1907,31 @@ for _t in TOOLS:
         ok("urgent first" in _doc and "real total" in _doc,
            "tasks_list promises the order and the declared total")
 
+# THE MANUAL SHIPS WITH THE BEHAVIOUR, and here it also carries a COPY of
+# four numbers. A copy needs a check that compares it, or it is just a second
+# answer waiting to disagree with the first — a manual with the wrong ceilings
+# is worse than one with no ceilings.
+_GUIDE_CEILINGS = re.search(r"## THE CEILINGS.*?\n\n(.*?)\n\n", GUIDE_SRC, re.S)
+ok(_GUIDE_CEILINGS is not None, "the manual has a ceilings table to read")
+if _GUIDE_CEILINGS:
+    _tbl = _GUIDE_CEILINGS.group(1)
+    for _label, _value in (("items in a task list", _rules.TASKS_LIST_CAP),
+                           ("codes per `tasks_get`", _rules.TASKS_GET_IDS),
+                           ("bytes per `tasks_get`", _rules.TASKS_GET_BYTES),
+                           ("body of one task", _rules.MAX_BODY_BYTES)):
+        _line = next((l for l in _tbl.splitlines() if _label in l), "")
+        ok(str(_value) in _line,
+           f"the manual's ceiling for {_label} is {_value}", _line[:80] or "(row absent)")
+ok(str(_rules.TASKS_STALE_DAYS) in GUIDE_SRC
+   and "MARKED" in GUIDE_SRC and "do not expire" in GUIDE_SRC,
+   "the manual says tasks do not expire and gives the staleness threshold")
+
+# And it NAMES every task tool. The witness elsewhere in this file checks the
+# other direction — that a name in the prose is still a tool — which stays
+# green on a tool the manual never mentioned at all.
+_UNDOCUMENTED = sorted(t for t in _TASK_TOOLS if t not in GUIDE_SRC)
+ok(not _UNDOCUMENTED, "the manual names every task tool", _UNDOCUMENTED)
+
 print("\n== the web layer speaks to the engine, and never to the database ==")
 
 WEB = os.path.join(HERE, "web.py")

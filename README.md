@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-3.0.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-31%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-3.1.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-31%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -182,9 +182,45 @@ new conversation.** Seven tools left it: approve, renew and promote went to
 the lot and pending pages, and the master operations — create, registry
 index, rekey — live in the UI behind the master. The backup went to the UI
 too, on its **maintenance** page, and asks for no master: `VACUUM INTO`
-changes nothing and the copy lands on the server's disk. 22 tools remain,
-and maintenance opens with the pair: project code plus that project's
-architect key, generated on the project's receipt.
+changes nothing and the copy lands on the server's disk. Maintenance opens
+with the pair: project code plus that project's architect key, generated on
+the project's receipt.
+
+## The task log
+
+Rules are what BINDS a consumer. Tasks are what is WAITING for it — a
+different thing, and modelled as one: no scope, no approval, no signature,
+no expiry. The log exists so that *what is open for me?* is a single call,
+and so is *what did I do lately?*, because closing a task costs a written
+outcome. It replaces both the per-role changelog and the "pending" section
+role memories used to keep.
+
+IDs are `TK-NNNN`, never reused, cited like a rule: `(TK-0012)`. `TK` cannot
+be declared as a domain of rules — the registry refuses — because the code
+has to mean one thing.
+
+**Anybody may open a task for anybody**, which is how an audit hands each
+correction to the role that owns it. `created_by` is mandatory. **Closing
+costs a sentence**: `tasks_complete` demands an outcome, `tasks_drop` a
+reason, and both refusals are in the schema as well as at the door. **Closed
+is closed** — an open task is amended freely, its owner included, and a
+closed one not at all.
+
+**`urgent` belongs to whoever created the task** and cannot be changed by
+anyone afterwards, because the receiver is the party with an interest in
+clearing it. There are no levels; the guard against inflation is that the
+maintenance view counts urgent tasks by CREATOR.
+
+**Tasks do not expire.** One open past thirty days comes back marked, and
+that is all: an automatic expiry would be a drop with no reason, written by
+the clock. Lists are the short form and the server orders them — urgent
+first, then oldest first — so when a ceiling bites the cut falls on the
+fresh work and never on what has been waiting. Truncation is always
+declared, with the real total.
+
+**The MCP surface moved again in v3.1.0 — reconnect the connector and test
+in a new conversation.** Nine tools arrived, 31 in all; eight of them cost
+the project code alone, and only the cross-consumer view wants the key.
 
 ## Installing
 

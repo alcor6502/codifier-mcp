@@ -221,11 +221,79 @@ not tell you that, by design.
 `rules_get` takes a **list**, and asking for the batch at once is what turns a
 stumble into an audit: broken citations are worth far more seen together.
 
+## THE TASK LOG — `TK-NNNN`
+
+Rules are what BINDS you. Tasks are what is WAITING for you, and they are a
+different thing on purpose: no scope, no approval, no signature, no expiry.
+The log exists so that *what is open for me?* is one call — and, because
+closing costs a written outcome, so is *what did I do lately?*
+
+    tasks_add       open one, for yourself or for anybody else
+    tasks_list      your open ones + what you closed in the last 30 days
+    tasks_search    across every state, each hit with the fragment that matched
+    tasks_range     a stretch of days — you say WHICH date it filters on
+    tasks_get       the bodies, by code, up to ten at a time
+    tasks_complete  close it WITH ITS OUTCOME
+    tasks_drop      close it WITHOUT doing it, with the reason why
+    tasks_amend     title, body, or hand it to the right owner
+
+**IDs are `TK-NNNN`**, assigned by the counter, never reused, cited between
+round brackets like a rule: `(TK-0012)`. `TK` cannot be a domain of rules —
+the registry refuses to declare it — because `TK-0001` has to mean one thing.
+
+**Anybody may open a task for anybody.** That is how an audit hands each
+correction to the role that owns it instead of writing a report somebody has
+to redistribute by hand. `created_by` is your own consumer name and it is
+mandatory: a task nobody signed is a task nobody can be asked about.
+
+**Closing costs a sentence, and that is the whole design.** `tasks_complete`
+demands an `outcome`: the completed tasks with their outcomes ARE your
+changelog, so one closed in silence is an entry nobody can read back. Keep it
+short and queryable — the long story goes in the project's own history,
+written in the same moment by the same hand. `tasks_drop` demands a `reason`:
+deciding not to do something is a decision, and one with no reason gets taken
+again from scratch.
+
+**Closed is closed.** Not amended, not reopened, not re-closed. An OPEN task
+is amended freely, its owner included — a misdirected task is reassigned, not
+recreated, because dropping and reopening breaks the thread between the work
+and the request.
+
+**`urgent` belongs to whoever created the task** and can never be changed
+afterwards, by anyone. Urgency is born from a condition only the creator
+knows, and letting the receiver clear it would hand the lever to whoever has
+an interest in postponing. There are no levels: five of them inflate until
+they order nothing. What guards against inflation is that `tasks_overview`
+counts urgent tasks BY CREATOR — an inflated column is a skill to correct.
+
+**Tasks do not expire.** A task that ages does not become false, it stays work
+nobody did; an automatic expiry would be a drop with no reason, written by the
+clock. What happens instead is that a task open past 30 days comes back
+MARKED. Closing it is still your decision, with the reason written.
+
+**`idem_key`** is your own handle for a job you may report more than once —
+the recurring audit that finds the same discrepancy three weeks running. While
+a task with that key is open on that consumer you get THAT task back; once it
+closes the same key opens a new one, because finding it again is a new report.
+
+**Bodies may cite rules.** `(VA-0002)` comes back with that rule's current
+title when the body is read, and a pointer that resolves to nothing is marked
+in the text. Nothing is refused at the door — a task is prose about work, not
+law, so a broken pointer delays nobody.
+
+**The lists are the SHORT form** — id, title, urgent, age, status — and the
+bodies are read separately with `tasks_get`. The server orders them: urgent
+first, then oldest first. That matters when the ceiling bites, because then
+the order decides what is lost, and what has to survive is the work that has
+been waiting. A truncated list says so, with the real total.
+
 ## THE TOOLS THAT NEED NO CODE
 
 `rules_project_info` (what the project contains — also the proof the registry
 answers) · `rules_list` · `rules_get` · `rules_search` · `rules_pending` ·
-`rules_propose` · `reference_guide`, which is this page.
+`rules_propose` · `tasks_add` · `tasks_list` · `tasks_search` · `tasks_range` ·
+`tasks_get` · `tasks_complete` · `tasks_drop` · `tasks_amend` ·
+`reference_guide`, which is this page.
 
 ## THE CEILINGS, AND THE WAY PAST EACH
 
@@ -234,9 +302,17 @@ answers) · `rules_list` · `rules_get` · `rules_search` · `rules_pending` ·
 | IDs per `rules_get` | 50 | ask in batches; the answer is a dict you can merge |
 | body of one rule | 64000 bytes | it is two rules: split it |
 | numbers in one domain | 9999 | a domain that burns these needs splitting, not widening |
+| items in a task list | 50 | the answer says the real total; narrow with `tasks_range` |
+| codes per `tasks_get` | 10 | REFUSED above it, never trimmed: split the call |
+| bytes per `tasks_get` | 60000 | this one TRUNCATES, and declares it: ask for the rest by code |
+| body of one task | 64000 bytes | it is two tasks: split it |
+| task numbers | 9999 | there is no way past: IDs are never reused |
 
-A ceiling refuses before it writes anything, and says which one it was. None of
-them truncates: there is no call here that silently gives you part of an answer.
+A ceiling refuses before it writes anything, and says which one it was. **No
+call here ever gives you part of an answer without saying so.** Two of them do
+give you part of one: a task list past 50, and `tasks_get` past its byte
+ceiling — and both come back with `truncated` set and the real total next to
+it, which is the difference between a short answer and a wrong one.
 There is no bulk import: a corpus is seeded by hand, one rule at a time,
 through the same propose/approve door as any other rule.
 
@@ -393,6 +469,22 @@ too, as it always did.
   disagreement is a defect.
 - **`rules_history` / `rules_diff`** — how one rule changed, and why. Whole
   versions are kept, so the comparison is computed between any two.
+- **`tasks_overview`** — the task log across every consumer at once: open,
+  closed, dropped, urgent and stale per consumer, the oldest still waiting,
+  and the urgent tasks counted BY CREATOR. That last count is the whole guard
+  against urgency inflation, and it is why the view is cross-consumer and
+  wants the key: a working chat has no business reading everybody's queue,
+  and a maintainer who cannot see the columns side by side cannot tell a busy
+  role from a skill that marks everything urgent. It also declares the
+  ceilings in force, so the day one of them is exported to the template there
+  is one place that says which value commands.
+- **Pruning the log** — closed tasks only, by date, and it will refuse
+  anything still open. Deleting open work by seniority is the hard expiry this
+  design threw out, wearing the clothes of housekeeping: a task that has gone
+  stale gets closed by a person, with a reason. The counter is never rewound —
+  a number that came back would make an old citation point at somebody else's
+  work. It lives in the engine and will surface in the UI when there is
+  something to prune.
 - **`rules_export`** — the Markdown snapshot, reasons included. A DERIVATIVE:
   editing it changes nothing, the truth is the database, and it regenerates.
   With a consumer it is that perimeter, widest first; without, the whole

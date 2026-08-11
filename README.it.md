@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/versione-3.0.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-31%20tool-8A63D2.svg">
+<img src="https://img.shields.io/badge/versione-3.1.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-31%20tool-8A63D2.svg">
 
 **Le regole di un progetto in un registro invece che sparse nei Markdown — così
 una chat può rispondere in una chiamata a «sotto quali regole sto?».**
@@ -187,9 +187,45 @@ promote sono passati alle pagine del lotto e dei pendenti, e le operazioni
 master — creazione, indice, rekey — vivono nella UI dietro la master. Anche
 il backup è passato alla UI, nella sua pagina **maintenance**, e la master
 non la chiede: `VACUUM INTO` non cambia niente e la copia atterra sul disco
-del server. Restano 22 tool, e la manutenzione si apre con la coppia: codice di
-progetto più la chiave d'architetto di quel progetto, generata sulla
-ricevuta del progetto.
+del server. La manutenzione si apre con la coppia: codice di progetto più la
+chiave d'architetto di quel progetto, generata sulla ricevuta del progetto.
+
+## Il task log
+
+Le regole sono ciò che ti VINCOLA. I task sono ciò che ti ASPETTA — una cosa
+diversa, e modellata come tale: niente scope, niente approvazione, niente
+firma, niente scadenza. Il log esiste perché *cosa è aperto per me?* sia una
+sola chiamata, e con l'esito obbligatorio alla chiusura lo diventa anche
+*cosa ho fatto di recente?*. Sostituisce sia il changelog per ruolo sia le
+sezioni «pending» che le memorie di ruolo si tenevano.
+
+Gli ID sono `TK-NNNN`, mai riusati, citati come una regola: `(TK-0012)`. `TK`
+non può essere dichiarato come dominio di regole — il registro rifiuta —
+perché il codice deve significare una cosa sola.
+
+**Chiunque può aprire un task per chiunque**, ed è così che un audit assegna
+ogni correzione al ruolo competente. `created_by` è obbligatorio.
+**Chiudere costa una frase**: `tasks_complete` esige l'esito, `tasks_drop` la
+ragione, e i due rifiuti stanno nello schema oltre che alla porta. **Chiuso è
+chiuso** — un task aperto si emenda liberamente, proprietario compreso, uno
+chiuso per niente.
+
+**`urgent` è di chi crea il task** e nessuno lo cambia dopo, perché chi lo
+riceve è la parte che ha interesse a toglierlo. Non ci sono livelli; la
+guardia contro l'inflazione è che la vista di manutenzione conta gli urgenti
+per CREATORE.
+
+**I task non scadono.** Uno aperto da più di trenta giorni esce marcato, e
+basta: una scadenza automatica sarebbe un drop senza ragione, scritto
+dall'orologio. Le liste sono in forma breve e le ordina il server — urgenti
+in testa, poi i più vecchi — così quando il tetto taglia il taglio colpisce
+il lavoro fresco e mai quello che aspetta. Il troncamento si dichiara sempre,
+col totale reale.
+
+**La superficie MCP si è mossa di nuovo nella v3.1.0 — riconnettere il
+connettore e provare in una chat nuova.** Sono arrivati nove tool, 31 in
+tutto; otto costano il solo codice di progetto, e solo la vista trasversale
+vuole la chiave.
 
 ## Installazione
 
