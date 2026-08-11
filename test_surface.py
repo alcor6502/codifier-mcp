@@ -1255,6 +1255,65 @@ _WF = source(os.path.join(HERE, ".github", "workflows", "build.yml"))
 ok("pip install --no-deps -r requirements.txt" in _WF,
    "build.yml installs the engine for the suites, --no-deps, from the one pin")
 
+print("\n== a malformed call does not print what it carried ==")
+
+# fastmcp logs invalid arguments ITSELF, at WARNING, with the arguments in the
+# line — the record is born on `fastmcp.server.server`, before any tool of ours
+# runs, and its handler has `propagate=False`, so it obeys nobody's LOG_LEVEL
+# and leaves no `refused` line. For the server, nothing happened. For this
+# service the payload is not a document body: it is the PROJECT CODE and the
+# ADMIN CODE, which travel as arguments on every maintenance call. One
+# forgotten parameter and the credentials are in the container's log.
+#
+# The cure lives in the engine, from v1.1.0, and is one call. It is pinned here
+# because every way of getting it wrong is silent: not calling it, calling it
+# before the server object exists (fastmcp has not configured its logging yet,
+# so there is no handler to filter and the payload keeps printing), or
+# swallowing the RuntimeError that says exactly that.
+sole_import("arm_argument_redaction", "mcp_common_engine.logs")
+
+_ARMS = [n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
+         and ast.unparse(n.func) == "arm_argument_redaction"]
+ok(len(_ARMS) == 1, "server.py arms the argument redaction, exactly once",
+   len(_ARMS))
+
+# AFTER the server object. Creating it is what makes fastmcp configure its
+# logging, so the order is not style: armed first, the call finds no handler
+# and — by the engine's design — raises rather than reporting a comforting
+# zero. Compared by LINE, because that is what "after" means here.
+_MCP_ASSIGN = [n for n in SERVER_TREE.body if isinstance(n, ast.Assign)
+               and any(getattr(t, "id", "") == "mcp" for t in n.targets)]
+ok(len(_MCP_ASSIGN) == 1, "the server object is built exactly once",
+   len(_MCP_ASSIGN))
+if _ARMS and _MCP_ASSIGN:
+    ok(_ARMS[0].lineno > _MCP_ASSIGN[0].lineno,
+       "and the arming comes AFTER it — before, fastmcp has not configured its "
+       "logging and there is nothing to filter",
+       f"arm at line {_ARMS[0].lineno}, server at line {_MCP_ASSIGN[0].lineno}")
+
+# At MODULE level, and not inside anything. Under `if __name__ == "__main__"`
+# it would protect the service and leave every other importer — the preflight
+# does not import server.py, but a probe or a future second entry point would —
+# printing the payload.
+_ARM_STMTS = [n for n in SERVER_TREE.body if isinstance(n, ast.Expr)
+              and isinstance(n.value, ast.Call)
+              and ast.unparse(n.value.func) == "arm_argument_redaction"]
+ok(len(_ARM_STMTS) == 1,
+   "the arming is a module-level statement, not tucked inside a branch",
+   len(_ARM_STMTS))
+
+# And its refusal is NOT swallowed. `try: arm...() except Exception: pass` is
+# one line, reads like prudence, and turns the whole cure into a decoration:
+# the boot survives and the payload keeps printing.
+_SWALLOWED = [ast.unparse(t)[:60] for t in ast.walk(SERVER_TREE)
+              if isinstance(t, ast.Try)
+              and any(isinstance(n, ast.Call)
+                      and ast.unparse(n.func) == "arm_argument_redaction"
+                      for n in ast.walk(t))]
+ok(not _SWALLOWED,
+   "and it is not wrapped in a try: the raise is what stops a boot that would "
+   "protect nothing", _SWALLOWED)
+
 print("\n== the template is publishable ==")
 
 import web as _webmod                                           # noqa: E402

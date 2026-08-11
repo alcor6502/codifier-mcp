@@ -55,6 +55,9 @@ Configuration, all through environment variables:
                           never leaves the browser
   WEB_ACTION_CAP          how many proposals the UI may approve in one action
                           (default 5)
+
+Nothing here switches the argument redaction on or off, and that is deliberate:
+a knob for it would be a knob for printing credentials into the log.
 """
 from __future__ import annotations
 
@@ -77,6 +80,7 @@ from fastmcp.server.auth.providers.github import GitHubProvider
 from mcp_common_engine import (VERSION as ENGINE_VERSION, cidrs_from_env,
                                describe_cidrs, log_level_from_env)
 from mcp_common_engine.gate import Gate
+from mcp_common_engine.logs import arm_argument_redaction
 from mcp_common_engine.refusals import make_tool
 import web
 from rules import Registry, RulesError, RulesFault, VERSION
@@ -164,6 +168,31 @@ auth = GitHubProvider(
 )
 
 mcp = FastMCP("codifier-mcp", auth=auth)
+
+# A malformed call must not print what it carried, and this line is the whole
+# cure. fastmcp validates arguments BEFORE any tool of ours runs, and logs what
+# it rejected at WARNING with the arguments in the line — a record born on
+# `fastmcp.server.server`, printed by fastmcp's own handler with
+# `propagate=False`. It obeys neither our LOG_LEVEL nor our decorator, and it
+# leaves no `refused` line: for this service, nothing happened. A clean run of
+# `refused` lines is therefore no evidence that no call went malformed.
+#
+# What the payload holds here is not a document body, which is what it is on
+# the twin: it is the PROJECT CODE and the ADMIN CODE, which travel as
+# arguments on every maintenance call. One forgotten parameter and both are in
+# the container's log. Measured on this shape, with fastmcp 3.4.5: before,
+# `{'project': 'a3f9…', 'cod': 'TOPSECRET-ADMIN-CODE-24'}` printed twice in one
+# line; after, `'<redacted>'` — both times, the bare string as well as the
+# dictionary. The diagnosis survives whole: the tool, the parameter, the rule
+# that was broken.
+#
+# AFTER the server object, and that is not style: building it is what makes
+# fastmcp configure its logging, so armed any earlier there is no handler to
+# filter. In that case the engine RAISES instead of reporting a comforting
+# zero — a filter on a logger never runs for the records of its children, only
+# a handler's does — and the raise is left to stop the boot, because a service
+# that starts having protected nothing is worse than one that does not start.
+arm_argument_redaction()
 
 
 # The refusal-to-ToolError conversion and its one log line live in the

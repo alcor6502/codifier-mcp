@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/versione-2.1.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-29%20tool-8A63D2.svg">
+<img src="https://img.shields.io/badge/versione-2.1.1-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-29%20tool-8A63D2.svg">
 
 **Le regole di un progetto in un registro invece che sparse nei Markdown — così
 una chat può rispondere in una chiamata a «sotto quali regole sto?».**
@@ -225,6 +225,13 @@ avvisa è un servizio di cui nessuno legge gli avvisi.
   oltre la riga vogliono il codice a ogni chiamata. Il manuale del legislatore
   della v1.4 è stato riassorbito: la sua porta proteggeva un'igiene senza
   lettori — il manuale lo leggono tre chat, e le skill non lo leggono affatto.
+- **Una chiamata malformata non stampa quello che portava.** FastMCP valida gli
+  argomenti prima che parta qualunque tool e logga quello che ha rifiutato, con
+  gli argomenti dentro la riga — un record che non obbedisce a nessun LOG_LEVEL
+  nostro e non lascia nessuna riga `refused`, quindi un log pulito non prova che
+  non sia successo. Qui quegli argomenti sono il codice di progetto e il codice
+  di manutenzione. Dalla v2.1.1 il carico è redatto e la diagnosi no: restano il
+  tool, il parametro e la regola violata.
 - **Il processo gira come root e il database è 644.** È l'opposto del gemello
   vault, di proposito: dalla share si legge e non si tocca, perché una scrittura
   a mano aggirerebbe i trigger e romperebbe lo storico in silenzio.

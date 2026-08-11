@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-2.1.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-29%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-2.1.1-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-29%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -221,6 +221,13 @@ and warns is a service whose warnings nobody reads.
   call. The separate legislator's manual of v1.4 was folded in: its door
   protected an hygiene that had no readers, since the manual is read by three
   chats and the skills do not read it at all.
+- **A malformed call does not print what it carried.** FastMCP validates
+  arguments before any tool runs and logs what it rejected, with the arguments
+  in the line — a record that obeys no LOG_LEVEL of ours and leaves no
+  `refused` line, so a clean log is no evidence it did not happen. Here those
+  arguments are the project code and the maintenance code. From v2.1.1 the
+  payload is redacted and the diagnosis is not: the tool, the parameter and the
+  rule that was broken all survive.
 - **The process runs as root and the database is 0644.** This is the opposite of
   the vault twin, deliberately: from the share you read and you do not touch,
   because a write by hand would bypass the triggers and break history in
