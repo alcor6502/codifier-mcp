@@ -1380,6 +1380,12 @@ _MASTER_FIELD = re.search(r'<Config[^>]*Target="WEB_MASTER_CODE"[^>]*>', TEMPLAT
 ok(_MASTER_FIELD is not None, "the master is a field of the template")
 if _MASTER_FIELD:
     _f = _MASTER_FIELD.group(0)
+    # The NAME a person reads in Unraid, and it is the sibling's: "Admin Access
+    # Code" and "Web UI Master Code" sit next to each other in the form, and
+    # the pairing is half of what says they are two secrets of the same kind
+    # and not one secret with two homes.
+    ok('Name="Web UI Master Code"' in _f,
+       "and it is named as the Admin Access Code's sibling", _f[:60])
     ok('Mask="true"' in _f, "and it is masked, like the maintenance code", _f[:80])
     ok('Required="true"' in _f,
        "and required: a master with a working default is the open door", _f[:80])
