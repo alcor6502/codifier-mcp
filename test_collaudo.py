@@ -2342,6 +2342,212 @@ def the_export_carries_the_legend_too():
 case("the export leads with the legend of the domains present",
      the_export_carries_the_legend_too)
 
+# =====================================================================
+head("the task log: what the DATABASE guarantees, not the door")
+# =====================================================================
+# These write with raw SQL on purpose. Every guarantee below is also refused
+# by the engine with a talking message — that is tested where the methods
+# are — but a guarantee that only lives in Python holds for the callers that
+# go through Python, and this database is readable from the share with
+# sqlite3. What is proved here is the half that survives a hand.
+
+_TK_OUT = R.create_project("Task bench", [("Architect", "chat"), ("Advisory", "chat")],
+                           {"VA": "vault"})
+TK, TK_KEY = _TK_OUT["code"], _TK_OUT["architect_key"]
+_TK_NAME = "Task bench"
+_TK_ARCH = R.cx.execute("SELECT id FROM consumers WHERE project=? AND lower(name)='architect'",
+                        (_TK_NAME,)).fetchone()[0]
+
+
+def _raw_task(tid: str, seq: int, **over):
+    row = dict(project=_TK_NAME, id=tid, seq=seq, title="t", body="b",
+               consumer_id=_TK_ARCH, created_by="Architect", urgent=0,
+               status="pending", outcome=None, reason=None, actor=None,
+               idem_key=None, created_at=_now_ish(), updated_at=_now_ish(),
+               closed_at=None)
+    row.update(over)
+    R.cx.execute(
+        "INSERT INTO tasks (project,id,seq,title,body,consumer_id,created_by,urgent,"
+        "status,outcome,reason,actor,idem_key,created_at,updated_at,closed_at) "
+        "VALUES (:project,:id,:seq,:title,:body,:consumer_id,:created_by,:urgent,"
+        ":status,:outcome,:reason,:actor,:idem_key,:created_at,:updated_at,:closed_at)",
+        row)
+
+
+def _now_ish() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def TK_is_a_reserved_domain():
+    """`TK` is the task log's prefix. A rule numbered TK-0001 would be
+    indistinguishable from a task, so the pair cannot be declared — and the
+    refusal holds at BOTH doors, declaration and use."""
+    try:
+        R.add_domains(TK, {"TK": "tasks"})
+        assert False, "add_domains accepted the reserved pair"
+    except RulesError as e:
+        assert "RESERVED" in str(e), e
+    try:
+        R.create_project("Reserved bench", [("a", "chat")], {"TK": ""})
+        assert False, "create_project accepted the reserved pair"
+    except RulesError as e:
+        assert "RESERVED" in str(e), e
+    # And at use, which is the door a hand-written row would come through.
+    R.cx.execute("INSERT INTO project_domains (project, domain) VALUES (?, 'TK')",
+                 (_TK_NAME,))
+    try:
+        R.propose(TK, "TK", "R", "smuggled", "Body.", ["*"], "why", "Architect")
+        assert False, "propose minted a rule in the reserved domain"
+    except RulesError as e:
+        assert "RESERVED" in str(e), e
+    finally:
+        R.cx.execute("DELETE FROM project_domains WHERE project=? AND domain='TK'",
+                     (_TK_NAME,))
+
+
+case("TK cannot be declared as a domain, and cannot be used as one either",
+     TK_is_a_reserved_domain)
+
+
+def completing_without_an_outcome_is_refused_by_the_schema():
+    _raw_task("TK-9001", 9001)
+    try:
+        R.cx.execute("UPDATE tasks SET status='completed', closed_at=? "
+                     "WHERE project=? AND id='TK-9001'", (_now_ish(), _TK_NAME))
+        assert False, "the schema let a completed task through with no outcome"
+    except sqlite3.IntegrityError as e:
+        assert "CHECK" in str(e).upper(), e
+    # An outcome of pure whitespace is not an outcome either.
+    try:
+        R.cx.execute("UPDATE tasks SET status='completed', outcome='   ', closed_at=? "
+                     "WHERE project=? AND id='TK-9001'", (_now_ish(), _TK_NAME))
+        assert False, "whitespace passed for an outcome"
+    except sqlite3.IntegrityError:
+        pass
+
+
+case("completed without an outcome: refused by the CHECK, not by the door",
+     completing_without_an_outcome_is_refused_by_the_schema)
+
+
+def dropping_without_a_reason_is_refused_by_the_schema():
+    _raw_task("TK-9002", 9002)
+    try:
+        R.cx.execute("UPDATE tasks SET status='dropped', closed_at=? "
+                     "WHERE project=? AND id='TK-9002'", (_now_ish(), _TK_NAME))
+        assert False, "the schema let a dropped task through with no reason"
+    except sqlite3.IntegrityError as e:
+        assert "CHECK" in str(e).upper(), e
+
+
+case("dropped without a reason: refused by the CHECK — closing without doing "
+     "is a decision", dropping_without_a_reason_is_refused_by_the_schema)
+
+
+def a_closed_task_is_closed():
+    _raw_task("TK-9003", 9003, status="completed", outcome="done",
+              closed_at=_now_ish())
+    for sql in ("UPDATE tasks SET title='rewritten' WHERE project=? AND id='TK-9003'",
+                "UPDATE tasks SET status='pending', outcome=NULL, closed_at=NULL "
+                "WHERE project=? AND id='TK-9003'",
+                "UPDATE tasks SET outcome='a different story' "
+                "WHERE project=? AND id='TK-9003'"):
+        try:
+            R.cx.execute(sql, (_TK_NAME,))
+            assert False, f"a closed task took: {sql[:40]}"
+        except sqlite3.IntegrityError as e:
+            assert "closed task" in str(e), e
+
+
+case("closed is closed: not amended, not reopened, and the outcome does not "
+     "get a second version", a_closed_task_is_closed)
+
+
+def urgency_belongs_to_whoever_created_it():
+    """The receiver cannot clear the flag. It is the one field where the
+    interest of the person who could change it points the wrong way."""
+    _raw_task("TK-9004", 9004, urgent=1)
+    for col, val in (("urgent", 0), ("created_by", "'Advisory'"),
+                     ("id", "'TK-9999'"), ("seq", 1)):
+        try:
+            R.cx.execute(f"UPDATE tasks SET {col}={val} WHERE project=? AND id='TK-9004'",
+                         (_TK_NAME,))
+            assert False, f"{col} moved on an open task"
+        except sqlite3.IntegrityError as e:
+            assert "frozen field" in str(e), (col, e)
+
+
+case("urgent, the ID, the number and the author are written once",
+     urgency_belongs_to_whoever_created_it)
+
+
+def the_history_is_written_by_the_triggers():
+    _raw_task("TK-9005", 9005)
+    v = R.cx.execute("SELECT version, status, consumer, action FROM task_versions "
+                     "WHERE project=? AND task_id='TK-9005' ORDER BY version",
+                     (_TK_NAME,)).fetchall()
+    assert [tuple(x) for x in v] == [(1, "pending", "Architect", "created")], v
+    R.cx.execute("UPDATE tasks SET title='fixed', actor='Advisory', updated_at=? "
+                 "WHERE project=? AND id='TK-9005'", (_now_ish(), _TK_NAME))
+    R.cx.execute("UPDATE tasks SET status='dropped', reason='not needed', "
+                 "actor='Architect', closed_at=?, updated_at=? "
+                 "WHERE project=? AND id='TK-9005'",
+                 (_now_ish(), _now_ish(), _TK_NAME))
+    v = [(x["version"], x["action"], x["actor"]) for x in R.cx.execute(
+        "SELECT version, action, actor FROM task_versions WHERE project=? "
+        "AND task_id='TK-9005' ORDER BY version", (_TK_NAME,))]
+    assert v == [(1, "created", "Architect"), (2, "amended", "Advisory"),
+                 (3, "dropped", "Architect")], v
+    # The owner is photographed RESOLVED: a version read in a year says who
+    # owned the task then, not who owns the row now.
+    assert all(x[0] == "Architect" for x in R.cx.execute(
+        "SELECT consumer FROM task_versions WHERE project=? AND task_id='TK-9005'",
+        (_TK_NAME,))), "the version did not photograph the owner"
+
+
+case("the task log keeps whole versions, written by the triggers",
+     the_history_is_written_by_the_triggers)
+
+
+def a_hand_deletion_leaves_its_trace():
+    _raw_task("TK-9006", 9006)
+    R.cx.execute("DELETE FROM tasks WHERE project=? AND id='TK-9006'", (_TK_NAME,))
+    last = R.cx.execute("SELECT action, actor FROM task_versions WHERE project=? "
+                        "AND task_id='TK-9006' ORDER BY version DESC LIMIT 1",
+                        (_TK_NAME,)).fetchone()
+    assert last["action"] == "DELETED", dict(last)
+    assert "outside the tools" in last["actor"], dict(last)
+
+
+case("a DELETE by hand is recorded, same safety net as the rules",
+     a_hand_deletion_leaves_its_trace)
+
+
+def the_idempotency_handle_is_an_index():
+    """Partial on `pending`: the same key while the task is open collides, and
+    after it closes it opens a new one. That is the semantics, and it lives in
+    the index rather than in a lookup."""
+    _raw_task("TK-9007", 9007, idem_key="audit-2026-08")
+    try:
+        _raw_task("TK-9008", 9008, idem_key="audit-2026-08")
+        assert False, "two pending tasks took the same key"
+    except sqlite3.IntegrityError as e:
+        assert "ux_tasks_idem" in str(e) or "UNIQUE" in str(e).upper(), e
+    R.cx.execute("UPDATE tasks SET status='completed', outcome='done', closed_at=?, "
+                 "updated_at=? WHERE project=? AND id='TK-9007'",
+                 (_now_ish(), _now_ish(), _TK_NAME))
+    _raw_task("TK-9008", 9008, idem_key="audit-2026-08")   # now it is free
+    # And the key is per OWNER: the same handle for another consumer is
+    # another task, because two roles finding the same thing is two jobs.
+    _adv = R.cx.execute("SELECT id FROM consumers WHERE project=? AND lower(name)='advisory'",
+                        (_TK_NAME,)).fetchone()[0]
+    _raw_task("TK-9009", 9009, idem_key="audit-2026-08", consumer_id=_adv)
+
+
+case("the idempotency key is a partial unique index, per owner and per open task",
+     the_idempotency_handle_is_an_index)
+
 print(f"\n{OK} passed, {FAIL} failed")
 if FAILURES:
     print("failed: " + "; ".join(FAILURES))

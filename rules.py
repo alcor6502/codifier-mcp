@@ -147,6 +147,48 @@ DEFAULT_PENDING_CAP = 5
 MAX_BODY_BYTES = 64_000
 MAX_GET_IDS = 50
 
+# ---------------------------------------------------------------------
+# The task log
+# ---------------------------------------------------------------------
+# `TK` is the task log's own prefix, and it is RESERVED: a project that
+# declared it as a domain of rules would mint rule IDs indistinguishable from
+# task IDs, and a citation would stop meaning one thing. Refused where a
+# domain is DECLARED, and again where one is used — the second is not
+# belt-and-braces for its own sake: a row put there by hand with sqlite3 never
+# passed the first door, and the guarantee has to hold whichever door the
+# write came through.
+TASK_PREFIX = "TK"
+RESERVED_DOMAINS = (TASK_PREFIX,)
+
+# The ceilings of the task log, NAMED, because the spec asks for names and
+# because a literal repeated in four queries is a number written four times.
+#
+# TASKS_LIST_CAP is the ceiling of every LIST (list, search, range). Fifty is
+# generous on purpose: the point of the cap is that a runaway answer cannot
+# eat a chat's context, not that it disciplines anybody.
+TASKS_LIST_CAP = 50
+# TASKS_GET_IDS is the batch of bodies. Ten, and the arithmetic behind it is
+# the one the spec asked to be done in delivery rather than estimated: a body
+# is capped at MAX_BODY_BYTES, so ten of them is 640,000 characters — far over
+# any client's result ceiling. The count alone therefore does NOT bound the
+# answer, and the real limit is the byte one below.
+TASKS_GET_IDS = 10
+# The byte ceiling of that same batch, and the number that actually bounds it.
+# 60,000 leaves a single full-size body whole — the case where truncating
+# would be useless, since there is nothing smaller to fall back to — and stops
+# the batch at the first body that would cross it, declaring the truncation.
+TASKS_GET_BYTES = 60_000
+# How far back a closed task keeps showing up in `tasks_list`. Past it the
+# task is not gone, it is asked for by date with tasks_range.
+TASKS_RECENT_DAYS = 30
+# When a task still open starts coming back MARKED. It is a label on a
+# reading, never a lifecycle: a task does not expire, because an automatic
+# expiry would be a `dropped` with no reason, written by the clock. Thirty
+# days chosen with Alfredo on 2026-08-11: a month open is stopped for real,
+# and on most rounds nobody carries the mark — which is what makes it worth
+# seeing when somebody does.
+TASKS_STALE_DAYS = 30
+
 # Identical answer for a missing code and a wrong one: a message that told them
 # apart would be an oracle.
 ERR_PROJECT = ("project not specified: this needs the project CODE, the one at the top "
@@ -277,6 +319,21 @@ def _fold(name: str) -> str:
     return (name or "").strip().lower()
 
 
+def _valid_domain(d: str) -> str:
+    """The ONE door a domain letter-pair goes through, wherever it is declared.
+    It used to be a regex written twice — once in create_project, once in
+    add_domains — and a reservation added to one copy is a reservation that
+    holds on one door."""
+    d = (d or "").strip()
+    if not re.match(r"^[A-Z]{2}$", d):
+        raise RulesError(f"domain {d!r}: exactly two uppercase letters")
+    if d in RESERVED_DOMAINS:
+        raise RulesError(
+            f"domain {d!r} is RESERVED: it is the prefix of the task log, and a rule "
+            f"numbered {d}-0001 could not be told apart from a task. Pick another pair.")
+    return d
+
+
 def _norm_scope_list(scopes) -> list[str]:
     if isinstance(scopes, str):
         scopes = [scopes]
@@ -326,6 +383,16 @@ _NEXT_VERSION = """(SELECT IFNULL(MAX(version), 0) + 1 FROM rule_versions
 
 _VCOLS = ("project, rule_id, version, type, title, body, status, permanence, "
           "expires_at, superseded_by, changelog, scopes, consumers, ts, action, reason")
+
+# The task log's own two fragments. The owner is photographed RESOLVED — the
+# consumer's spelling of that day, not its surrogate id — for the same reason
+# a rule's version stores the consumers it reached: a version read in a year
+# must say who owned the task then, not who owns the row now.
+_TASK_OWNER = """(SELECT c.name FROM consumers c WHERE c.id = {R}.consumer_id)"""
+_NEXT_TVERSION = """(SELECT IFNULL(MAX(version), 0) + 1 FROM task_versions
+    WHERE project = {R}.project AND task_id = {R}.id)"""
+_TVCOLS = ("project, task_id, version, title, body, consumer, created_by, urgent, "
+           "status, outcome, reason, ts, action, actor")
 
 
 def _f(sql: str, row: str) -> str:
@@ -629,22 +696,159 @@ WHEN NEW.name <> OLD.name
 BEGIN
   SELECT RAISE(ABORT, 'a consumer is not renamed: create the new one and retire the old');
 END;
+
+-- =====================================================================
+-- The task log
+-- =====================================================================
+-- Work, not law. A task has no scope, no approval, no signature and no
+-- expiry: what binds a consumer is a rule, what is waiting for it is a task,
+-- and the two must not be able to be mistaken for one another. What it DOES
+-- share with a rule is the doctrine that survived every revision here — no
+-- DELETE, an ID never reused, whole versions written by triggers, and a
+-- closing that costs a written why.
+--
+-- The owner is the surrogate `consumer_id` and not a name, which is what
+-- makes reassignment (`tasks_amend`) a one-column write instead of a string
+-- that has to agree with itself across a join.
+CREATE TABLE IF NOT EXISTS tasks (
+  project     TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+  id          TEXT NOT NULL,             -- TK-NNNN, assigned by the counter
+  seq         INTEGER NOT NULL,
+  title       TEXT NOT NULL,
+  body        TEXT NOT NULL,
+  consumer_id INTEGER NOT NULL REFERENCES consumers(id),   -- the OWNER
+  created_by  TEXT NOT NULL,             -- and it is never blank: see propose
+  urgent      INTEGER NOT NULL DEFAULT 0 CHECK (urgent IN (0,1)),
+  status      TEXT NOT NULL DEFAULT 'pending'
+              CHECK (status IN ('pending','completed','dropped')),
+  outcome     TEXT,                      -- completed: what came of it
+  reason      TEXT,                      -- dropped: why it will not be done
+  actor       TEXT,                      -- who wrote last: amended or closed
+  idem_key    TEXT,                      -- the caller's own idempotency handle
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  closed_at   TEXT,
+  PRIMARY KEY (project, id),
+  UNIQUE (project, seq),
+  -- The three states and what each one COSTS, in the SCHEMA and not only at
+  -- the door. `completed` with no outcome is the changelog quietly losing an
+  -- entry; `dropped` with no reason is a decision nobody recorded. Both are
+  -- refused with a talking message by the engine — this is what holds when
+  -- somebody writes with sqlite3 by hand.
+  CHECK ((status = 'pending'
+            AND outcome IS NULL AND reason IS NULL AND closed_at IS NULL)
+      OR (status = 'completed'
+            AND TRIM(IFNULL(outcome, '')) <> '' AND closed_at IS NOT NULL)
+      OR (status = 'dropped'
+            AND TRIM(IFNULL(reason, ''))  <> '' AND closed_at IS NOT NULL))
+);
+
+-- The idempotency handle, and it is an INDEX rather than a lookup in Python
+-- for the reason ux_rules_supersedes is one: a check that lives in the code
+-- holds for the callers that go through the code. PARTIAL on `pending`, which
+-- is the whole semantics the spec asked for — the same key after the task is
+-- closed opens a NEW task, because the recurring audit that finds the same
+-- discrepancy again is reporting it again, not repeating itself.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_tasks_idem
+    ON tasks(project, consumer_id, idem_key)
+ WHERE idem_key IS NOT NULL AND status = 'pending';
+
+CREATE INDEX IF NOT EXISTS ix_tasks_owner  ON tasks(project, consumer_id, status);
+CREATE INDEX IF NOT EXISTS ix_tasks_closed ON tasks(project, closed_at);
+
+CREATE TABLE IF NOT EXISTS task_versions (
+  project    TEXT NOT NULL,
+  task_id    TEXT NOT NULL,
+  version    INTEGER NOT NULL,
+  title      TEXT,
+  body       TEXT,
+  consumer   TEXT,                       -- the owner of that day, resolved
+  created_by TEXT,
+  urgent     INTEGER,
+  status     TEXT,
+  outcome    TEXT,
+  reason     TEXT,
+  ts         TEXT NOT NULL,
+  action     TEXT NOT NULL,
+  actor      TEXT,
+  PRIMARY KEY (project, task_id, version)
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_tasks_ins AFTER INSERT ON tasks BEGIN
+  INSERT INTO task_versions ({_TVCOLS})
+  VALUES (NEW.project, NEW.id, {_f(_NEXT_TVERSION, 'NEW')},
+          NEW.title, NEW.body, {_f(_TASK_OWNER, 'NEW')}, NEW.created_by, NEW.urgent,
+          NEW.status, NEW.outcome, NEW.reason,
+          NEW.created_at, 'created', NEW.created_by);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_tasks_upd AFTER UPDATE ON tasks BEGIN
+  INSERT INTO task_versions ({_TVCOLS})
+  VALUES (NEW.project, NEW.id, {_f(_NEXT_TVERSION, 'NEW')},
+          NEW.title, NEW.body, {_f(_TASK_OWNER, 'NEW')}, NEW.created_by, NEW.urgent,
+          NEW.status, NEW.outcome, NEW.reason,
+          NEW.updated_at,
+          CASE NEW.status WHEN 'pending' THEN 'amended' ELSE NEW.status END,
+          NEW.actor);
+END;
+
+-- Safety net, same doctrine as the rules: if somebody deletes by hand, the
+-- trace stays.
+CREATE TRIGGER IF NOT EXISTS trg_tasks_del AFTER DELETE ON tasks BEGIN
+  INSERT INTO task_versions ({_TVCOLS})
+  VALUES (OLD.project, OLD.id, {_f(_NEXT_TVERSION, 'OLD')},
+          OLD.title, OLD.body, NULL, OLD.created_by, OLD.urgent,
+          OLD.status, OLD.outcome, OLD.reason,
+          strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'DELETED',
+          'DELETE outside the tools');
+END;
+
+-- CLOSED IS CLOSED. A completed or dropped task is not amended, not
+-- re-closed, not reopened: the outcome and the reason are the two sentences
+-- the whole log is read for, and a log whose past sentences can change is a
+-- log nobody can quote. The only way on is a new task.
+CREATE TRIGGER IF NOT EXISTS trg_tasks_closed_is_closed
+BEFORE UPDATE ON tasks
+WHEN OLD.status <> 'pending'
+BEGIN
+  SELECT RAISE(ABORT, 'closed task: a completed or dropped task is not amended and not reopened — open a new one');
+END;
+
+-- What never changes while it is open. `urgent` is in here because of who
+-- sets it: the CREATOR knows the condition that made the work urgent, and
+-- letting the receiver clear the flag would put the lever in the hand of
+-- whoever has an interest in postponing. The identity columns are in here for
+-- the ordinary reason — a task whose ID or author could drift is a task that
+-- cannot be cited.
+CREATE TRIGGER IF NOT EXISTS trg_tasks_frozen
+BEFORE UPDATE ON tasks
+WHEN NEW.id <> OLD.id OR NEW.seq <> OLD.seq OR NEW.urgent <> OLD.urgent
+  OR NEW.created_by <> OLD.created_by OR NEW.created_at <> OLD.created_at
+BEGIN
+  SELECT RAISE(ABORT, 'frozen field: the ID, the number, the author, the date and the urgent flag are written once — urgency is the creator''s and is not cleared by whoever receives it');
+END;
 """
 
 TABLES = ("projects", "project_domains", "consumers", "consumer_versions",
           "scopes", "scope_members",
-          "rules", "rule_scopes", "rule_refs", "rule_versions", "approvals")
+          "rules", "rule_scopes", "rule_refs", "rule_versions", "approvals",
+          "tasks", "task_versions")
 # Indexes the preflight has to see: only the ones that carry a GUARANTEE, never
 # the ones that carry speed. ux_rules_supersedes is what stops two pending
 # proposals claiming the same victim; the two fold indexes are what makes
 # `Architect` and `architect` one identity while the spelling stays the
 # author's. A constraint nobody checks is a constraint that is not there.
-INDEXES = ("ux_rules_supersedes", "ux_consumers_fold", "ux_scopes_fold")
+# ux_tasks_idem is what makes a repeated
+# `idem_key` hand back the task that is already open instead of a second one.
+INDEXES = ("ux_rules_supersedes", "ux_consumers_fold", "ux_scopes_fold",
+           "ux_tasks_idem")
 TRIGGERS = ("trg_rules_ins", "trg_rules_upd", "trg_rules_del",
             "trg_scope_link_ins", "trg_scope_link_del", "trg_consumer_scope",
             "trg_consumers_ins", "trg_consumers_upd",
             "trg_managed_no_extra_member", "trg_managed_no_member_update",
-            "trg_managed_no_rename", "trg_consumer_no_rename")
+            "trg_managed_no_rename", "trg_consumer_no_rename",
+            "trg_tasks_ins", "trg_tasks_upd", "trg_tasks_del",
+            "trg_tasks_closed_is_closed", "trg_tasks_frozen")
 
 
 # =====================================================================
@@ -870,8 +1074,7 @@ class Registry:
             domains = {d: "" for d in domains}
         domains = domains or {}
         for d in domains:
-            if not re.match(r"^[A-Z]{2}$", d):
-                raise RulesError(f"domain {d!r}: exactly two uppercase letters")
+            _valid_domain(d)
         cons = self._normalise_consumers(consumers or [])
         while True:
             code = _gen(CODE_LEN)
@@ -1028,8 +1231,7 @@ class Registry:
             domains = {d: "" for d in domains}
         added, updated = [], []
         for d, desc in (domains or {}).items():
-            if not re.match(r"^[A-Z]{2}$", d):
-                raise RulesError(f"domain {d!r}: exactly two uppercase letters")
+            _valid_domain(d)
             row = self.cx.execute("SELECT description FROM project_domains "
                                   "WHERE project=? AND domain=?", (p, d)).fetchone()
             if row:
@@ -1757,6 +1959,13 @@ class Registry:
         if not d:
             raise RulesError("the rule needs a DOMAIN: the number is not yours to pick, "
                              "the registry assigns it")
+        # Checked at USE as well as at declaration: a row written by hand with
+        # sqlite3 never passed the declaring door, and a guarantee that only
+        # holds on one door is not one.
+        if d in RESERVED_DOMAINS:
+            raise RulesError(
+                f"domain {d!r} is RESERVED: it is the prefix of the task log, and a "
+                f"rule numbered {d}-0001 could not be told apart from a task.")
         if d not in self._domains(p):
             raise RulesError(f"domain {d!r} is not declared by this project "
                              f"(declared: {', '.join(self._domains(p)) or 'none'})")
