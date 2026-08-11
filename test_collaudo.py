@@ -1107,6 +1107,24 @@ refuses("promoting a rule that is not active",
         lambda: R.promote(FP, ["FI-0002"]), "not an active rule", RulesError)
 
 
+def expiry_is_readable_for_one_rule():
+    """Born in C5: the UI's detail page used to DECLARE that no method handed
+    out the expiry of a rule chosen at will. Now one does — a reading, while
+    the deciding stays on the expiring queue."""
+    e = R.expiry(FP, "VA-0001")
+    assert e["permanence"] == "permanent" and e["expires_at"] is None
+    assert e["in_force"] is True
+    e2 = R.expiry(FP, "PE-0001")
+    assert e2["expires_at"], e2
+    assert e2["status"] == "active"
+
+
+case("the expiry of ONE rule is readable, at last", expiry_is_readable_for_one_rule)
+
+refuses("expiry of a rule never defined",
+        lambda: R.expiry(FP, "VA-0099"), "never defined", RulesError)
+
+
 def the_noticeboard_warns_before_the_expiry():
     R.cx.execute("UPDATE rules SET expires_at=? WHERE project=? AND id='PE-0001'",
                  (_plus_days(10), NAME_FP))

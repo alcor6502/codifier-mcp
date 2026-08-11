@@ -712,7 +712,8 @@ async def _serve() -> None:
     servers = (
         uvicorn.Server(cfg(mcp.http_app(), BIND_HOST, PORT)),
         uvicorn.Server(cfg(web.build(registry=registry, log=log, master=WEB_MASTER,
-                                     action_cap=WEB_ACTION_CAP, refusal=RulesError),
+                                     action_cap=WEB_ACTION_CAP, refusal=RulesError,
+                                     backup_dir=BACKUP_DIR),
                            WEB_BIND_HOST, WEB_PORT)),
     )
     await asyncio.gather(*(s.serve() for s in servers))

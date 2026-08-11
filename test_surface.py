@@ -2056,9 +2056,14 @@ for _n in ast.walk(WEB_TREE):
         _ROUTES.append((_path, _meth, ast.unparse(_n.args[1]) if len(_n.args) > 1 else "?"))
 ok(bool(_ROUTES), f"web.py declares its routes explicitly: {len(_ROUTES)}")
 _POSTS = sorted(r for r in _ROUTES if "POST" in r[1])
-ok([(r[0], r[2]) for r in _POSTS] == [("/login", "login"), ("/logout", "logout"),
-                                      ("/p/{project}/batch", "batch_action")],
-   "and exactly three of them take POST: login, logout and the lot's action",
+ok([(r[0], r[2]) for r in _POSTS] == [("/admin/backup", "admin_backup"),
+                                      ("/admin/create", "admin_create"),
+                                      ("/admin/rekey", "admin_rekey"),
+                                      ("/login", "login"), ("/logout", "logout"),
+                                      ("/p/{project}/batch", "batch_action"),
+                                      ("/p/{project}/pending", "pending_action")],
+   "and exactly seven of them take POST: the door, the exit, and the five "
+   "actions — the lot, renewal/promotion, and the three master operations",
    [(r[0], r[2]) for r in _POSTS])
 ok(all(r[1] in (("GET",), ("POST",)) for r in _ROUTES),
    "and no route answers both — a page that reads and writes at one address is "

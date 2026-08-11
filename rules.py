@@ -1485,6 +1485,22 @@ class Registry:
                 "redundancy_candidates": cand,
                 "verdict": "coherent" if clean else "there are things to fix"}
 
+    def expiry(self, code: str, rid: str) -> dict:
+        """The expiry of ONE rule, chosen at will. Born in C5: the UI's
+        detail page used to DECLARE that no method handed this out — the
+        date was published only where it is decided, the expiring queue —
+        and saying so out loud was the honest form of the gap. Now the
+        method exists, and it hands out exactly the lifecycle fields:
+        status, permanence, the date, and whether the rule is in force."""
+        p = self._project(code)
+        rid = _norm_id(rid)
+        row = self._row(p, rid)
+        if row is None:
+            raise RulesError(f"{rid}: never defined in this project")
+        return {"project": p, "id": rid, "status": row["status"],
+                "permanence": row["permanence"], "expires_at": row["expires_at"],
+                "in_force": self._in_force(row)}
+
     def history(self, code: str, rid: str) -> dict:
         p = self._project(code)
         rid = _norm_id(rid)

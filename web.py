@@ -184,7 +184,8 @@ of the service.</p>""")
 # The application
 # =====================================================================
 
-def build(*, registry, log, master: str, action_cap: int, refusal):
+def build(*, registry, log, master: str, action_cap: int, refusal,
+          backup_dir: str = ""):
     """The Starlette application. Handed the engine, the service's own logger,
     the master and the ceiling: a web layer that reached for any of them itself
     would be a second place where the configuration is decided, and a second
@@ -238,7 +239,7 @@ def build(*, registry, log, master: str, action_cap: int, refusal):
         it."""
         return HTMLResponse(_login_page(), status_code=401)
 
-    NAV = ("<a href='/'>projects</a>"
+    NAV = ("<a href='/'>projects</a><a href='/admin'>deployment</a>"
            "<form class='inline' method='post' action='/logout'>"
            "<button type='submit'>sign out</button></form>")
 
@@ -516,6 +517,163 @@ def build(*, registry, log, master: str, action_cap: int, refusal):
         out.append(f"<p><a href='/p/{_esc(name)}/batch'>Back to the lot</a></p>")
         return "".join(out)
 
+    # ---------- the master operations: the deployment page ----------
+    #
+    # Create, the registry index (codes included), rekey and backup — the
+    # operations that left the MCP surface in v3.0.0 so that no master-level
+    # secret would ever travel in a conversation. Same contract as the lot:
+    # a session to see the page, the master RETYPED once per action to act.
+
+    def _receipt_html(name: str, code: str, key: str) -> str:
+        """TWO secrets, TWO destinations, shown ONCE — and the destinations
+        are written on the page, not left to prose elsewhere: sending a
+        secret to the wrong home is the mistake you make once and pay for
+        twice."""
+        return (f"<p class='ok'>Project <b>{_esc(name)}</b>.</p>"
+                f"<table><tbody>"
+                f"<tr><td>project code</td><td><code>{_esc(code)}</code></td>"
+                f"<td class='note'>goes at the TOP of the project's "
+                f"instructions</td></tr>"
+                f"<tr><td>architect key</td><td><code>{_esc(key)}</code></td>"
+                f"<td class='note'>goes in the PASSWORD MANAGER — it never "
+                f"enters a conversation</td></tr>"
+                f"</tbody></table>"
+                f"<p class='bad'>Shown ONCE: neither can be read back. Leaving "
+                f"this page without copying BOTH costs another rekey.</p>"
+                f"<p><a href='/admin'>Back to the deployment page</a></p>")
+
+    async def admin_page(request):
+        if not _session_ok(request):
+            return _guest(request)
+        data = registry.projects()
+        rows = "".join(
+            f"<tr><td>{_esc(p['name'])}</td><td><code>{_esc(p['code'])}</code></td>"
+            f"<td>{_esc(p['active_rules'])}</td>"
+            f"<td class='note'>{_esc(p['created'])}</td></tr>"
+            for p in data["projects"])
+        opts = "".join(f"<option value='{_esc(p['name'])}'>{_esc(p['name'])}</option>"
+                       for p in data["projects"])
+        body = (
+            "<h2>The registry — codes included</h2>"
+            + (f"<table><thead><tr><th>Project</th><th>Code</th><th>In force</th>"
+               f"<th>Created</th></tr></thead><tbody>{rows}</tbody></table>"
+               if rows else "<p class='note'>No project yet.</p>")
+            + "<p class='note'>The architect keys are NOT here: they exist as "
+              "hashes. Recovering one is a rekey, which regenerates the pair.</p>"
+            + "<h2>Create a project</h2>"
+              "<form method='post' action='/admin/create'>"
+              "<label for='cname'>Name</label>"
+              "<input id='cname' type='text' name='name' required>"
+              "<label for='cdesc'>Description (optional)</label>"
+              "<input id='cdesc' type='text' name='description'>"
+              "<label for='cmaster'>Master — once for this action</label>"
+              "<input id='cmaster' type='password' name='master' "
+              "autocomplete='current-password' required>"
+              "<p><button type='submit'>Create — the receipt shows the two "
+              "secrets once</button></p></form>"
+              "<p class='note'>Born empty: domains, consumers and rules are the "
+              "Architect's seeding, done with the key on the receipt.</p>"
+            + ("<h2>Rekey</h2>"
+               "<form method='post' action='/admin/rekey'>"
+               f"<label for='rproj'>Project</label>"
+               f"<select id='rproj' name='project'>{opts}</select>"
+               "<label for='rmaster'>Master — once for this action</label>"
+               "<input id='rmaster' type='password' name='master' "
+               "autocomplete='current-password' required>"
+               "<p><button type='submit'>Regenerate the pair</button></p></form>"
+               "<p class='note'>Code AND key, always together: the old pair "
+               "dies the moment you click.</p>" if rows else "")
+            + "<h2>Backup</h2>"
+              "<form method='post' action='/admin/backup'>"
+              "<label for='bmaster'>Master — once for this action</label>"
+              "<input id='bmaster' type='password' name='master' "
+              "autocomplete='current-password' required>"
+              "<p><button type='submit'>VACUUM INTO a quiescent copy</button></p>"
+              "</form>")
+        response = HTMLResponse(_page("Deployment", body, nav=NAV))
+        _issue(response)
+        return response
+
+    async def admin_create(request):
+        if not _session_ok(request):
+            return _guest(request)
+        form = await request.form()
+        # The master, RETYPED for the action, compared in constant time —
+        # inline, not delegated: the guard is pinned as written, and a
+        # session alone is a browser left open on the iPad.
+        if not secrets.compare_digest((form.get("master") or "").strip(), master):
+            log.warning("refused web create: wrong master, from %s",
+                        _client(request))
+            return HTMLResponse(
+                _page("Deployment", "<p class='bad'>Wrong master. Nothing was "
+                                    "changed.</p>", nav=NAV), status_code=401)
+        try:
+            out = registry.create_project((form.get("name") or "").strip(),
+                                          description=(form.get("description")
+                                                       or "").strip())
+        except refusal as e:
+            log.info("refused web create: %s", e)
+            return HTMLResponse(_page("Deployment",
+                                      f"<p class='bad'>{_esc(e)}</p>", nav=NAV),
+                                status_code=400)
+        return HTMLResponse(_page("Deployment — receipt",
+                                  _receipt_html(out["created"], out["code"],
+                                                out["architect_key"]), nav=NAV))
+
+    async def admin_rekey(request):
+        if not _session_ok(request):
+            return _guest(request)
+        form = await request.form()
+        # The master, RETYPED for the action, compared in constant time —
+        # inline, not delegated: the guard is pinned as written, and a
+        # session alone is a browser left open on the iPad.
+        if not secrets.compare_digest((form.get("master") or "").strip(), master):
+            log.warning("refused web rekey: wrong master, from %s",
+                        _client(request))
+            return HTMLResponse(
+                _page("Deployment", "<p class='bad'>Wrong master. Nothing was "
+                                    "changed.</p>", nav=NAV), status_code=401)
+        name = (form.get("project") or "").strip()
+        code = _code_of(name)
+        if code is None:
+            return _no_project(name)
+        try:
+            out = registry.rekey_project(code)
+        except refusal as e:
+            log.info("refused web rekey: %s", e)
+            return HTMLResponse(_page("Deployment",
+                                      f"<p class='bad'>{_esc(e)}</p>", nav=NAV),
+                                status_code=400)
+        return HTMLResponse(_page("Deployment — receipt",
+                                  _receipt_html(out["project"], out["code"],
+                                                out["architect_key"]), nav=NAV))
+
+    async def admin_backup(request):
+        if not _session_ok(request):
+            return _guest(request)
+        form = await request.form()
+        # The master, RETYPED for the action, compared in constant time —
+        # inline, not delegated: the guard is pinned as written, and a
+        # session alone is a browser left open on the iPad.
+        if not secrets.compare_digest((form.get("master") or "").strip(), master):
+            log.warning("refused web backup: wrong master, from %s",
+                        _client(request))
+            return HTMLResponse(
+                _page("Deployment", "<p class='bad'>Wrong master. Nothing was "
+                                    "changed.</p>", nav=NAV), status_code=401)
+        try:
+            out = registry.backup(backup_dir)
+        except refusal as e:
+            log.info("refused web backup: %s", e)
+            return HTMLResponse(_page("Deployment",
+                                      f"<p class='bad'>{_esc(e)}</p>", nav=NAV),
+                                status_code=400)
+        body = (f"<p class='ok'>Quiescent copy written: "
+                f"<code>{_esc(out['backup'])}</code> — {_esc(out['bytes'])} "
+                f"bytes. It opens without recovery, and it is the one to take "
+                f"off-site.</p><p><a href='/admin'>Back</a></p>")
+        return HTMLResponse(_page("Deployment", body, nav=NAV))
+
     # ---------- the consultation: it reads, and only reads ----------
 
     def _read_page(request, render):
@@ -611,17 +769,23 @@ def build(*, registry, log, master: str, action_cap: int, refusal):
                 out.append("<h2>History</h2><table><thead><tr><th></th><th>when</th>"
                            "<th>what</th><th>state</th><th>perimeter</th><th>why</th>"
                            f"</tr></thead><tbody>{rows}</tbody></table>")
-                # THE EXPIRY DATE IS NOT HERE, and that is the engine's shape
-                # rather than an omission of this page: no method of Registry
-                # hands out expires_at for one rule chosen at will. It is
-                # published where it is DECIDED — the expiring queue on the
-                # pending page — and reading it out of the whole-project export
-                # would be a machine parsing our own prose back, which is the
-                # thing 2.0.1 stopped doing. Said out loud rather than left as
-                # a gap somebody hunts for.
-                out.append("<p class='note'>The expiry date is not in the "
-                           "history: it is published where it is decided — the "
-                           "expiring queue on the pending page.</p>")
+                # The expiry, read from the method born in C5: the page used
+                # to DECLARE that no method of Registry handed this out, and
+                # the declaration was the gap's honest form. The deciding
+                # still happens on the expiring queue; this is a reading.
+                exp = registry.expiry(code, rid)
+                if exp["permanence"] == "permanent":
+                    out.append("<p class='note'>Permanent: no expiry — "
+                               "somebody promised to notice when it goes "
+                               "stale.</p>")
+                elif exp["expires_at"]:
+                    gone = (exp["status"] == "active" and not exp["in_force"])
+                    out.append(f"<p class='note'>Expires "
+                               f"{_esc(exp['expires_at'])}"
+                               + (" — <b>already expired</b>: it has left the "
+                                  "lists on its own" if gone else "")
+                               + ". Renewal lives on the pending page, where "
+                                 "the reason is in front of you.</p>")
                 latest = versions[-1]["version"]
                 a = int(request.query_params.get("a") or max(1, latest - 1))
                 b = int(request.query_params.get("b") or latest)
@@ -654,15 +818,109 @@ def build(*, registry, log, master: str, action_cap: int, refusal):
             # front of you. Without a consumer chosen the engine returns none,
             # and the page says so rather than showing an empty table that
             # reads like good news.
+            #
+            # And it is where the corpus is GOVERNED: renewal and promotion
+            # act from here, since v3.0.0 — the reason is on the row you
+            # tick, which is the whole argument for the queue being the one
+            # place the date is published. Same contract as the lot: master
+            # once per action, ceiling per action.
             expiring = data["expiring_within_30_days"]
+            if expiring:
+                trs = "".join(
+                    f"<tr><td><label><input type='checkbox' name='rule' "
+                    f"value='{_esc(r['id'])}'> "
+                    f"<a href='/p/{_esc(name)}/rule/{_esc(r['id'])}'>"
+                    f"{_esc(r['id'])}</a></label></td><td>{_esc(r.get('title'))}</td>"
+                    f"<td class='note'>{_esc(r.get('expires_at') or '')}</td>"
+                    f"<td class='note'>{_esc(r.get('reason') or '')}</td></tr>"
+                    for r in expiring)
+                exp_html = (
+                    f"<h2>Expiring within 30 days</h2>"
+                    f"<form method='post' action='/p/{_esc(name)}/pending'>"
+                    f"<input type='hidden' name='consumer' value='{_esc(consumer)}'>"
+                    f"<table><tbody>{trs}</tbody></table>"
+                    f"<p class='note'>Renewal is where the corpus is governed, "
+                    f"and the question is not \"is it still true?\" but \"would "
+                    f"I file this today, for the reason it was filed for?\" — "
+                    f"the reason is on the row. Promotion is rare and "
+                    f"deliberate: a permanent rule is one you promise to "
+                    f"notice when it goes stale.</p>"
+                    f"<label for='pmaster'>Master — once for this action</label>"
+                    f"<input id='pmaster' type='password' name='master' "
+                    f"autocomplete='current-password' required>"
+                    f"<p><button type='submit' name='action' value='renew'>"
+                    f"Renew the ticked</button> "
+                    f"<button type='submit' name='action' value='promote'>"
+                    f"Promote the ticked to PERMANENT</button></p></form>")
+            else:
+                exp_html = ("<h2>Expiring within 30 days</h2>"
+                            "<p class='note'>None.</p>")
             tail = ("" if consumer else
                     "<p class='note'>The expiring queue is per consumer: choose "
                     "one above to see it.</p>")
             return (picker + table("Waiting", data["waiting"])
                     + table("Denied", data["denied"])
-                    + table("Expiring within 30 days", expiring) + tail,
+                    + exp_html + tail,
                     f"{name} — pending")
         return _read_page(request, render)
+
+    async def pending_action(request):
+        """Renew or promote the ticked rules: the write half of the pending
+        page. Same shape as the lot's action — session, master retyped once,
+        ceiling per action, refusals as sentences — because a second shape
+        would be a second thing to get wrong."""
+        if not _session_ok(request):
+            return _guest(request)
+        name = request.path_params["project"]
+        code = _code_of(name)
+        if code is None:
+            return _no_project(name)
+        form = await request.form()
+        consumer = (form.get("consumer") or "").strip()
+        back = (f"<p><a href='/p/{_esc(name)}/pending"
+                + (f"?consumer={_esc(consumer)}" if consumer else "")
+                + "'>Back to the pending page</a></p>")
+        def say(msg, cls, status):
+            return HTMLResponse(_page(f"{name} — pending",
+                                      f"<p class='{cls}'>{msg}</p>{back}",
+                                      nav=_project_nav(name)), status_code=status)
+        if not secrets.compare_digest((form.get("master") or "").strip(), master):
+            log.warning("refused web renewal: wrong master, from %s",
+                        _client(request))
+            return say("Wrong master. Nothing was changed.", "bad", 401)
+        action = (form.get("action") or "").strip()
+        ticked = [i.strip() for i in form.getlist("rule") if i.strip()]
+        if action not in ("renew", "promote"):
+            return say("Unknown action. Nothing was changed.", "bad", 400)
+        if not ticked:
+            return say("Nothing ticked, nothing done.", "bad", 400)
+        if len(ticked) > action_cap:
+            return say(f"{len(ticked)} ticked and the ceiling for one action "
+                       f"is {action_cap}. Nothing was changed: do it in more "
+                       f"than one pass, which is the point of the ceiling.",
+                       "bad", 400)
+        try:
+            if action == "renew":
+                v = registry.renew(code, ticked)
+                whys = "".join(f"<li>{_esc(rid)} <span class='note'>— why it "
+                               f"exists: {_esc(why)}</span></li>"
+                               for rid, why in v["reasons"].items())
+                return HTMLResponse(_page(
+                    f"{name} — renewed",
+                    f"<p class='ok'>Renewed <b>{_esc(', '.join(v['renewed']))}"
+                    f"</b> until {_esc(v['expires_at'])} — let in again, which "
+                    f"is what staying costs.</p><ul>{whys}</ul>{back}",
+                    nav=_project_nav(name)))
+            v = registry.promote(code, ticked)
+            return HTMLResponse(_page(
+                f"{name} — promoted",
+                f"<p class='ok'>Permanent: <b>{_esc(', '.join(v['promoted']))}"
+                f"</b>. No expiry, it never leaves on its own — you promised "
+                f"to notice when it goes stale.</p>{back}",
+                nav=_project_nav(name)))
+        except refusal as e:
+            log.info("refused web renewal: %s", e)
+            return say(_esc(e), "bad", 400)
 
     async def status_page(request):
         def render(name, code):
@@ -683,12 +941,17 @@ def build(*, registry, log, master: str, action_cap: int, refusal):
         Route("/", home, methods=["GET"]),
         Route("/login", login, methods=["POST"]),
         Route("/logout", logout, methods=["POST"]),
+        Route("/admin", admin_page, methods=["GET"]),
+        Route("/admin/create", admin_create, methods=["POST"]),
+        Route("/admin/rekey", admin_rekey, methods=["POST"]),
+        Route("/admin/backup", admin_backup, methods=["POST"]),
         Route("/p/{project}/", project_home, methods=["GET"]),
         Route("/p/{project}/batch", batch_page, methods=["GET"]),
         Route("/p/{project}/batch", batch_action, methods=["POST"]),
         Route("/p/{project}/rules", rules_page, methods=["GET"]),
         Route("/p/{project}/rule/{rule}", rule_page, methods=["GET"]),
         Route("/p/{project}/pending", pending_page, methods=["GET"]),
+        Route("/p/{project}/pending", pending_action, methods=["POST"]),
         Route("/p/{project}/status", status_page, methods=["GET"]),
     ]
     return Starlette(routes=routes)
