@@ -31,8 +31,15 @@ a single consumer is a set with one element, and its singleton scope is made by
 a database trigger the moment the consumer is born. One kind of pointer, no
 branch. Every scope says which of the two it is: `managed: true` is the
 database's — a consumer's singleton, or `_ALL_` — and it is not yours to edit;
-`managed: false` is a group you made. `_ALL_` is a scope too, and the only one whose membership is computed:
-it must reach consumers that do not exist yet.
+`managed: false` is a group you made. `_ALL_` is a scope too, and the only one
+whose membership is computed: it must reach consumers that do not exist yet —
+and, since v3.2.0, must stop reaching the ones that have been RETIRED.
+
+**A consumer can END.** Roles end and skills get rewritten, so
+`rules_consumer_retire` exists: the row stays, because the history has to keep
+resolving, and every POINTER goes — its scope, its groups, `_ALL_`, and every
+rule aimed at it. After that, every door that names it refuses. It comes back
+only if somebody says `revive: true`.
 
 **SPELLING IS DATA; A TYPE IS NOT.** The two look like the same question and
 are opposite ones, so the line is worth reading once:
@@ -567,15 +574,24 @@ too, as it always did.
   it as one would fatten the corpus the expiry mechanism keeps small. Names
   keep the SPELLING they were first given, byte for byte; identity is the
   casefolded form, so `Architect` and `architect` are one consumer — and a
-  consumer is never renamed.
-  ⚠ **"Retire the old" is doctrine with no mechanism yet.** There is no
-  `retired` flag on a consumer, so today the nearest thing is: create the new
-  one, narrow every rule off the old, and leave it there. It still exists, it
-  still shows in `rules_project_info`, and — this is the part that bites —
-  `_ALL_` still reaches it, because `_ALL_` is computed over every consumer
-  that exists. Said out loud rather than left as a promise: an instruction
-  pointing at a door nobody can open is how a manual starts lying. Written up
-  in `Decisioni aperte.md`.
+  consumer is never renamed: a renamed consumer is a different consumer.
+- **`rules_consumer_retire`** — END a consumer. Roles end and skills get
+  rewritten, and until v3.2.0 there was no door for it: the manual said
+  "retire the old" and nothing could. The row STAYS, because the history has
+  to keep resolving and an old version goes on naming it — it stores who a
+  rule reached as TEXT, a photograph and not a join, so nothing true yesterday
+  changes. What goes away is **every pointer**: its own scope, every group it
+  was in, `_ALL_` (which stops reaching it), and every rule aimed at it, each
+  one recording the narrowing. Rules left reaching nobody are LISTED in the
+  verdict and go on being listed by `rules_check` — nothing is retired behind
+  your back. Every door that names it then refuses, saying RETIRED and not
+  "unknown", because a role that ended and a typo are not the same news.
+  **Open tasks block it**: retiring the owner of waiting work would make that
+  work unreachable by every reading, which is a drop with no reason performed
+  by housekeeping — close them or hand them over with `tasks_amend`. Coming
+  back is possible and must be SAID: `rules_consumers_add` with an item
+  carrying `revive: true`, never a bare name, because undoing a decision is
+  not the silent effect of a list.
 - **The master operations are NOT tools.** Creating a project, the registry
   index (codes included) and rekey live in the administration UI, behind the
   master, so no master-level secret ever travels in a conversation. The

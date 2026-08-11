@@ -703,6 +703,34 @@ def rules_consumers_add(project: str, consumers: list, key: str) -> dict:
 
 
 @tool
+def rules_consumer_retire(project: str, name: str, reason: str, key: str) -> dict:
+    """MAINTENANCE. END a consumer. Roles end, skills get rewritten: this is
+    the door for it, and its absence is what made the model rigid.
+
+    The row STAYS — the history keeps resolving, and an old version goes on
+    naming it, because a version stores who it reached as text: a photograph,
+    not a pointer. What goes away is every POINTER. It leaves its own scope
+    and every group, `_ALL_` stops reaching it, every rule aimed at it loses
+    that pointer with the narrowing recorded on each one, and every door that
+    names it refuses — saying RETIRED, not "unknown", because a role that
+    ended and a typo are not the same news.
+
+    OPEN TASKS BLOCK IT. Retiring the owner of work still waiting would make
+    that work unreachable by every reading, which is a drop with no reason
+    performed by housekeeping. Close them, or hand them over with tasks_amend.
+
+    The verdict lists the rules left REACHING NOBODY: they are not retired
+    behind your back, they are reported — and rules_check keeps reporting them
+    until they get a perimeter or a retirement of their own.
+
+    Coming back is possible and has to be SAID: rules_consumers_add with an
+    item carrying `revive: true`. A name in a plain list will not do it, on
+    purpose — undoing a decision is never the silent effect of a list."""
+    _admin(project, key)
+    return registry.retire_consumer(project, name, reason)
+
+
+@tool
 def rules_domains_add(project: str, domains: dict, key: str) -> dict:
     """MAINTENANCE. Add ID domains to a project: {"LQ":"liquidity"}. Two
     uppercase letters each. Only adding, for the same reason."""

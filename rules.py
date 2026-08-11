@@ -405,6 +405,7 @@ _CONSUMERS_OF = """(SELECT IFNULL(GROUP_CONCAT(c, ','), '') FROM
       UNION
      SELECT k.name FROM consumers k
       WHERE k.project = {R}.project
+        AND k.retired_at IS NULL
         AND EXISTS (SELECT 1 FROM rule_scopes z
                       JOIN scopes zs ON zs.id = z.scope_id
                      WHERE z.project = {R}.project AND z.rule_id = {R}.id
@@ -469,7 +470,16 @@ CREATE TABLE IF NOT EXISTS consumers (
   name    TEXT NOT NULL,                -- exactly as first given: spelling is DATA
   kind    TEXT NOT NULL CHECK (kind IN ('chat','skill')),
   brief   TEXT,
-  created TEXT NOT NULL
+  created TEXT NOT NULL,
+  -- RETIREMENT. A role ends, a skill is rewritten, a chat is replaced: the
+  -- registry has to be able to say so, and until v3.2.0 it could not — the
+  -- manual instructed "retire the old" and there was no door. The row STAYS,
+  -- because the history has to keep resolving and rules that once reached it
+  -- must keep reading true; what goes away is every POINTER. Retired, a
+  -- consumer is reached by nothing, not even _ALL_, owns no scope membership,
+  -- and is refused at every door that names it.
+  retired_at     TEXT,                  -- NULL means live
+  retired_reason TEXT
 );
 
 -- Identity is the CASEFOLDED name; the spelling above is the author's and is
@@ -482,13 +492,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_consumers_fold
 -- protection. Whole versions, written by triggers — a change made by hand
 -- with sqlite3 is recorded too, same doctrine as the rules.
 CREATE TABLE IF NOT EXISTS consumer_versions (
-  project  TEXT NOT NULL,
-  consumer TEXT NOT NULL,
-  version  INTEGER NOT NULL,
-  kind     TEXT,
-  brief    TEXT,
-  ts       TEXT NOT NULL,
-  action   TEXT NOT NULL,
+  project    TEXT NOT NULL,
+  consumer   TEXT NOT NULL,
+  version    INTEGER NOT NULL,
+  kind       TEXT,
+  brief      TEXT,
+  retired_at TEXT,
+  ts         TEXT NOT NULL,
+  action     TEXT NOT NULL,
   PRIMARY KEY (project, consumer, version)
 );
 
@@ -678,19 +689,29 @@ CREATE TRIGGER IF NOT EXISTS trg_consumer_scope AFTER INSERT ON consumers BEGIN
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_consumers_ins AFTER INSERT ON consumers BEGIN
-  INSERT INTO consumer_versions (project, consumer, version, kind, brief, ts, action)
+  INSERT INTO consumer_versions (project, consumer, version, kind, brief, retired_at, ts, action)
   VALUES (NEW.project, NEW.name,
           (SELECT IFNULL(MAX(version),0)+1 FROM consumer_versions
             WHERE project = NEW.project AND consumer = NEW.name),
-          NEW.kind, NEW.brief, strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'created');
+          NEW.kind, NEW.brief, NEW.retired_at,
+          strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'created');
 END;
 
+-- The action NAMES the retirement and the revival instead of calling both
+-- 'amended': a role ending is the change this history exists to record, and a
+-- word that covers everything covers nothing.
 CREATE TRIGGER IF NOT EXISTS trg_consumers_upd AFTER UPDATE ON consumers BEGIN
-  INSERT INTO consumer_versions (project, consumer, version, kind, brief, ts, action)
+  INSERT INTO consumer_versions (project, consumer, version, kind, brief, retired_at, ts, action)
   VALUES (NEW.project, NEW.name,
           (SELECT IFNULL(MAX(version),0)+1 FROM consumer_versions
             WHERE project = NEW.project AND consumer = NEW.name),
-          NEW.kind, NEW.brief, strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'amended');
+          NEW.kind, NEW.brief, NEW.retired_at,
+          strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+          CASE
+            WHEN NEW.retired_at IS NOT NULL AND OLD.retired_at IS NULL THEN 'retired'
+            WHEN NEW.retired_at IS NULL AND OLD.retired_at IS NOT NULL THEN 'revived'
+            ELSE 'amended'
+          END);
 END;
 
 -- A managed scope must keep telling the truth about its own name. The one
@@ -1045,13 +1066,31 @@ class Registry:
         with `Architect`: identity is folded, spelling is data, and every
         answer carries the spelling the owner chose."""
         n = _fold(name)
-        allowed = [r[0] for r in self.cx.execute(
-            "SELECT name FROM consumers WHERE project=? ORDER BY name", (project,))]
+        allowed, retired = [], {}
+        for r in self.cx.execute(
+                "SELECT name, retired_at FROM consumers WHERE project=? ORDER BY name",
+                (project,)):
+            if r["retired_at"]:
+                retired[_fold(r["name"])] = (r["name"], r["retired_at"])
+            else:
+                allowed.append(r["name"])
         if not n:
             raise RulesError(f"consumer not specified. This project has: {', '.join(allowed)}")
         for stored in allowed:
             if _fold(stored) == n:
                 return stored
+        # A RETIRED ONE IS NOT AN UNKNOWN ONE, and saying so is the difference
+        # between "you typed it wrong" and "that role ended". This is the door
+        # every other one goes through — list, get, propose, the task log — so
+        # the sentence is written once and every caller gets it.
+        if n in retired:
+            stored, when = retired[n]
+            raise RulesError(
+                f"{stored} was RETIRED on {when}: it reaches nothing, it holds nothing, "
+                "and no rule or task can name it. If that role is back, revive it with "
+                "rules_consumers_add and an item carrying revive:true — which is a "
+                "decision, not a typo, so it has to be said out loud. Live consumers: "
+                f"{', '.join(allowed) or '(none)'}")
         raise RulesError(
             f"unknown consumer {name!r}. This project has: {', '.join(allowed) or '(none)'}")
 
@@ -1089,7 +1128,10 @@ class Registry:
 
     def project_info(self, code: str) -> dict:
         p = self._project(code)
-        cons = self.cx.execute("SELECT name, kind FROM consumers WHERE project=? ORDER BY kind, name",
+        cons = self.cx.execute("SELECT name, kind FROM consumers WHERE project=? "
+                               "AND retired_at IS NULL ORDER BY kind, name", (p,)).fetchall()
+        gone = self.cx.execute("SELECT name, kind, retired_at, retired_reason FROM consumers "
+                               "WHERE project=? AND retired_at IS NOT NULL ORDER BY name",
                                (p,)).fetchall()
         scopes = []
         for s in self.cx.execute("SELECT name, managed FROM scopes WHERE project=? ORDER BY name",
@@ -1102,6 +1144,14 @@ class Registry:
         return {
             "project": p,
             "consumers": [{"name": c["name"], "kind": c["kind"]} for c in cons],
+            # Kept APART, never merged into the list above: a retired consumer
+            # is not one of the project's consumers any more, and a caller
+            # picking a name out of that list must not be able to pick a dead
+            # one. Shown at all because the history keeps resolving, so a name
+            # met in an old version has to be explainable.
+            "retired_consumers": [{"name": c["name"], "kind": c["kind"],
+                                   "retired_at": c["retired_at"],
+                                   "reason": c["retired_reason"]} for c in gone],
             "scopes": scopes,
             "domains": {d["domain"]: d["description"] for d in doms},
             "registry_version": VERSION,
@@ -1133,7 +1183,7 @@ class Registry:
         # needs neither. Said out loud because a half-check nobody declares is
         # how a guarantee becomes a habit. Everything written afterwards goes
         # through the full door.
-        for _n, _k, _b in cons:
+        for _n, _k, _b, _r in cons:
             self._relics(name, f"brief of {_n!r}", _b)
         for _d, _desc in domains.items():
             self._relics(name, f"gloss of {_d}", _desc)
@@ -1154,16 +1204,16 @@ class Registry:
                                 "VALUES (?,?,?)", (name, d, desc or None))
             self.cx.execute("INSERT INTO scopes (project, name, managed) VALUES (?,?,1)",
                             (name, ALL))
-            for cname, kind, brief in cons:
+            for cname, kind, brief, _ in cons:
                 self.cx.execute("INSERT INTO consumers (project, name, kind, brief, "
                                 "created) VALUES (?,?,?,?,?)",
-                                (name, cname, kind, brief or None, _now()))
+                                (name, cname, kind or "chat", brief or None, _now()))
             self.cx.execute("COMMIT")
         except Exception:
             self.cx.execute("ROLLBACK")
             raise
         return {"created": name, "code": code, "architect_key": key,
-                "consumers": [c for c, _, _ in cons], "domains": sorted(domains),
+                "consumers": [c for c, _, _, _ in cons], "domains": sorted(domains),
                 "note": "TWO secrets, TWO destinations, shown ONCE: the code goes at "
                         "the top of the project instructions, the architect key in "
                         "the password manager. Neither can be read back — losing "
@@ -1180,14 +1230,15 @@ class Registry:
         caller said nothing" — so a later call naming an existing SKILL as a
         bare string would have silently demoted it. The default is applied
         where a row is CREATED, which is the only place it means anything."""
-        out: list[tuple[str, str, str]] = []
+        out: list[tuple[str, str, str, bool]] = []
         for item in consumers or []:
-            brief = ""
+            brief, revive = "", False
             if isinstance(item, str):
                 cname, kind = item, ""
             elif isinstance(item, dict):
                 cname, kind = item.get("name", ""), item.get("kind", "")
                 brief = item.get("brief") or ""
+                revive = bool(item.get("revive"))
             else:
                 vals = list(item)
                 cname = vals[0] if vals else ""
@@ -1210,8 +1261,8 @@ class Registry:
                 raise RulesError(
                     f"the brief of {cname!r} is over {MAX_BODY_BYTES} bytes: split it — "
                     "same discipline as a rule's body")
-            if _fold(cname) not in [_fold(c) for c, _, _ in out]:
-                out.append((cname, kind, brief))
+            if _fold(cname) not in [_fold(c) for c, _, _, _ in out]:
+                out.append((cname, kind, brief, revive))
         return out
 
     def rekey_project(self, code: str) -> dict:
@@ -1268,13 +1319,39 @@ class Registry:
         # first thing a role reads at the start of every session — which is the
         # most effective place in the whole registry for an old identifier to
         # keep itself alive.
-        cons = [(n, k, self._prose(p, f"brief of {n!r}", b))
-                for n, k, b in self._normalise_consumers(consumers)]
+        cons = [(n, k, self._prose(p, f"brief of {n!r}", b), r)
+                for n, k, b, r in self._normalise_consumers(consumers)]
         added, added_kinds, brief_set, kind_set, already = [], {}, [], [], []
-        for cname, kind, brief in cons:
+        revived = []
+        for cname, kind, brief, revive in cons:
             row = self.cx.execute(
-                "SELECT id, name, kind FROM consumers WHERE project=? AND lower(name)=?",
-                (p, _fold(cname))).fetchone()
+                "SELECT id, name, kind, retired_at FROM consumers WHERE project=? "
+                "AND lower(name)=?", (p, _fold(cname))).fetchone()
+            if row and row["retired_at"]:
+                # A RETIRED NAME IS NOT FREE AND IS NOT LIVE. Creating it again
+                # would give one name two identities and two histories under the
+                # same key; writing to it as if nothing happened would undo a
+                # decision by accident. So the only way back is SAID: revive.
+                if not revive:
+                    raise RulesError(
+                        f"{row['name']} was RETIRED on {row['retired_at']}. The name is "
+                        "not free — the history still uses it — and it is not live "
+                        "either. If that role is back, say so: pass "
+                        "{'name': '" + row["name"] + "', 'revive': true}. Bringing a "
+                        "consumer back is a decision, and a decision is never the "
+                        "silent effect of a list of names.")
+                self.cx.execute("UPDATE consumers SET retired_at=NULL, retired_reason=NULL, "
+                                "kind=?, brief=? WHERE id=?",
+                                (kind or row["kind"], brief or None, row["id"]))
+                # The singleton is rebuilt: retirement emptied it, and without
+                # this the revived consumer would exist and be reachable by
+                # nothing — the same half-state retirement was invented to end.
+                self.cx.execute(
+                    "INSERT OR IGNORE INTO scope_members (scope_id, consumer_id) "
+                    "SELECT s.id, ? FROM scopes s WHERE s.project=? AND s.managed=1 "
+                    "AND lower(s.name)=?", (row["id"], p, _fold(row["name"])))
+                revived.append(row["name"])
+                continue
             if row:
                 # The consumer EXISTS — under the stored spelling, whatever
                 # spelling the call used. Only the brief is written; the name
@@ -1321,12 +1398,101 @@ class Registry:
             added.append(cname)
             added_kinds[cname] = kind or "chat"
         return {"project": p, "added": added, "added_kinds": added_kinds,
-                "brief_set": brief_set, "kind_set": kind_set, "already_there": already,
+                "brief_set": brief_set, "kind_set": kind_set, "revived": revived,
+                "already_there": already,
                 "note": "each new one also got a scope of its own, made by the database. "
                         "A bare name is a CHAT: to declare a skill pass an object — "
                         "{'name': 'FP-Update-Tax', 'kind': 'skill'} — and the same object "
                         "on a consumer that already exists CORRECTS its kind, which is "
                         "reported in kind_set and versioned by trigger."}
+
+    def retire_consumer(self, code: str, name: str, reason: str) -> dict:
+        """END A CONSUMER. The row stays; every POINTER goes.
+
+        This is the door the manual promised for a long time and did not have,
+        and its absence made the model rigid in the one place a model must not
+        be: roles end, skills get rewritten, things happen. Until v3.2.0 the
+        nearest thing was to narrow every rule off a consumer by hand and
+        leave it there — where it still showed in the project, and where
+        `_ALL_` still reached it, so it went on being bound by every universal
+        rule. That is not retired, that is invisible bookkeeping.
+
+        WHAT HAPPENS, and 'every pointer' is meant literally:
+
+          · the row is FLAGGED, not deleted. `rule_versions` stores the
+            consumers it reached as TEXT — a photograph, not a join — so
+            nothing that was true yesterday changes, and an old version keeps
+            naming it;
+          · it LEAVES every scope: its own singleton and every group it was
+            put in. That alone takes it out of the first branch of the
+            perimeter computation;
+          · `_ALL_` stops reaching it, which needs one clause because that
+            branch enumerates consumers directly rather than through
+            membership;
+          · every rule aimed AT IT loses that pointer, and the trigger records
+            the narrowing on each one. A rule left reaching nobody is not
+            retired behind anybody's back: it is reported here and goes on
+            being reported by rules_check;
+          · every door that names it refuses, with a sentence that says
+            RETIRED and not 'unknown' — the difference between a typo and a
+            role that ended.
+
+        OPEN TASKS BLOCK IT, and that is not caution. A task is somebody's
+        work waiting: retiring its owner would make it unreachable by every
+        reading, which is a `dropped` with no reason performed by
+        housekeeping. Close them or hand them to somebody, then retire."""
+        p = self._project(code)
+        stored = self._consumer(p, name)          # refuses an already retired one
+        if not (reason or "").strip():
+            raise RulesError(
+                "reason is mandatory: ending a role is a decision, and one with no "
+                "reason gets re-taken from scratch the day somebody asks why.")
+        reason = self._prose(p, "reason", reason)
+        cid = self.cx.execute("SELECT id FROM consumers WHERE project=? AND name=?",
+                              (p, stored)).fetchone()[0]
+        open_tasks = [r[0] for r in self.cx.execute(
+            "SELECT id FROM tasks WHERE project=? AND consumer_id=? AND status='pending' "
+            "ORDER BY seq", (p, cid))]
+        if open_tasks:
+            raise RulesError(
+                f"{stored} still owns {len(open_tasks)} open task(s): "
+                f"{', '.join(open_tasks)}. Retiring it now would leave that work "
+                "unreachable by every reading — a drop with no reason, performed by "
+                "housekeeping. Close them with an outcome, drop them with a reason, or "
+                "hand them to somebody else with tasks_amend.")
+        # The rules aimed AT IT, read BEFORE the pointers go, so the verdict can
+        # name them.
+        aimed = [r[0] for r in self.cx.execute(
+            "SELECT DISTINCT rs.rule_id FROM rule_scopes rs JOIN scopes s ON s.id=rs.scope_id "
+            "WHERE rs.project=? AND s.managed=1 AND lower(s.name)=lower(?) ORDER BY rs.rule_id",
+            (p, stored))]
+        groups = [r[0] for r in self.cx.execute(
+            "SELECT s.name FROM scope_members m JOIN scopes s ON s.id=m.scope_id "
+            "WHERE m.consumer_id=? AND s.managed=0 ORDER BY s.name", (cid,))]
+        now = _now()
+        try:
+            self.cx.execute("BEGIN IMMEDIATE")
+            self.cx.execute(
+                "DELETE FROM rule_scopes WHERE project=? AND scope_id IN "
+                "(SELECT id FROM scopes WHERE project=? AND managed=1 AND lower(name)=lower(?))",
+                (p, p, stored))
+            self.cx.execute("DELETE FROM scope_members WHERE consumer_id=?", (cid,))
+            self.cx.execute("UPDATE consumers SET retired_at=?, retired_reason=? WHERE id=?",
+                            (now, reason, cid))
+            self.cx.execute("COMMIT")
+        except Exception:
+            self.cx.execute("ROLLBACK")
+            raise
+        orphaned = [rid for rid in aimed if not self._scopes_of(p, rid)]
+        return {"project": p, "retired": stored, "at": now, "reason": reason,
+                "left_groups": groups, "narrowed_rules": aimed,
+                "now_reaching_nobody": orphaned,
+                "note": "the row stays and the history keeps resolving — an old version "
+                        "still names it, because a version is a photograph. What is gone "
+                        "is every pointer: no scope, no membership, and _ALL_ does not "
+                        "reach it. Rules left reaching nobody are listed above and "
+                        "rules_check keeps listing them: they need a perimeter or a "
+                        "retirement of their own."}
 
     def add_domains(self, code: str, domains) -> dict:
         """Adds domains — and UPDATES the gloss of one that already exists,
@@ -1369,8 +1535,8 @@ class Registry:
         """How many consumers a scope reaches. _ALL_ is not a listed set: it must
         reach consumers that do not exist yet, so its breadth is computed."""
         if scope == ALL:
-            return self.cx.execute("SELECT COUNT(*) FROM consumers WHERE project=?",
-                                   (project,)).fetchone()[0]
+            return self.cx.execute("SELECT COUNT(*) FROM consumers WHERE project=? "
+                                   "AND retired_at IS NULL", (project,)).fetchone()[0]
         return self.cx.execute(
             "SELECT COUNT(*) FROM scope_members m JOIN scopes s ON s.id=m.scope_id "
             "WHERE s.project=? AND lower(s.name)=?",
@@ -1379,7 +1545,8 @@ class Registry:
     def _members(self, project: str, scope: str) -> list[str]:
         if scope == ALL:
             return [r[0] for r in self.cx.execute(
-                "SELECT name FROM consumers WHERE project=? ORDER BY name", (project,))]
+                "SELECT name FROM consumers WHERE project=? AND retired_at IS NULL "
+                "ORDER BY name", (project,))]
         return [r[0] for r in self.cx.execute(
             "SELECT c.name FROM scope_members m "
             "  JOIN scopes s ON s.id=m.scope_id JOIN consumers c ON c.id=m.consumer_id "
@@ -1697,7 +1864,8 @@ class Registry:
             " GROUP BY domain ORDER BY domain", {"p": p, "now": now})}
         by_consumer = {}
         for c in [r[0] for r in self.cx.execute(
-                "SELECT name FROM consumers WHERE project=? ORDER BY name", (p,))]:
+                "SELECT name FROM consumers WHERE project=? AND retired_at IS NULL "
+                "ORDER BY name", (p,))]:
             by_consumer[c] = len(self.list_rules(code, c)["rules"])
         return {
             "project": p,
@@ -2113,6 +2281,18 @@ class Registry:
                     f"{s!r} is neither a consumer nor a scope of this project. "
                     "Every consumer has a scope with its own name; groups are made "
                     "with create_scope.")
+            # A RETIRED CONSUMER'S SINGLETON SURVIVES ITS OWNER — the scope row
+            # is managed and carries that spelling, so dropping it would mean
+            # dropping a name the history still uses. It must not be a TARGET
+            # though: a rule aimed there would reach nobody, quietly, which is
+            # the one thing a perimeter must never do.
+            dead = self.cx.execute(
+                "SELECT retired_at FROM consumers WHERE project=? AND lower(name)=? "
+                "AND retired_at IS NOT NULL", (p, _fold(s))).fetchone()
+            if dead is not None:
+                raise RulesError(
+                    f"{row['name']} was RETIRED on {dead[0]}: a rule aimed at it would "
+                    "reach nobody. Aim it at whoever took the work over, or leave it out.")
             out.append(row["name"])
         return out
 
@@ -3123,7 +3303,8 @@ class Registry:
         now = _now()
         per_consumer = {}
         for cid, name in self.cx.execute(
-                "SELECT id, name FROM consumers WHERE project=? ORDER BY name", (p,)):
+                "SELECT id, name FROM consumers WHERE project=? AND retired_at IS NULL "
+                "ORDER BY name", (p,)):
             row = self.cx.execute(
                 "SELECT SUM(status='pending'), SUM(status='completed'), "
                 "SUM(status='dropped'), SUM(status='pending' AND urgent=1) "

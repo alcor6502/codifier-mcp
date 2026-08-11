@@ -932,6 +932,8 @@ case("a kind is declared on creation, repairable after it, and never written "
      "in silence", a_kind_is_declared_repaired_and_never_written_in_silence)
 
 
+
+
 def reading_expands_the_citation():
     """The gloss is GENERATED, never stored: it cannot go stale, and it carries
     the STATE of what it points at."""
@@ -3096,6 +3098,115 @@ def a_relic_is_refused_in_the_task_log_too():
 case("a relic is refused in the task log too, and an unresolved pointer is not",
      a_relic_is_refused_in_the_task_log_too)
 
+
+# =====================================================================
+head("ending a consumer: the row stays, every pointer goes")
+# =====================================================================
+# Placed LAST on purpose: it creates a project of its own, and three cases
+# above count the projects in the database.
+
+def a_retired_consumer_keeps_its_row_and_loses_every_pointer():
+    """RETIREMENT, and 'every pointer' is meant literally.
+
+    The model had no door for this until v3.2.0, and the absence made it rigid
+    exactly where a model must not be: roles end, skills get rewritten. The
+    nearest thing was to narrow every rule off a consumer by hand and leave it
+    there — where `_ALL_` went on reaching it, so it went on being bound by
+    every universal rule. That is not retired.
+
+    The row stays because the history has to keep resolving, and it can stay
+    safely for a reason worth knowing: `rule_versions` stores who a rule
+    reached as TEXT. A photograph, not a join — so removing the membership
+    today cannot rewrite what was true yesterday."""
+    out = R.create_project("Retire bench",
+                           [{"name": "Architect"}, {"name": "Advisory"},
+                            {"name": "FP-Old", "kind": "skill"}], {"VA": "vault"})
+    RB, RB_KEY = out["code"], out["architect_key"]
+    R.create_scope(RB, "deliberativi", ["Architect", "FP-Old"])
+    wide = R.propose(RB, "VA", "R", "Universal", "Body.", ["*"], "why", "Architect")["id"]
+    aimed = R.propose(RB, "VA", "R", "Only for the skill", "Body.", ["FP-Old"],
+                      "why", "Architect")["id"]
+    R.approve(RB, R.batch(RB)["digest"])
+    assert {wide, aimed} <= {x["id"] for x in R.list_rules(RB, "FP-Old")["rules"]}
+    photo = R.cx.execute("SELECT consumers FROM rule_versions WHERE project='Retire bench' "
+                         "AND rule_id=? ORDER BY version DESC LIMIT 1", (wide,)).fetchone()[0]
+    assert "FP-Old" in photo, photo
+
+    # OPEN TASKS BLOCK IT: retiring the owner of waiting work would make that
+    # work unreachable by every reading — a drop with no reason, performed by
+    # housekeeping.
+    tid = R.task_add(RB, "FP-Old", "Still open", "Body.", "Architect")["id"]
+    try:
+        R.retire_consumer(RB, "fp-old", "rewritten")
+        raise AssertionError("it retired an owner with open work")
+    except RulesError as e:
+        assert "open task" in str(e) and tid in str(e), e
+    R.task_drop(RB, tid, "bench cleanup", "Architect")
+
+    verdict = R.retire_consumer(RB, "fp-old", "the skill was rewritten")
+    assert verdict["retired"] == "FP-Old", verdict          # stored spelling comes back
+    assert verdict["left_groups"] == ["deliberativi"], verdict
+    assert verdict["narrowed_rules"] == [aimed], verdict
+    assert verdict["now_reaching_nobody"] == [aimed], verdict
+
+    info = R.project_info(RB)
+    live = [c["name"] for c in info["consumers"]]
+    assert "FP-Old" not in live and live == ["Advisory", "Architect"], live
+    assert [c["name"] for c in info["retired_consumers"]] == ["FP-Old"], info
+    # _ALL_ STOPS REACHING IT, which is the half a flag alone would not buy.
+    allsc = next(s for s in info["scopes"] if s["name"] == ALL)
+    assert allsc["breadth"] == 2 and "FP-Old" not in allsc["members"], allsc
+    assert next(s for s in info["scopes"]
+                if s["name"] == "deliberativi")["members"] == ["Architect"]
+    # AND THE PHOTOGRAPH IS UNTOUCHED.
+    assert R.cx.execute("SELECT consumers FROM rule_versions WHERE project='Retire bench' "
+                        "AND rule_id=? ORDER BY version LIMIT 1",
+                        (wide,)).fetchone()[0] == photo, "the past was rewritten"
+
+    # EVERY DOOR THAT NAMES IT REFUSES, and says RETIRED rather than unknown:
+    # a role that ended and a typo are not the same news.
+    for label, fn in (
+            ("list", lambda: R.list_rules(RB, "FP-Old")),
+            ("propose", lambda: R.propose(RB, "VA", "R", "x", "Body.", ["*"], "w", "FP-Old")),
+            ("task", lambda: R.task_add(RB, "FP-Old", "x", "Body.", "Architect")),
+            ("pending", lambda: R.pending(RB, "FP-Old")),
+            ("export", lambda: R.export(RB, "FP-Old"))):
+        try:
+            fn()
+            raise AssertionError(f"{label} accepted a retired consumer")
+        except RulesError as e:
+            assert "RETIRED" in str(e), (label, e)
+    # Its singleton survives — the history uses that spelling — but it is not
+    # a TARGET: a rule aimed there would reach nobody, quietly.
+    try:
+        R.propose(RB, "VA", "R", "x", "Body.", ["FP-Old"], "w", "Architect")
+        raise AssertionError("a rule was aimed at a retired consumer")
+    except RulesError as e:
+        assert "RETIRED" in str(e) and "reach nobody" in str(e), e
+    # A bare name does NOT bring it back: undoing a decision is never the
+    # silent effect of a list of names.
+    try:
+        R.add_consumers(RB, ["FP-Old"])
+        raise AssertionError("a bare name revived a retired consumer")
+    except RulesError as e:
+        assert "revive" in str(e), e
+
+    back = R.add_consumers(RB, [{"name": "fp-old", "revive": True}])
+    assert back["revived"] == ["FP-Old"], back
+    assert "FP-Old" in [c["name"] for c in R.project_info(RB)["consumers"]]
+    reached = {x["id"] for x in R.list_rules(RB, "FP-Old")["rules"]}
+    assert wide in reached, "_ALL_ did not reach it again"
+    # And the pointer somebody dropped stays dropped: reviving is not undoing
+    # every consequence, it is putting the consumer back.
+    assert aimed not in reached, "a perimeter came back on its own"
+    v = [(x[0], x[1]) for x in R.cx.execute(
+        "SELECT version, action FROM consumer_versions WHERE project='Retire bench' "
+        "AND consumer='FP-Old' ORDER BY version")]
+    assert v == [(1, "created"), (2, "retired"), (3, "revived")], v
+
+
+case("a retired consumer keeps its row, loses every pointer, and comes back "
+     "only when somebody says so", a_retired_consumer_keeps_its_row_and_loses_every_pointer)
 
 print(f"\n{OK} passed, {FAIL} failed")
 if FAILURES:
