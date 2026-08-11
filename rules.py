@@ -402,6 +402,7 @@ _CONSUMERS_OF = """(SELECT IFNULL(GROUP_CONCAT(c, ','), '') FROM
        JOIN scope_members m ON m.scope_id = rs.scope_id
        JOIN consumers k ON k.id = m.consumer_id
       WHERE rs.project = {R}.project AND rs.rule_id = {R}.id
+        AND k.retired_at IS NULL
       UNION
      SELECT k.name FROM consumers k
       WHERE k.project = {R}.project
@@ -1340,16 +1341,15 @@ class Registry:
                         "{'name': '" + row["name"] + "', 'revive': true}. Bringing a "
                         "consumer back is a decision, and a decision is never the "
                         "silent effect of a list of names.")
+                # ONE COLUMN, and nothing to rebuild: retirement destroyed no
+                # membership and no perimeter, so clearing the flag puts the
+                # consumer back exactly as it was — its singleton, its groups,
+                # and every rule that reached it. That is what marking instead
+                # of deleting buys, and it is why reviving needs no repair pass
+                # that could get it wrong.
                 self.cx.execute("UPDATE consumers SET retired_at=NULL, retired_reason=NULL, "
                                 "kind=?, brief=? WHERE id=?",
                                 (kind or row["kind"], brief or None, row["id"]))
-                # The singleton is rebuilt: retirement emptied it, and without
-                # this the revived consumer would exist and be reachable by
-                # nothing — the same half-state retirement was invented to end.
-                self.cx.execute(
-                    "INSERT OR IGNORE INTO scope_members (scope_id, consumer_id) "
-                    "SELECT s.id, ? FROM scopes s WHERE s.project=? AND s.managed=1 "
-                    "AND lower(s.name)=?", (row["id"], p, _fold(row["name"])))
                 revived.append(row["name"])
                 continue
             if row:
@@ -1417,25 +1417,40 @@ class Registry:
         `_ALL_` still reached it, so it went on being bound by every universal
         rule. That is not retired, that is invisible bookkeeping.
 
-        WHAT HAPPENS, and 'every pointer' is meant literally:
+        IT MARKS. IT DELETES NOTHING. One column moves — `retired_at` — and
+        every read excludes it from then on. Not one row of `scope_members`,
+        not one row of `rule_scopes`: the relations stay exactly as they were.
 
-          · the row is FLAGGED, not deleted. `rule_versions` stores the
-            consumers it reached as TEXT — a photograph, not a join — so
-            nothing that was true yesterday changes, and an old version keeps
-            naming it;
-          · it LEAVES every scope: its own singleton and every group it was
-            put in. That alone takes it out of the first branch of the
-            perimeter computation;
-          · `_ALL_` stops reaching it, which needs one clause because that
-            branch enumerates consumers directly rather than through
-            membership;
-          · every rule aimed AT IT loses that pointer, and the trigger records
-            the narrowing on each one. A rule left reaching nobody is not
-            retired behind anybody's back: it is reported here and goes on
-            being reported by rules_check;
+        THE FIRST VERSION OF THIS METHOD DID DELETE THEM, and it was wrong in
+        a way worth keeping written down, because it looked tidy. Referential
+        integrity was not the problem — both are junction tables and nothing
+        points at their rows. The problem is what a junction row MEANS.
+        Deleting from `rule_scopes` changed the perimeter of LIVE RULES as a
+        side effect of a gesture aimed at somebody else: nobody decided those
+        rules should reach less, and the trigger dutifully recorded a
+        perimeter decision no human had taken. And deleting from
+        `scope_members` threw away the answer to "which rules used to reach
+        it", leaving it reconstructable only out of the text snapshots — the
+        truth migrating from a relational structure into a column of prose.
+
+        So: mark, and filter on every read. The discipline that costs is that
+        every query joining `consumers` has to exclude the retired ones —
+        `_CONSUMERS_OF`, `_breadth`, `_members`, `_reaching`, `_holders`, and
+        every enumeration — which is why a static check pins it rather than
+        leaving it to memory.
+
+        WHAT FOLLOWS FROM THAT:
+
+          · the row stays and so does everything pointing at it. A rule goes
+            on DECLARING the same scopes; what changed is who is on the other
+            end. `rules_check` reports the ones that now reach nobody live;
+          · `_ALL_` stops reaching it — one clause, because that branch
+            enumerates consumers directly instead of going through membership;
           · every door that names it refuses, with a sentence that says
             RETIRED and not 'unknown' — the difference between a typo and a
-            role that ended.
+            role that ended;
+          · reviving is the same column back to NULL, and everything returns
+            as it was: no rebuild, no repair pass, nothing to get wrong.
 
         OPEN TASKS BLOCK IT, and that is not caution. A task is somebody's
         work waiting: retiring its owner would make it unreachable by every
@@ -1469,30 +1484,27 @@ class Registry:
         groups = [r[0] for r in self.cx.execute(
             "SELECT s.name FROM scope_members m JOIN scopes s ON s.id=m.scope_id "
             "WHERE m.consumer_id=? AND s.managed=0 ORDER BY s.name", (cid,))]
+        # Read BEFORE the flag moves, because afterwards the reads exclude it —
+        # which is the whole design and is also why the verdict has to be taken
+        # now if it is going to name anything.
         now = _now()
-        try:
-            self.cx.execute("BEGIN IMMEDIATE")
-            self.cx.execute(
-                "DELETE FROM rule_scopes WHERE project=? AND scope_id IN "
-                "(SELECT id FROM scopes WHERE project=? AND managed=1 AND lower(name)=lower(?))",
-                (p, p, stored))
-            self.cx.execute("DELETE FROM scope_members WHERE consumer_id=?", (cid,))
-            self.cx.execute("UPDATE consumers SET retired_at=?, retired_reason=? WHERE id=?",
-                            (now, reason, cid))
-            self.cx.execute("COMMIT")
-        except Exception:
-            self.cx.execute("ROLLBACK")
-            raise
-        orphaned = [rid for rid in aimed if not self._scopes_of(p, rid)]
+        # ONE COLUMN MOVES, AND NOTHING ELSE. Not one row of scope_members and
+        # not one row of rule_scopes is touched — see the docstring for why the
+        # first version of this method, which deleted both, was wrong.
+        self.cx.execute("UPDATE consumers SET retired_at=?, retired_reason=? WHERE id=?",
+                        (now, reason, cid))
+        orphaned = [rid for rid in aimed if not self._holders(p, rid)]
         return {"project": p, "retired": stored, "at": now, "reason": reason,
-                "left_groups": groups, "narrowed_rules": aimed,
-                "now_reaching_nobody": orphaned,
-                "note": "the row stays and the history keeps resolving — an old version "
-                        "still names it, because a version is a photograph. What is gone "
-                        "is every pointer: no scope, no membership, and _ALL_ does not "
-                        "reach it. Rules left reaching nobody are listed above and "
-                        "rules_check keeps listing them: they need a perimeter or a "
-                        "retirement of their own."}
+                "was_in_groups": groups, "losing_a_reader": aimed,
+                "now_reaching_nobody_live": orphaned,
+                "note": "MARKED, never deleted, and no membership and no perimeter was "
+                        "touched: the relations stay whole and every read excludes it "
+                        "instead. So `which rules used to reach it` is still a query, "
+                        "reviving puts everything back exactly as it was, and no rule's "
+                        "perimeter was re-decided by a gesture aimed at somebody else. "
+                        "The rules above still DECLARE the same scopes; what changed is "
+                        "who is on the other end. Those reaching nobody live are listed "
+                        "and rules_check keeps listing them."}
 
     def add_domains(self, code: str, domains) -> dict:
         """Adds domains — and UPDATES the gloss of one that already exists,
@@ -1539,7 +1551,8 @@ class Registry:
                                    "AND retired_at IS NULL", (project,)).fetchone()[0]
         return self.cx.execute(
             "SELECT COUNT(*) FROM scope_members m JOIN scopes s ON s.id=m.scope_id "
-            "WHERE s.project=? AND lower(s.name)=?",
+            "  JOIN consumers c ON c.id=m.consumer_id "
+            "WHERE s.project=? AND lower(s.name)=? AND c.retired_at IS NULL",
             (project, _fold(scope))).fetchone()[0]
 
     def _members(self, project: str, scope: str) -> list[str]:
@@ -1550,8 +1563,8 @@ class Registry:
         return [r[0] for r in self.cx.execute(
             "SELECT c.name FROM scope_members m "
             "  JOIN scopes s ON s.id=m.scope_id JOIN consumers c ON c.id=m.consumer_id "
-            " WHERE s.project=? AND lower(s.name)=? ORDER BY c.name",
-            (project, _fold(scope)))]
+            " WHERE s.project=? AND lower(s.name)=? AND c.retired_at IS NULL "
+            " ORDER BY c.name", (project, _fold(scope)))]
 
     def create_scope(self, code: str, name: str, members) -> dict:
         p = self._project(code)
@@ -1675,6 +1688,11 @@ class Registry:
             "SELECT rs.rule_id, sc.name AS scope FROM rule_scopes rs "
             "  JOIN scopes sc ON sc.id = rs.scope_id "
             " WHERE rs.project = :p AND (sc.name = :all OR EXISTS ("
+            # No `retired_at` clause here, and its absence is deliberate: this
+            # asks whether ONE NAMED consumer is a member, and a read for a
+            # retired consumer never gets this far — `_consumer()` refuses the
+            # name first. A filter nobody can ever see fail is not a filter,
+            # and this file does not keep those.
             "   SELECT 1 FROM scope_members m JOIN consumers k ON k.id = m.consumer_id "
             "    WHERE m.scope_id = rs.scope_id AND lower(k.name) = :c))",
             {"p": p, "c": _fold(consumer), "all": ALL}).fetchall()
@@ -1791,7 +1809,8 @@ class Registry:
             "SELECT DISTINCT c.name FROM rule_scopes rs "
             "  JOIN scope_members m ON m.scope_id=rs.scope_id "
             "  JOIN consumers c ON c.id=m.consumer_id "
-            " WHERE rs.project=? AND rs.rule_id=? ORDER BY c.name", (p, rid)).fetchall()
+            " WHERE rs.project=? AND rs.rule_id=? AND c.retired_at IS NULL "
+            " ORDER BY c.name", (p, rid)).fetchall()
         return [r[0] for r in rows]
 
     def search(self, code: str, text: str, consumer: str) -> dict:

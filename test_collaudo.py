@@ -3114,10 +3114,13 @@ def a_retired_consumer_keeps_its_row_and_loses_every_pointer():
     there — where `_ALL_` went on reaching it, so it went on being bound by
     every universal rule. That is not retired.
 
-    The row stays because the history has to keep resolving, and it can stay
-    safely for a reason worth knowing: `rule_versions` stores who a rule
-    reached as TEXT. A photograph, not a join — so removing the membership
-    today cannot rewrite what was true yesterday."""
+    IT MARKS AND DELETES NOTHING. One column moves; not one row of
+    scope_members and not one row of rule_scopes is touched, and every read
+    excludes the retired one instead. The first version of this deleted both
+    junctions, and that was wrong in a way this case now pins: deleting from
+    rule_scopes changed the perimeter of LIVE RULES as a side effect of a
+    gesture aimed at somebody else, and deleting from scope_members threw away
+    the answer to "which rules used to reach it"."""
     out = R.create_project("Retire bench",
                            [{"name": "Architect"}, {"name": "Advisory"},
                             {"name": "FP-Old", "kind": "skill"}], {"VA": "vault"})
@@ -3126,6 +3129,8 @@ def a_retired_consumer_keeps_its_row_and_loses_every_pointer():
     wide = R.propose(RB, "VA", "R", "Universal", "Body.", ["*"], "why", "Architect")["id"]
     aimed = R.propose(RB, "VA", "R", "Only for the skill", "Body.", ["FP-Old"],
                       "why", "Architect")["id"]
+    grouped = R.propose(RB, "VA", "R", "For the group", "Body.", ["deliberativi"],
+                        "why", "Architect")["id"]
     R.approve(RB, R.batch(RB)["digest"])
     assert {wide, aimed} <= {x["id"] for x in R.list_rules(RB, "FP-Old")["rules"]}
     photo = R.cx.execute("SELECT consumers FROM rule_versions WHERE project='Retire bench' "
@@ -3143,11 +3148,28 @@ def a_retired_consumer_keeps_its_row_and_loses_every_pointer():
         assert "open task" in str(e) and tid in str(e), e
     R.task_drop(RB, tid, "bench cleanup", "Architect")
 
+    # COUNTED BEFORE AND AFTER: the relations must come through untouched, and
+    # no rule may gain a version — a rule whose perimeter nobody re-decided
+    # must not have a new photograph taken of it.
+    def rows():
+        return (R.cx.execute("SELECT COUNT(*) FROM rule_scopes").fetchone()[0],
+                R.cx.execute("SELECT COUNT(*) FROM scope_members").fetchone()[0],
+                R.cx.execute("SELECT COUNT(*) FROM rule_versions WHERE project="
+                             "'Retire bench'").fetchone()[0])
+    before = rows()
+    declared = R.cx.execute("SELECT scopes FROM rule_versions WHERE project='Retire bench' "
+                            "AND rule_id=? ORDER BY version DESC LIMIT 1", (aimed,)).fetchone()[0]
+
     verdict = R.retire_consumer(RB, "fp-old", "the skill was rewritten")
     assert verdict["retired"] == "FP-Old", verdict          # stored spelling comes back
-    assert verdict["left_groups"] == ["deliberativi"], verdict
-    assert verdict["narrowed_rules"] == [aimed], verdict
-    assert verdict["now_reaching_nobody"] == [aimed], verdict
+    assert rows() == before, f"the retirement wrote in the relations: {before} -> {rows()}"
+    assert R.cx.execute("SELECT scopes FROM rule_versions WHERE project='Retire bench' "
+                        "AND rule_id=? ORDER BY version DESC LIMIT 1",
+                        (aimed,)).fetchone()[0] == declared, \
+        "a rule's declared perimeter was re-decided by a gesture aimed at a consumer"
+    assert verdict["was_in_groups"] == ["deliberativi"], verdict
+    assert verdict["losing_a_reader"] == [aimed], verdict
+    assert verdict["now_reaching_nobody_live"] == [aimed], verdict
 
     info = R.project_info(RB)
     live = [c["name"] for c in info["consumers"]]
@@ -3156,8 +3178,11 @@ def a_retired_consumer_keeps_its_row_and_loses_every_pointer():
     # _ALL_ STOPS REACHING IT, which is the half a flag alone would not buy.
     allsc = next(s for s in info["scopes"] if s["name"] == ALL)
     assert allsc["breadth"] == 2 and "FP-Old" not in allsc["members"], allsc
-    assert next(s for s in info["scopes"]
-                if s["name"] == "deliberativi")["members"] == ["Architect"]
+    delib = next(s for s in info["scopes"] if s["name"] == "deliberativi")
+    assert delib["members"] == ["Architect"], delib
+    # BREADTH is what orders every reading, so a retired member left in the
+    # count would push a rule up the list for everybody.
+    assert delib["breadth"] == 1, delib
     # AND THE PHOTOGRAPH IS UNTOUCHED.
     assert R.cx.execute("SELECT consumers FROM rule_versions WHERE project='Retire bench' "
                         "AND rule_id=? ORDER BY version LIMIT 1",
@@ -3191,14 +3216,37 @@ def a_retired_consumer_keeps_its_row_and_loses_every_pointer():
     except RulesError as e:
         assert "revive" in str(e), e
 
+    # THE NEXT PHOTOGRAPH DOES NOT NAME IT, and the old one still does. The
+    # snapshot is computed when a version is WRITTEN, so a rule amended after
+    # the retirement records who it reaches NOW, while every version taken
+    # before goes on saying what was true then.
+    R.amend(RB, wide, R._version("Retire bench", wide),
+            "a typo, nothing to do with anybody leaving", title="Universal, fixed")
+    # BOTH ROUTES: the universal one, and the one that arrives through a
+    # GROUP the retired consumer belonged to — they are two branches of the
+    # snapshot query and a filter on one is not a filter on the other.
+    R.amend(RB, grouped, R._version("Retire bench", grouped),
+            "a typo here too", title="For the group, fixed")
+    for rid in (wide, grouped):
+        versions = [r[0] for r in R.cx.execute(
+            "SELECT consumers FROM rule_versions WHERE project='Retire bench' "
+            "AND rule_id=? ORDER BY version", (rid,))]
+        assert "FP-Old" in versions[0], (rid, versions[0])
+        assert "FP-Old" not in versions[-1], (rid, versions[-1])
+
     back = R.add_consumers(RB, [{"name": "fp-old", "revive": True}])
     assert back["revived"] == ["FP-Old"], back
     assert "FP-Old" in [c["name"] for c in R.project_info(RB)["consumers"]]
+    # EVERYTHING COMES BACK, and that is what marking instead of deleting buys:
+    # one column to NULL, no rebuild, no repair pass that could get it wrong.
     reached = {x["id"] for x in R.list_rules(RB, "FP-Old")["rules"]}
-    assert wide in reached, "_ALL_ did not reach it again"
-    # And the pointer somebody dropped stays dropped: reviving is not undoing
-    # every consequence, it is putting the consumer back.
-    assert aimed not in reached, "a perimeter came back on its own"
+    assert {wide, aimed, grouped} <= reached, \
+        f"the revived consumer came back diminished: {reached}"
+    assert R.project_info(RB)["scopes"], "scopes survived"
+    assert "FP-Old" in next(s for s in R.project_info(RB)["scopes"]
+                            if s["name"] == "deliberativi")["members"], \
+        "the group membership did not come back"
+    assert rows()[:2] == before[:2], "reviving wrote in the relations"
     v = [(x[0], x[1]) for x in R.cx.execute(
         "SELECT version, action FROM consumer_versions WHERE project='Retire bench' "
         "AND consumer='FP-Old' ORDER BY version")]
