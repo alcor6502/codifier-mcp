@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/versione-2.0.1-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-29%20tool-8A63D2.svg">
+<img src="https://img.shields.io/badge/versione-2.1.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-29%20tool-8A63D2.svg">
 
 **Le regole di un progetto in un registro invece che sparse nei Markdown — così
 una chat può rispondere in una chiamata a «sotto quali regole sto?».**
@@ -146,6 +146,42 @@ rules_list(project="<codice>", consumer="tax monitor")
 
 `via` dice *perché* una regola è nel tuo elenco, che è esattamente
 l'informazione che serve per decidere se sta nel posto giusto.
+
+## La pagina di amministrazione
+
+Approvare una regola non è lo stesso gesto che scriverla, e dalla v2.1 i due
+non avvengono più nello stesso posto. Una chat propone; una persona approva, in
+un browser, sulla LAN.
+
+La pagina la serve lo stesso processo, su una seconda porta — 9443 per difetto
+— perché due processi sullo stesso SQLite non condividono il lock del motore.
+Mostra il lotto pendente **intero e affiancato**, ogni proposta col perché è
+stata depositata: è lì che tre proposte che dicono la stessa cosa si
+riconoscono. Si spunta cosa entra, si dà una ragione per cosa no, e la master
+si digita **una volta per azione** — quattro regole non sono quattro password,
+e una password ripetuta quattro volte si digita senza guardare.
+
+Una proposta che ne sostituisce un'altra lo dice **prima** che tu decida, con
+l'ID della vittima e il suo titolo attuale: approvarla la ritira nella stessa
+transazione, e chi approva legge le due metà della mossa.
+
+Il digest copre quello che stavi **guardando**, non quello che hai spuntato. Se
+una proposta arriva mentre leggi, l'azione torna respinta con la pagina com'è
+adesso — lo stesso contratto che `rules_approve` ha sempre avuto.
+
+Accanto, quattro letture che non scrivono niente: le regole in forza per un
+consumer, esattamente come le legge la sua chat, brief in testa; il dettaglio
+di una regola con la sua storia e il diff fra due versioni; i pendenti e la
+coda delle scadenze; e lo stato del registro.
+
+Una master, dal template, e un'ora di inattività. Un riavvio del servizio
+invalida tutte le sessioni, di proposito: il segreto della sessione nasce a
+caso a ogni boot e non è scritto da nessuna parte.
+
+**La superficie MCP non si è mossa in questa versione — non serve
+riconnettere.** `rules_approve`, `rules_renew` e `rules_promote` sono ancora
+tool, dietro il codice di manutenzione, e ci restano finché la pagina non li
+sostituisce.
 
 ## Installazione
 

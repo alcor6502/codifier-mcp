@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-2.0.1-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-29%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-2.1.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-29%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -144,6 +144,41 @@ rules_list(project="<code>", consumer="tax monitor")
 
 `via` says *why* a rule is in your list, which is exactly what you need in order
 to decide whether it belongs somewhere else.
+
+## The administration page
+
+Approving a rule is not the same act as writing one, and from v2.1 they no
+longer happen in the same place. A chat proposes; a person approves, in a
+browser, on the LAN.
+
+The page is served by the same process, on a second port — 9443 by default —
+because two processes on one SQLite database do not share the engine's lock.
+It shows the pending batch **whole and side by side**, each proposal with the
+reason it was filed: that is where three proposals saying the same thing
+become visible as what they are. You tick what goes in, give a reason for what
+does not, and type the master **once for the action** — four rules are not four
+passwords, and a password typed four times is typed without looking.
+
+A proposal that supersedes a rule says so **before** you decide, with the
+victim's ID and its current title: approving it retires that rule in the same
+transaction, and whoever approves reads both halves of the move.
+
+The digest covers what you were **looking at**, not what you ticked. If a
+proposal arrives while you read, the action comes back refused with the page as
+it now is — the same contract `rules_approve` has always had.
+
+Beside it, four readings that write nothing: the rules in force for a chosen
+consumer, exactly as that consumer's chat reads them, brief first; a rule's
+detail with its history and the diff between two versions; the pendings and the
+expiring queue; and the state of the registry.
+
+One master, from the template, and one hour of inactivity. A restart of the
+service invalidates every session, deliberately: the session secret is
+generated at boot and stored nowhere.
+
+**The MCP surface did not move in this version — no reconnection is needed.**
+`rules_approve`, `rules_renew` and `rules_promote` are still tools, behind the
+maintenance code, and stay there until the page replaces them.
 
 ## Installing
 

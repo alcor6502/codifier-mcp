@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Explicit, never COPY *.py: with a wildcard the three test files end up inside
 # the image, and an image should carry what it runs and nothing else.
-COPY rules.py server.py preflight.py entrypoint.sh reference-guide.md ./
+COPY rules.py server.py web.py preflight.py entrypoint.sh reference-guide.md ./
 RUN chmod +x entrypoint.sh
 
 # OAuth store (tokens, registrations) on a persistent volume: it survives
@@ -42,5 +42,8 @@ ENV FASTMCP_LOG_LEVEL=WARNING
 
 # The database mounts on /db, state (tokens) on /data.
 # The process stays ROOT and the database files are 0644 — see entrypoint.sh.
-# No EXPOSE: the Funnel inside the container handles ingress.
+# No EXPOSE, and it says nothing about reachability either way: the MCP port
+# is served by the Funnel inside the container, and the administration UI's
+# port is published by the template's port mapping. EXPOSE would only be a
+# second place for a number that already lives in web.py.
 CMD ["/bin/sh", "/app/entrypoint.sh"]

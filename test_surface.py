@@ -903,6 +903,22 @@ for f in ("rules.py", "server.py", "preflight.py", "entrypoint.sh",
     ok(any(re.search(rf"\b{re.escape(f)}\b", l) for l in DOCKER_COPIES),
        f"Dockerfile: {f} is copied in")
 
+# And the same thing DERIVED, because the list above is written by hand and a
+# module added later is a module nobody remembers to add to it. Every local
+# module server.py imports must be in the image: left out, the container dies
+# at import with a ModuleNotFoundError, the suites all pass, and the failure
+# arrives at the first Apply — after the tag. web.py was exactly that, and
+# this check is what found it.
+_LOCAL = {a.name.split(".")[0] for n in SERVER_TREE.body if isinstance(n, ast.Import)
+          for a in n.names} | {n.module.split(".")[0] for n in SERVER_TREE.body
+                               if isinstance(n, ast.ImportFrom) and n.module}
+_LOCAL = {m for m in _LOCAL if os.path.exists(os.path.join(HERE, f"{m}.py"))}
+ok(len(_LOCAL) >= 2, f"server.py imports {len(_LOCAL)} modules of this repository",
+   sorted(_LOCAL))
+for _m in sorted(_LOCAL):
+    ok(any(re.search(rf"\b{re.escape(_m)}\.py\b", l) for l in DOCKER_COPIES),
+       f"Dockerfile: {_m}.py is copied in — server.py imports it", DOCKER_COPIES)
+
 # And the same thing derived, so the list above is a second opinion and not the
 # only one. A tool that serves a file the image does not carry answers with a
 # fault in a chat instead of a red line here — this project has paid that once,
@@ -1241,6 +1257,8 @@ ok("pip install --no-deps -r requirements.txt" in _WF,
 
 print("\n== the template is publishable ==")
 
+import web as _webmod                                           # noqa: E402
+
 TEMPLATE_PATH = os.path.join(HERE, "codifier-mcp.xml")
 ok(os.path.exists(TEMPLATE_PATH), "the template is named after the repository")
 TEMPLATE = open(TEMPLATE_PATH, encoding="utf-8").read()
@@ -1255,8 +1273,28 @@ ok("<Repository>ghcr.io/" in TEMPLATE,
 ok("<Icon>" in TEMPLATE and os.path.exists(os.path.join(HERE, "codifier-icon.png")),
    "the icon the template links to is IN the repository — a raw URL that 404s "
    "is the twin's oldest open item")
-ok("<WebUI/>" in TEMPLATE,
-   "no WebUI: the service listens on 127.0.0.1 and has no web interface")
+# There IS a web interface now, and the field that used to be empty because
+# there was none has to point at it: the icon in Unraid's dashboard is how a
+# person finds a page whose port they will not remember. It is the UI's port,
+# never the MCP's — the MCP has no page, and an icon that opened it would open
+# an OAuth challenge with no explanation.
+ok("<WebUI/>" not in TEMPLATE,
+   "the WebUI field is no longer empty: there is a page to point at")
+ok(f"[PORT:{_webmod.DEFAULT_PORT}]" in re.search(r"<WebUI>(.*?)</WebUI>", TEMPLATE).group(1)
+   if re.search(r"<WebUI>(.*?)</WebUI>", TEMPLATE) else False,
+   "and it points at the UI's port, substituted by Unraid",
+   re.search(r"<WebUI>(.*?)</WebUI>", TEMPLATE).group(1)
+   if re.search(r"<WebUI>(.*?)</WebUI>", TEMPLATE) else "absent")
+# And the port has to be PUBLISHED, or the sentence "you get there with
+# IP:port" is false. On a bridge network Docker forwards a published port to
+# the container's address; with no mapping in the template nothing is
+# forwarded at all, the page answers only inside the container, and the
+# failure looks exactly like a service that did not start.
+_PORTS = re.findall(r'<Config[^>]*Type="Port"[^>]*Target="(\d+)"'
+                    r'|<Config[^>]*Target="(\d+)"[^>]*Type="Port"', TEMPLATE)
+_PORTS = sorted({a or b for a, b in _PORTS})
+ok(_PORTS == [str(_webmod.DEFAULT_PORT)],
+   f"the template publishes the UI's port, and only that one", _PORTS)
 
 # The empty ELEMENT, not the deleted element: <PostArgs/> is what Unraid writes
 # by itself for a field nobody filled in, every container in service has it,
@@ -1269,9 +1307,37 @@ ok("<PostArgs/>" in TEMPLATE,
 # Unraid does not propagate new variables to containers already installed, so a
 # variable introduced later means editing every existing install by hand. These
 # go in now, inert or not.
-for var in ("PROVISIONAL_DAYS", "WEB_PORT",
+for var in ("PROVISIONAL_DAYS", "WEB_PORT", "WEB_MASTER_CODE", "WEB_ACTION_CAP",
             "LOG_LEVEL", "ALLOWED_CIDRS", "DB_PATH", "BACKUP_DIR", "ADMIN_ACCESS_CODE"):
     ok(f'Target="{var}"' in TEMPLATE, f"template declares {var}")
+
+# The master is the TWIN of ADMIN_ACCESS_CODE, and the spec says so in those
+# words: mandatory, masked, and blocked at boot while it is a placeholder. It
+# is the one new variable that cannot be "born optional with a working default
+# in the code" — a default for a master IS the placeholder the preflight
+# refuses. Required in the template moves the failure from a container that
+# will not boot to a form that will not save.
+_MASTER_FIELD = re.search(r'<Config[^>]*Target="WEB_MASTER_CODE"[^>]*>', TEMPLATE)
+ok(_MASTER_FIELD is not None, "the master is a field of the template")
+if _MASTER_FIELD:
+    _f = _MASTER_FIELD.group(0)
+    ok('Mask="true"' in _f, "and it is masked, like the maintenance code", _f[:80])
+    ok('Required="true"' in _f,
+       "and required: a master with a working default is the open door", _f[:80])
+# The ceiling is the other kind of new variable: optional, with the default in
+# the code, because Unraid does not propagate new variables to containers that
+# are already installed.
+_CAP_FIELD = re.search(r'<Config[^>]*Target="WEB_ACTION_CAP"[^>]*>', TEMPLATE)
+ok(_CAP_FIELD is not None and 'Required="false"' in _CAP_FIELD.group(0),
+   "the per-action ceiling is optional, with its default in the code",
+   _CAP_FIELD.group(0)[:80] if _CAP_FIELD else "absent")
+# And the field that promised a read-only interface that would read a
+# VACUUM INTO snapshot no longer says any of that: it was true of a design
+# that was not built, and the one that was built writes.
+for _dead in ("not built yet", "read-only web interface", "VACUUM INTO snapshot",
+              "unpublishable by construction"):
+    ok(_dead not in TEMPLATE,
+       f"the template no longer promises: {_dead!r}")
 
 # Every variable the service reads through env() without a default is one the
 # service cannot start without.
