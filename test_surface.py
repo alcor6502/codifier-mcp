@@ -1361,9 +1361,10 @@ for residue in ("marlin-kelvin", "svc-a2", "/mnt/cache/Claude", "160.79.104.0/21
 
 ok("<Repository>ghcr.io/" in TEMPLATE,
    "the template points at ghcr, not at a local image")
-ok("<Icon>" in TEMPLATE and os.path.exists(os.path.join(HERE, "codifier-icon.png")),
-   "the icon the template links to is IN the repository — a raw URL that 404s "
-   "is the twin's oldest open item")
+# The icon used to be checked here, against a filename written by hand. It is
+# checked in its own section further down instead, where the template's URL,
+# server.py's ICON_URL, the mimeType and the file on disk are held against
+# EACH OTHER — there is no hand copy of the name left to go stale.
 # There IS a web interface now, and the field that used to be empty because
 # there was none has to point at it: the icon in Unraid's dashboard is how a
 # person finds a page whose port they will not remember. It is the UI's port,
@@ -1781,6 +1782,61 @@ for _t in TOOLS:
 ok(GUIDE_SRC.count("legend of the domains present") == 1,
    "the manual pins the legend, exactly once",
    GUIDE_SRC.count("legend of the domains present"))
+
+print("\n== one icon URL, two files, and a check between them ==")
+
+# The string lives in server.py, which hands it to FastMCP for the consent
+# page, and in the Unraid template, which puts it on the container. NOTHING
+# links the two, so two hand copies of one URL have an expiry date — this is
+# what compares them instead of hoping.
+#
+# It reads the ASSIGNMENT and then the CALL, because the two failures are
+# different in kind: a constant left behind after the argument was dropped
+# keeps a string search perfectly happy while the server passes no icon at
+# all.
+_ICON_ASSIGNS = [n for n in SERVER_TREE.body if isinstance(n, ast.Assign)
+                 and any(getattr(t, "id", "") == "ICON_URL" for t in n.targets)]
+ok(len(_ICON_ASSIGNS) == 1, "ICON_URL is assigned exactly once, at module level",
+   len(_ICON_ASSIGNS))
+_ICON_URL = ast.literal_eval(_ICON_ASSIGNS[0].value) if len(_ICON_ASSIGNS) == 1 else None
+
+_ICON_XML = re.search(r"<Icon>\s*(\S+?)\s*</Icon>", TEMPLATE)
+ok(_ICON_XML is not None, "the Unraid template still declares an <Icon>")
+ok(_ICON_XML is not None and _ICON_URL == _ICON_XML.group(1),
+   "the icon of the consent page and the icon of the container are the SAME "
+   "url — one image, or the two drift and nobody is told",
+   f"{_ICON_URL} vs {_ICON_XML.group(1) if _ICON_XML else None}")
+
+# And the constant has to REACH FastMCP. A name nothing passes is a comment
+# with a colon in it.
+_FASTMCP_CALL = next((n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
+                      and ast.unparse(n.func) == "FastMCP"), None)
+ok(_FASTMCP_CALL is not None, "FastMCP is constructed in server.py")
+_ICONS_KW = next((k.value for k in (_FASTMCP_CALL.keywords if _FASTMCP_CALL else [])
+                  if k.arg == "icons"), None)
+ok(_ICONS_KW is not None,
+   "and it is given an `icons` argument — without it the constant above is "
+   "decoration and the consent page keeps FastMCP's logo")
+_ICONS_SRC = ast.unparse(_ICONS_KW) if _ICONS_KW is not None else ""
+ok("ICON_URL" in _ICONS_SRC,
+   "and that argument carries ICON_URL, not a second copy of the string",
+   _ICONS_SRC[:80] or "(no icons argument)")
+# The mimeType is a third statement ABOUT the same file, so it can be wrong on
+# its own while both URLs agree.
+_EXT_MIME = {".png": "image/png", ".svg": "image/svg+xml",
+             ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+_WANT = _EXT_MIME.get(os.path.splitext(_ICON_URL or "")[1].lower())
+ok(_WANT is not None and f'"{_WANT}"' in _ICONS_SRC.replace("'", '"'),
+   f"the declared mimeType matches the file actually pointed at ({_WANT})",
+   _ICONS_SRC[:80])
+# And the file is in the repository, under the name the URL asks for. The URL
+# serves it from `main`, so a missing file is not an error anywhere: it is a
+# raw URL that 404s and a broken image on a page nobody looks at twice. The
+# name is DERIVED from the URL and not written here, which is the point — a
+# hand copy of the filename is one more thing to keep equal.
+ok(bool(_ICON_URL) and os.path.exists(os.path.join(HERE, os.path.basename(_ICON_URL))),
+   "the image the URL points at is IN this repository, under that exact name",
+   _ICON_URL)
 
 print("\n== the task log: nine tools, one of them maintenance ==")
 

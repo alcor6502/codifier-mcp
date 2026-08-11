@@ -75,6 +75,9 @@ from pathlib import Path
 import uvicorn
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.github import GitHubProvider
+# Imported BY NAME on purpose: `mcp` is the name of the server object below,
+# and importing the package would shadow it.
+from mcp.types import Icon
 
 # The common engine: the gate, the refusal conversion and the config helpers
 # live there since the adoption, pinned to a TAG in requirements.txt. The
@@ -170,7 +173,37 @@ auth = GitHubProvider(
     require_authorization_consent=True,
 )
 
-mcp = FastMCP("codifier-mcp", auth=auth)
+# The icon, and — the part that gets forgotten — where it is and is not seen.
+#
+# WHERE IT IS SEEN TODAY: the OAuth CONSENT PAGE, the one that comes up when
+# the connector is added or reconnected. fastmcp reads the field there —
+# `oauth_proxy/consent.py` takes `icons[0].src` and hands it to the logo — so
+# this replaces FastMCP's own logo with ours. That page's default CSP is
+# `img-src https: data:`, which is why a plain https URL is enough: a base64
+# data URI would buy nothing and would ride on every initialize response.
+#
+# WHERE IT IS NOT SEEN, and this one is not ours to fix: the connector list in
+# Claude, which ignores `serverInfo.icons` altogether. The spec has carried the
+# field since revision 2025-11-25 (SEP-973); the client does not read it yet
+# (anthropics/claude-ai-mcp#152, still open). Serving /favicon.ico and putting
+# a <link rel="icon"> on a root page were both tried by others and are ignored
+# as well, so there is nothing left here to try. The icon shown in that list
+# appears to be derived from the DOMAIN, which under a Funnel is *.ts.net and
+# therefore Tailscale's — no line in this repository can reach it.
+#
+# It is set anyway: it costs one argument, it wins the consent page now, and
+# the day the client starts reading the field the list follows without anybody
+# touching anything.
+#
+# THE URL IS NOT A SECOND COPY. It is the same string the Unraid template uses
+# for the container icon, and nothing links the two files, so `icon_check` in
+# test_surface compares them rather than trusting them to stay equal.
+ICON_URL = ("https://raw.githubusercontent.com/alcor6502/codifier-mcp"
+            "/main/codifier-icon.png")
+
+mcp = FastMCP("codifier-mcp", auth=auth,
+              icons=[Icon(src=ICON_URL, mimeType="image/png",
+                          sizes=["256x256"])])
 
 # A malformed call must not print what it carried, and this line is the whole
 # cure. fastmcp validates arguments BEFORE any tool of ours runs, and logs what
