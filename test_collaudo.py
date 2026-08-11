@@ -890,6 +890,48 @@ case("the sanitisation reaches the briefs, the glosses and a project being born"
      the_sanitisation_reaches_every_door)
 
 
+def a_kind_is_declared_repaired_and_never_written_in_silence():
+    """THE FIELD NEXT DOOR TO THE GLOSS, and it had the same defect: on a
+    consumer that already existed the kind was dropped without a word. A skill
+    entered as a chat could then only be repaired by creating a new consumer
+    and abandoning the old — which orphans every rule aimed at it, so a typo
+    cost a piece of the corpus.
+
+    Three properties, and the third is the one that makes the fix safe."""
+    out = R.add_consumers(FP, ["Plain One", {"name": "A Skill", "kind": "SKILL"}])
+    assert out["added_kinds"] == {"Plain One": "chat", "A Skill": "skill"}, out
+    # A bare name is a chat, and the case of the KIND is not data: a closed
+    # set of two written three ways is one value, unlike a NAME, which is the
+    # author's and comes back byte for byte.
+    assert "A Skill" in out["added"], out
+    # THE REPAIR: an explicit kind on an existing consumer corrects it, says
+    # so, and the trigger versions it.
+    out = R.add_consumers(FP, [{"name": "plain one", "kind": "skill"}])
+    assert out["kind_set"] == ["Plain One: chat -> skill"], out
+    assert out["already_there"] == [], out
+    v = [r[0] for r in R.cx.execute(
+        "SELECT kind FROM consumer_versions WHERE project=? AND consumer='Plain One' "
+        "ORDER BY version", (NAME_FP,))]
+    assert v == ["chat", "skill"], v
+    # AND THE SILENT WRITE, INVERTED: a bare name says NOTHING about the kind,
+    # so naming an existing skill in a plain list must not demote it back.
+    out = R.add_consumers(FP, ["Plain One"])
+    assert out["kind_set"] == [] and out["already_there"] == ["Plain One"], out
+    assert R.cx.execute("SELECT kind FROM consumers WHERE project=? AND name='Plain One'",
+                        (NAME_FP,)).fetchone()[0] == "skill", "a bare name demoted a skill"
+    for bad in ("robot", "Chat "):
+        try:
+            R.add_consumers(FP, [{"name": "Plain One", "kind": bad}])
+            if bad.strip().lower() not in ("chat", "skill"):
+                raise AssertionError(f"kind {bad!r} was accepted")
+        except RulesError as e:
+            assert "it must be one of" in str(e) and "chat" in str(e) and "skill" in str(e), e
+
+
+case("a kind is declared on creation, repairable after it, and never written "
+     "in silence", a_kind_is_declared_repaired_and_never_written_in_silence)
+
+
 def reading_expands_the_citation():
     """The gloss is GENERATED, never stored: it cannot go stale, and it carries
     the STATE of what it points at."""

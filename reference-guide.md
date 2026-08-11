@@ -34,6 +34,20 @@ database's — a consumer's singleton, or `_ALL_` — and it is not yours to edi
 `managed: false` is a group you made. `_ALL_` is a scope too, and the only one whose membership is computed:
 it must reach consumers that do not exist yet.
 
+**SPELLING IS DATA; A TYPE IS NOT.** The two look like the same question and
+are opposite ones, so the line is worth reading once:
+
+- a **NAME** — a consumer, a scope — is stored exactly as it was first given
+  and comes back byte for byte, `FP-Update-Tax` and all. It is somebody's
+  choice. Identity is the casefolded form, so `Architect` and `architect` are
+  one consumer with one spelling, never two rows;
+- a **TYPE or a MODE** — `kind` (`chat`/`skill`), the date `tasks_range`
+  filters `on`, the `_ALL_` aliases — is a closed set. There a second spelling
+  buys nothing and costs a comparison that can disagree with itself, so it is
+  folded: `SKILL`, `Skill` and `skill` are one value, stored lower-case. A
+  rule's `type` is the same idea with the other case: `r`, `R` — one value,
+  stored `R`.
+
 **A rule points to a SET of scopes.** Widening it is one more row — the group it
 already belonged to is not touched, because that group has other tenants who
 have nothing to do with this rule.
@@ -537,8 +551,12 @@ too, as it always did.
   name or an object, and the object is how the KIND is said:** `"Advisory"` is
   a chat, `{"name": "FP-Update-Tax", "kind": "skill"}` is a skill. It is
   stored and it comes back in `rules_project_info` — chat and skill are DATA,
-  not a convention held in somebody's head. A list of bare strings makes
-  everything a chat, silently. A **domain's gloss** is not write-once: adding
+  not a convention held in somebody's head — and the verdict reports
+  `added_kinds`, so a list of bare strings cannot make everything a chat in
+  silence. **An explicit kind on a consumer that already exists REPAIRS it**
+  (`kind_set`, versioned by trigger); a bare name says nothing about the kind
+  and changes nothing, so naming an existing skill in a plain list leaves it
+  a skill. A **domain's gloss** is not write-once: adding
   a domain that already exists with a different description UPDATES it, and
   the verdict says `updated` next to `added` rather than pretending nothing
   happened. A consumer may be born WITH its `brief` — its
@@ -549,7 +567,15 @@ too, as it always did.
   it as one would fatten the corpus the expiry mechanism keeps small. Names
   keep the SPELLING they were first given, byte for byte; identity is the
   casefolded form, so `Architect` and `architect` are one consumer — and a
-  consumer is never renamed: create the new one, retire the old.
+  consumer is never renamed.
+  ⚠ **"Retire the old" is doctrine with no mechanism yet.** There is no
+  `retired` flag on a consumer, so today the nearest thing is: create the new
+  one, narrow every rule off the old, and leave it there. It still exists, it
+  still shows in `rules_project_info`, and — this is the part that bites —
+  `_ALL_` still reaches it, because `_ALL_` is computed over every consumer
+  that exists. Said out loud rather than left as a promise: an instruction
+  pointing at a door nobody can open is how a manual starts lying. Written up
+  in `Decisioni aperte.md`.
 - **The master operations are NOT tools.** Creating a project, the registry
   index (codes included) and rekey live in the administration UI, behind the
   master, so no master-level secret ever travels in a conversation. The

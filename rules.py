@@ -1171,24 +1171,37 @@ class Registry:
 
     @staticmethod
     def _normalise_consumers(consumers) -> list[tuple[str, str, str]]:
-        """Each item may carry its BRIEF too — creating a consumer and giving
-        it its identity is one gesture, not two calls."""
+        """Each item may carry its BRIEF and its KIND — creating a consumer and
+        giving it its identity is one gesture, not three calls.
+
+        `kind` COMES BACK EMPTY WHEN IT WAS NOT GIVEN, and that distinction is
+        the whole point of this shape. It used to default to 'chat' right here,
+        which threw away the difference between "this is a chat" and "the
+        caller said nothing" — so a later call naming an existing SKILL as a
+        bare string would have silently demoted it. The default is applied
+        where a row is CREATED, which is the only place it means anything."""
         out: list[tuple[str, str, str]] = []
         for item in consumers or []:
             brief = ""
             if isinstance(item, str):
-                cname, kind = item, "chat"
+                cname, kind = item, ""
             elif isinstance(item, dict):
-                cname, kind = item.get("name", ""), item.get("kind", "chat")
+                cname, kind = item.get("name", ""), item.get("kind", "")
                 brief = item.get("brief") or ""
             else:
                 vals = list(item)
                 cname = vals[0] if vals else ""
-                kind = vals[1] if len(vals) > 1 else "chat"
+                kind = vals[1] if len(vals) > 1 else ""
                 brief = vals[2] if len(vals) > 2 else ""
             cname = _valid_name(cname, "consumer")
-            kind = (kind or "chat").strip().lower()
-            if kind not in KINDS:
+            # A NAME keeps its spelling; a KIND does not have one. The rule is
+            # worth stating because it looks like an inconsistency and is the
+            # opposite: `Architect` is somebody's choice and is data, while
+            # `SKILL`, `Skill` and `skill` are one value written three ways —
+            # a closed set of two, where a second spelling buys nothing and
+            # costs a comparison that can disagree with itself.
+            kind = (kind or "").strip().lower()
+            if kind and kind not in KINDS:
                 raise RulesError(f"kind {kind!r}: it must be one of {', '.join(KINDS)}")
             if _fold(cname) in ALL_ALIASES or cname == ALL:
                 raise RulesError(f"{ALL} is reserved and is not a consumer name")
@@ -1257,10 +1270,10 @@ class Registry:
         # keep itself alive.
         cons = [(n, k, self._prose(p, f"brief of {n!r}", b))
                 for n, k, b in self._normalise_consumers(consumers)]
-        added, brief_set, already = [], [], []
+        added, added_kinds, brief_set, kind_set, already = [], {}, [], [], []
         for cname, kind, brief in cons:
             row = self.cx.execute(
-                "SELECT id, name FROM consumers WHERE project=? AND lower(name)=?",
+                "SELECT id, name, kind FROM consumers WHERE project=? AND lower(name)=?",
                 (p, _fold(cname))).fetchone()
             if row:
                 # The consumer EXISTS — under the stored spelling, whatever
@@ -1268,11 +1281,29 @@ class Registry:
                 # is never touched, because spelling is data. And the no-op
                 # is DECLARED, stored spelling included: an `added: []` that
                 # said nothing was how a gloss went missing in silence once.
+                # THE KIND IS WRITTEN HERE TOO, and it is the same defect the
+                # gloss had — the field next door, found the same way. A skill
+                # entered as a chat could only be repaired by creating a new
+                # consumer and abandoning the old, which orphans every rule
+                # aimed at it: a typo would have cost a piece of the corpus.
+                #
+                # Only an EXPLICIT kind moves it. A bare string says nothing
+                # about the kind, so naming an existing skill in a plain list
+                # leaves it a skill instead of quietly demoting it — the
+                # silent write, inverted, which is what made the gloss defect
+                # worth fixing rather than tolerating.
+                touched = False
+                if kind and kind != row["kind"]:
+                    self.cx.execute("UPDATE consumers SET kind=? WHERE id=?",
+                                    (kind, row["id"]))
+                    kind_set.append(f"{row['name']}: {row['kind']} -> {kind}")
+                    touched = True
                 if brief:
                     self.cx.execute("UPDATE consumers SET brief=? WHERE id=?",
                                     (brief, row["id"]))
                     brief_set.append(row["name"])
-                else:
+                    touched = True
+                if not touched:
                     already.append(row["name"])
                 continue
             if self.cx.execute("SELECT 1 FROM scopes WHERE project=? AND lower(name)=?",
@@ -1280,12 +1311,22 @@ class Registry:
                 raise RulesError(
                     f"a scope named {cname!r} already exists: a consumer and a scope share "
                     "one namespace, because every consumer gets a scope with its own name")
+            # The default lands HERE, on creation, which is the only place it
+            # means anything: an item that said nothing about the kind is a
+            # chat, and one that said nothing about an EXISTING consumer's
+            # kind leaves it alone.
             self.cx.execute("INSERT INTO consumers (project, name, kind, brief, created) "
-                            "VALUES (?,?,?,?,?)", (p, cname, kind, brief or None, _now()))
+                            "VALUES (?,?,?,?,?)",
+                            (p, cname, kind or "chat", brief or None, _now()))
             added.append(cname)
-        return {"project": p, "added": added, "brief_set": brief_set,
-                "already_there": already,
-                "note": "each new one also got a scope of its own, made by the database"}
+            added_kinds[cname] = kind or "chat"
+        return {"project": p, "added": added, "added_kinds": added_kinds,
+                "brief_set": brief_set, "kind_set": kind_set, "already_there": already,
+                "note": "each new one also got a scope of its own, made by the database. "
+                        "A bare name is a CHAT: to declare a skill pass an object — "
+                        "{'name': 'FP-Update-Tax', 'kind': 'skill'} — and the same object "
+                        "on a consumer that already exists CORRECTS its kind, which is "
+                        "reported in kind_set and versioned by trigger."}
 
     def add_domains(self, code: str, domains) -> dict:
         """Adds domains — and UPDATES the gloss of one that already exists,

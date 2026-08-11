@@ -659,12 +659,26 @@ def rules_consumers_add(project: str, consumers: list, key: str) -> dict:
     a scope of its own name, made by the database.
 
     AN ITEM MAY BE A PLAIN NAME OR AN OBJECT, and the object is how you say
-    what kind it is: `"Advisory"` is a chat, because `kind` defaults to
-    `"chat"`, while `{"name": "FP-Update-Tax", "kind": "skill"}` is a skill.
-    `kind` is stored and comes back in rules_project_info — the distinction is
-    DATA, not a convention you have to remember. A list of bare strings makes
-    everything a chat, which is the trap a dry run fell into: nine skills came
-    back as chats and nothing said so.
+    what kind it is. There are exactly TWO kinds — `chat` and `skill` — and
+    the case of that word is not data: `SKILL`, `Skill` and `skill` are one
+    value, stored lower-case. A NAME is the opposite and comes back byte for
+    byte, because the spelling of a name is somebody's choice.
+
+        "Advisory"                                → a chat, by default
+        {"name": "FP-Update-Tax", "kind": "skill"} → a skill
+        {"name": "Advisory", "brief": "…"}         → the brief, in the same call
+
+    The verdict says `added_kinds` for what it created, so nothing is written
+    in silence: a list of bare strings makes everything a chat, which is the
+    trap a dry run fell into — nine skills came back as chats and nothing
+    said so.
+
+    AN EXPLICIT KIND ON A CONSUMER THAT EXISTS REPAIRS IT, reported in
+    `kind_set` and versioned by the trigger. Without that the only cure for a
+    kind entered wrong would be creating a new consumer and abandoning the
+    old, which orphans every rule aimed at it — a typo would cost a piece of
+    the corpus. A BARE NAME says nothing about the kind and therefore changes
+    nothing: naming an existing skill in a plain list leaves it a skill.
 
     An item may carry a `brief` — the consumer's mandate, in Markdown,
     returned at the head of its rules_list: creating a consumer and giving it
@@ -678,7 +692,12 @@ def rules_consumers_add(project: str, consumers: list, key: str) -> dict:
     Only adding: removing a consumer would orphan the rules aimed at it. And a
     consumer is never RENAMED — a renamed consumer is a different consumer, and
     the rules that reached it need reviewing, not dragging along behind a name.
-    Create the new one and retire the old."""
+    Create the new one and narrow every rule off the old.
+
+    ⚠ There is no `retired` flag on a consumer YET, so the old one stays: it
+    still appears here and `_ALL_` still reaches it, because `_ALL_` is
+    computed over every consumer that exists. Said plainly rather than left as
+    "retire the old", which named a door nobody can open."""
     _admin(project, key)
     return registry.add_consumers(project, consumers)
 
