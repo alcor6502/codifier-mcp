@@ -1609,6 +1609,47 @@ ok(GUIDE_SRC.count("legend of the domains present") == 1,
    "the manual pins the legend, exactly once",
    GUIDE_SRC.count("legend of the domains present"))
 
+print("\n== the UI is refused at the edge, not at the first click ==")
+
+# The `web` check is BLOCKING like every other one, and it is the only place
+# two mistakes get caught before they are made: a master still on its
+# placeholder, which is an open door to the approval page, and a UI on one of
+# the three ports the Funnel CAN publish, which turns a page on the LAN into a
+# page on the internet. Both are invisible at boot and both surface as
+# something else entirely — the first as "somebody approved rules I did not",
+# the second never.
+_WEB_CHECK = [n for n in _PF_TREE.body
+              if isinstance(n, ast.FunctionDef)
+              and any(isinstance(d, ast.Call) and ast.unparse(d.func) == "check"
+                      and d.args and getattr(d.args[0], "value", None) == "web"
+                      for d in n.decorator_list)]
+ok(len(_WEB_CHECK) == 1, "preflight.py declares a `web` check, exactly once",
+   len(_WEB_CHECK))
+# A check that is defined and not listed never runs, and nothing says so: the
+# sheet comes up one line shorter and one line shorter is not a thing anybody
+# counts.
+ok(_CHECKS_LIST is not None and "c_web" in _CHECKS_LIST.group(1),
+   "and it is in CHECKS — one that is defined but not listed never runs")
+# It must resolve the port through the same expression the service uses. Two
+# expressions that agree today are two expressions, and this one decides
+# whether the page is publishable.
+if _WEB_CHECK:
+    _WSRC = ast.unparse(_WEB_CHECK[0])
+    ok("web.port_from_env" in _WSRC,
+       "and it resolves WEB_PORT through web.port_from_env, not a second time")
+    ok("web.FUNNEL_PORTS" in _WSRC,
+       "and the three publishable ports are the engine's constant, not a literal list")
+    ok("WEB_MASTER_CODE" in _WSRC and "is_placeholder" in _WSRC,
+       "and it refuses a master that is missing or still a placeholder")
+_PF_READS_PORT = [n for n in ast.walk(_PF_TREE)
+                  if isinstance(n, ast.Call)
+                  and ast.unparse(n.func) in ("os.environ.get", "os.getenv")
+                  and n.args and isinstance(n.args[0], ast.Constant)
+                  and n.args[0].value == "WEB_PORT"]
+ok(not _PF_READS_PORT,
+   "preflight.py does not read WEB_PORT on its own — it comes from web.py",
+   [ast.unparse(n) for n in _PF_READS_PORT])
+
 print("\n== the boot serves two servers on one loop ==")
 
 # C4. The MCP app and the admin UI live in ONE process, on ONE asyncio loop:

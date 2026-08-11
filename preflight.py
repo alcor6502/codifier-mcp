@@ -23,6 +23,9 @@ Its own, because this service keeps a database instead of files:
   admin_code  ADMIN_ACCESS_CODE present, long enough, not a placeholder
   approval    the one knob the approval lifecycle reads, PROVISIONAL_DAYS,
               validated at the edge instead of at the first approval
+  web         the administration UI: its master present, long enough and not a
+              placeholder, and its port neither publishable by the Funnel nor
+              the MCP's own
 
 Selective skip (for local testing only, never in production):
   PREFLIGHT_SKIP="funnel,node_key"
@@ -35,8 +38,16 @@ import sqlite3
 import subprocess
 import sys
 
+import web
 from mcp_common_engine import (RESULTS, SKIP, check, cidrs_from_env,
                                describe_cidrs, is_placeholder)
+
+# `import web` and not `from web import ...`: this file must keep running on an
+# image where the web stack is broken, and web.py earns that by importing
+# starlette inside build() rather than at its top. What is taken from it here
+# is the resolution of the port and the list of publishable ones — the same
+# expression the service uses, so the two cannot disagree about whether the
+# page is reachable from the internet.
 
 DB = os.environ.get("DB_PATH", "/db/rules.db")
 DBDIR = os.path.dirname(DB) or "/db"
@@ -157,6 +168,54 @@ def c_approval():
             "admin code approves, no signature")
 
 
+@check("web")
+def c_web():
+    """The administration UI, refused AT THE EDGE. Two mistakes live here and
+    neither one announces itself.
+
+    A master still on its placeholder is an open approval page: the UI is what
+    promulgates rules, and it is the one door in this system a person comes
+    through. The failure is not a traceback, it is a rule in force that nobody
+    decided.
+
+    A UI on 443, 8443 or 10000 is a page on the internet. Those are the only
+    three ports Tailscale Funnel can publish, and the Funnel runs in this
+    container: on one of them the page stops being on the LAN, silently, and
+    nothing anywhere would say so. The port stayed a VARIABLE on purpose — a
+    constant would close the door on a second product on the same machine —
+    so the guarantee moved here, where it is a refusal with a name on it
+    instead of a property of the source.
+
+    And a UI on the MCP's own port is a service that comes up half-started:
+    whichever of the two binds second dies, and the log line above it has
+    already said everything is fine."""
+    v = os.environ.get("WEB_MASTER_CODE", "")
+    if not v or is_placeholder(v):
+        raise RuntimeError("WEB_MASTER_CODE missing or still a placeholder: the "
+                           "administration UI is what approves rules, and without a master "
+                           "its pages would be open to whoever reaches the port")
+    if len(v) < 12:
+        raise RuntimeError(f"WEB_MASTER_CODE is {len(v)} characters: too short (>=12)")
+    try:
+        port = web.port_from_env()
+    except ValueError as e:
+        raise RuntimeError(str(e)) from e
+    if port in web.FUNNEL_PORTS:
+        raise RuntimeError(
+            f"WEB_PORT={port}: the Funnel can publish "
+            f"{', '.join(str(x) for x in web.FUNNEL_PORTS)}, and it runs in this container — "
+            "the administration UI would be on the internet. Choose any other port.")
+    mcp_port = (os.environ.get("PORT") or "3001").strip()
+    if not mcp_port.isdigit():
+        raise RuntimeError(f"PORT={mcp_port!r}: a whole port number")
+    if port == int(mcp_port):
+        raise RuntimeError(f"WEB_PORT={port} is the MCP's own port: two servers cannot bind "
+                           "the same one, and the one that loses dies after the startup "
+                           "line has already said everything is fine")
+    return (f"master present ({len(v)} characters) · UI on {port}, "
+            "which the Funnel cannot publish")
+
+
 @check("oauth")
 def c_oauth():
     # The most important check: without credentials this would be an authless
@@ -257,7 +316,7 @@ def c_manuals():
 
 
 CHECKS = [c_db, c_schema, c_writable, c_ownership, c_admin_code, c_approval,
-          c_oauth, c_token_store, c_funnel, c_node_key, c_cidrs, c_dns,
+          c_web, c_oauth, c_token_store, c_funnel, c_node_key, c_cidrs, c_dns,
           c_manuals]
 
 if __name__ == "__main__":
