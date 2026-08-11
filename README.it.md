@@ -303,6 +303,27 @@ scritto in due posti sono due numeri, e qui l'abbiamo già pagato una volta.
 deve esistere con firma compatibile, ogni tool che scrive deve passare dal gate
 di manutenzione, e nessuna docstring può nominare un tool che non esiste.
 
+## L'icona, e dove si vede davvero
+
+`codifier-icon.png` è puntata dal suo URL raw di GitHub da due file: il template
+Unraid, che la mette sul container, e `server.py`, che la passa a FastMCP come
+`icons=[…]`. Un controllo confronta i due URL, perché due copie a mano della
+stessa stringa hanno una data di scadenza.
+
+Passare `icons` compra **la pagina di consenso OAuth** — quella che compare
+quando il connettore si aggiunge o si riconnette — dove FastMCP la mostra al
+posto del proprio logo.
+
+**Non** compra l'icona nella lista dei connettori di Claude. Quella superficie
+ignora del tutto `serverInfo.icons`, che la spec MCP porta dalla revisione
+`2025-11-25` (SEP-973); servire `/favicon.ico` e mettere un `<link rel="icon">`
+su una pagina di radice vengono ignorati allo stesso modo. L'issue è
+[anthropics/claude-ai-mcp#152](https://github.com/anthropics/claude-ai-mcp/issues/152).
+Sotto Funnel quella lista mostra l'icona di Tailscale, che è coerente con
+un'icona derivata dal DOMINIO — niente in questo repository ci arriva. Il campo
+si manda lo stesso: il giorno che il client lo legge, la lista segue senza
+toccare niente.
+
 ## Il gemello
 
 [archivist-mcp](https://github.com/alcor6502/archivist-mcp) — un vault di

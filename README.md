@@ -298,6 +298,27 @@ in two places is two numbers, and this project has already paid for that once.
 engine must exist with a compatible signature, every tool that writes must pass
 the maintenance gate, and no docstring may name a tool that does not exist.
 
+## The icon, and where it is actually seen
+
+`codifier-icon.png` is pointed at by its raw GitHub URL from two files: the
+Unraid template, which puts it on the container, and `server.py`, which passes
+it to FastMCP as `icons=[…]`. A check compares the two URLs, because two hand
+copies of one string have an expiry date.
+
+Passing `icons` buys **the OAuth consent page** — the page seen when the
+connector is added or reconnected — where FastMCP renders it in place of its
+own logo.
+
+It does **not** buy the icon in Claude's connector list. That surface ignores
+`serverInfo.icons`, which the MCP spec has carried since revision `2025-11-25`
+(SEP-973); serving `/favicon.ico` and a root page with `<link rel="icon">` are
+ignored as well. The tracking issue is
+[anthropics/claude-ai-mcp#152](https://github.com/anthropics/claude-ai-mcp/issues/152).
+Under a Tailscale Funnel the list shows Tailscale's icon, which is consistent
+with that surface deriving the icon from the DOMAIN — nothing in this
+repository can reach it. The field is sent anyway: the day the client reads it,
+the list follows with no change here.
+
 ## Sibling
 
 [archivist-mcp](https://github.com/alcor6502/archivist-mcp) — a document vault
