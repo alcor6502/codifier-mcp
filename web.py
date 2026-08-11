@@ -119,30 +119,107 @@ def action_cap_from_env() -> int:
 # The pages, written by hand
 # =====================================================================
 
+# The whole of the styling, and the ONLY place it lives. No framework and no
+# build step: a stylesheet fetched from a CDN is a third party in the page that
+# approves rules, and one compiled by a toolchain is a file nobody can read
+# against the code. It is a constant in the module that writes the pages, which
+# means the diff that changes the look is the diff that changes the page.
+#
+# The palette is declared TWICE and nowhere else: once for light, once inside
+# the dark-scheme query. `color-scheme: light dark` stays, and it is not
+# decoration — it is what makes the form controls, the scrollbars and the
+# focus ring follow the system instead of staying white on a dark page.
+# `light-dark()` would say the same thing in half the lines and is not used:
+# the two blocks work on every browser that ever reached this page, and this
+# page is read from an iPad.
+#
+# The sizes are the iPad's, not the desk's. 16px on the fields because Safari
+# ZOOMS the page when it focuses anything smaller, and a page that jumps when
+# you tap the master is a page you mistype the master into; 2.75rem of height
+# on everything tappable, which is the 44 points Apple asks for and roughly
+# the width of a thumb.
 _CSS = """
-:root { color-scheme: light dark; }
+:root {
+  color-scheme: light dark;
+  --bg: #fdfdfb; --fg: #1b1c1a; --muted: #62635e; --line: #dcdcd5;
+  --field: #ffffff; --raised: #f2f2ec; --accent: #2d5c86;
+  --bad: #9d2f27; --bad-bg: #fbeceb; --good: #2c6739; --good-bg: #ebf4ee;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16171a; --fg: #e7e7e2; --muted: #9a9b95; --line: #33353b;
+    --field: #1e2025; --raised: #1e2025; --accent: #8fb8e2;
+    --bad: #e79088; --bad-bg: #2b1b19; --good: #85c495; --good-bg: #172318;
+  }
+}
 * { box-sizing: border-box; }
-body { font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-       margin: 0; padding: 1.5rem; max-width: 60rem; }
-header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;
-         border-bottom: 1px solid #8884; padding-bottom: .6rem; margin-bottom: 1.2rem; }
-header h1 { font-size: 1.15rem; margin: 0; }
-header nav { margin-left: auto; display: flex; gap: .9rem; font-size: .9rem; }
-h2 { font-size: 1rem; margin: 1.6rem 0 .6rem; }
-a { color: inherit; }
+html { -webkit-text-size-adjust: 100%; }
+body { font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+       margin: 0 auto; padding: 1.25rem 1.25rem 4rem; max-width: 62rem;
+       background: var(--bg); color: var(--fg); }
+header { display: flex; align-items: baseline; gap: .75rem 1.25rem;
+         flex-wrap: wrap; border-bottom: 1px solid var(--line);
+         padding-bottom: .7rem; margin-bottom: 1.4rem; }
+header h1 { font-size: 1.2rem; font-weight: 600; margin: 0;
+            letter-spacing: -.01em; }
+header nav { margin-left: auto; display: flex; align-items: center;
+             gap: .35rem; flex-wrap: wrap; font-size: .9rem; }
+header nav a, header nav button {
+  display: inline-block; padding: .4rem .6rem; border-radius: 6px;
+  border: 1px solid transparent; background: transparent; color: var(--muted);
+  text-decoration: none; font-size: .9rem; min-height: 0; }
+header nav a:hover, header nav button:hover {
+  color: var(--fg); background: var(--raised); }
+h2 { font-size: .95rem; font-weight: 600; text-transform: uppercase;
+     letter-spacing: .06em; color: var(--muted); margin: 2rem 0 .6rem; }
+p { margin: .7rem 0; }
+a { color: var(--accent); }
 form.inline { display: inline; }
-label { display: block; margin: .8rem 0 .2rem; font-size: .85rem; opacity: .75; }
+label { display: block; margin: 1.1rem 0 .3rem; font-size: .85rem;
+        color: var(--muted); }
+/* A label that WRAPS a tick is not a field label, it is the thing being read:
+   in the lot page it carries the rule's title. Told apart with :has(), and a
+   browser that does not know :has() falls back to the small grey line this
+   page has always had — worse, never broken. */
+label:has(input[type=checkbox]) { font-size: 1rem; color: var(--fg);
+                                  margin: 0 0 .35rem; }
 input[type=password], input[type=text], select {
-  font: inherit; padding: .45rem .6rem; border: 1px solid #8886; border-radius: 6px;
-  background: transparent; color: inherit; min-width: 18rem; max-width: 100%; }
-button { font: inherit; padding: .45rem .9rem; border: 1px solid #8886;
-         border-radius: 6px; background: #8881; color: inherit; cursor: pointer; }
-table { border-collapse: collapse; width: 100%; font-size: .92rem; }
-th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid #8883;
-         vertical-align: top; }
-.note { font-size: .85rem; opacity: .7; }
-.bad { border-left: 3px solid #c33; padding-left: .8rem; }
-.ok { border-left: 3px solid #3a3; padding-left: .8rem; }
+  font: inherit; font-size: 1rem; padding: .55rem .7rem; min-height: 2.75rem;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--field);
+  color: inherit; width: 100%; max-width: 24rem; }
+input:focus-visible, select:focus-visible, button:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; }
+input[type=checkbox] { width: 1.15rem; height: 1.15rem; margin-right: .35rem;
+                       vertical-align: -.15rem; accent-color: var(--accent); }
+button { font: inherit; font-size: 1rem; padding: .55rem 1rem;
+         min-height: 2.75rem; border: 1px solid var(--line); border-radius: 8px;
+         background: var(--raised); color: inherit; cursor: pointer; }
+button:hover { border-color: var(--muted); }
+table { border-collapse: collapse; width: 100%; font-size: .92rem;
+        margin: .5rem 0; }
+th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line);
+         vertical-align: top; overflow-wrap: anywhere; }
+th { font-size: .78rem; text-transform: uppercase; letter-spacing: .05em;
+     color: var(--muted); font-weight: 600; }
+tr:last-child td { border-bottom: none; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+       font-size: .9em; background: var(--raised); border-radius: 4px;
+       padding: .1rem .3rem; }
+/* Rule bodies are prose, and they used to run off the side of an iPad: a
+   horizontal scrollbar inside a page you read with a thumb is a paragraph you
+   do not read. */
+pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: .9rem; line-height: 1.5; white-space: pre-wrap;
+      overflow-wrap: anywhere; background: var(--raised); border-radius: 8px;
+      padding: .7rem .8rem; margin: .5rem 0; }
+article { border: 1px solid var(--line); border-radius: 10px;
+          padding: .9rem 1rem; margin: .9rem 0; }
+.note { font-size: .85rem; color: var(--muted); }
+.bad { border-left: 3px solid var(--bad); background: var(--bad-bg);
+       color: var(--bad); padding: .6rem .8rem; border-radius: 0 8px 8px 0; }
+.ok { border-left: 3px solid var(--good); background: var(--good-bg);
+      color: var(--good); padding: .6rem .8rem; border-radius: 0 8px 8px 0; }
+.bad code, .ok code { background: #8881; }
 """
 
 
