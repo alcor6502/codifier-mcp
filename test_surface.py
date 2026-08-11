@@ -442,7 +442,13 @@ NAME_IN_PROSE = re.compile(r"\b((?:rules|tasks)_[a-z_]+|[a-z][a-z_]*_guide)\b")
 # to be subtracted in BOTH places the shape is used: naming the server in a
 # manual is a legitimate sentence, and a check that goes red on a legitimate
 # sentence gets deleted rather than obeyed.
-NOT_TOOLS = {"rules_mcp"}
+NOT_TOOLS = {"rules_mcp",
+             # Field names in verdicts, which read like tools and are not.
+             # They live in the same set as rules_mcp on purpose: one list of
+             # what is allowed to look like a tool without being one, so the
+             # exception is data a reader can see rather than a special case
+             # buried in a check.
+             "rules_affected", "rules_without_perimeter"}
 for _manual, _text in MANUALS.items():
     ok(_text is not None, f"{_manual} is there to be read at all")
     _named = set(NAME_IN_PROSE.findall(_text or "")) - NOT_TOOLS
@@ -1782,6 +1788,118 @@ for _t in TOOLS:
 ok(GUIDE_SRC.count("legend of the domains present") == 1,
    "the manual pins the legend, exactly once",
    GUIDE_SRC.count("legend of the domains present"))
+
+print("\n== a verdict's note is spoken surface, and goes stale like a docstring ==")
+
+# `rules_batch` shipped 3.0.0 telling every caller to "pass this digest to
+# approve" — a call that had just left the surface. Nothing caught it: the
+# check that refuses a docstring naming a tool that is gone looks for the
+# NAME, and that sentence named no tool. A dry run went looking for the tool
+# and found the hole instead.
+#
+# Two checks, and they cover different halves. The general one: the RUNTIME
+# strings of the engine are held against the tool list exactly as the
+# docstrings are — a note that names a tool which no longer exists now fails
+# here. The specific one: the sentence that was wrong is pinned gone, and the
+# note is required to say where approval actually happens, because the general
+# check cannot see a sentence that names nothing.
+_ENGINE_DOCNODES = set()
+for _n in ast.walk(ENGINE_TREE):
+    if isinstance(_n, (ast.Module, ast.ClassDef, ast.FunctionDef)) and _n.body:
+        _s = _n.body[0]
+        if isinstance(_s, ast.Expr) and isinstance(_s.value, ast.Constant):
+            _ENGINE_DOCNODES.add(id(_s.value))
+_NOTE_NAMES = {}
+for _n in ast.walk(ENGINE_TREE):
+    if (isinstance(_n, ast.Constant) and isinstance(_n.value, str)
+            and id(_n) not in _ENGINE_DOCNODES):
+        for _m in NAME_IN_PROSE.findall(_n.value):
+            _NOTE_NAMES.setdefault(_m, _n.lineno)
+_DEAD = sorted(n for n in _NOTE_NAMES if n not in TOOL_NAMES and n not in NOT_TOOLS)
+ok(not _DEAD,
+   f"every tool a runtime string in rules.py names is still one "
+   f"({len(_NOTE_NAMES)} named)",
+   ", ".join(f"{n} (line {_NOTE_NAMES[n]})" for n in _DEAD))
+
+_BATCH = METHODS.get("batch")
+# Unparsed, so COMMENTS are out of it: the comment above the note quotes the
+# dead sentence to explain what went wrong, and a check that matched the
+# explanation would go red on the very paragraph that stops it recurring.
+_BATCH_SRC = ast.unparse(_BATCH) if _BATCH is not None else ""
+ok("pass this digest to approve" not in _BATCH_SRC,
+   "the batch note no longer describes a call that does not exist")
+ok("LOT PAGE" in _BATCH_SRC and "not a tool since" in _BATCH_SRC,
+   "and it says where the approval actually happens, in the browser")
+
+print("\n== the sanitisation runs before the database, in every writing method ==")
+
+# THE ORDER IS THE GUARANTEE. The sanitisation corrects nothing and stores
+# nothing — it refuses — so it must also SPEND nothing: a refusal that had
+# already drawn a number would make a typo permanent, because IDs are never
+# reused, and one that had already taken a slot in the pending queue would let
+# a bad reference cost a good proposal.
+#
+# The behaviour is measured in collaudo. What is pinned HERE is the order in
+# the source, because that is the thing a refactor moves without meaning to:
+# in every method that both sanitises and writes, the LAST sanitising call
+# must come before the FIRST write and before the counter is read.
+_SANITISERS = {"self._prose", "self._cites", "self._relics", "self._task_prose"}
+_COUNTERS = {"self._next_seq", "self._next_task_seq"}
+_WRITE_SQL = re.compile(r"\b(BEGIN|INSERT|UPDATE|DELETE)\b", re.IGNORECASE)
+
+
+def _first_write_line(fn):
+    lines = []
+    for n in ast.walk(fn):
+        if not isinstance(n, ast.Call):
+            continue
+        called = ast.unparse(n.func)
+        if called in _COUNTERS:
+            lines.append(n.lineno)
+        elif called == "self.cx.execute" and n.args:
+            sql = ast.unparse(n.args[0])
+            if _WRITE_SQL.search(sql):
+                lines.append(n.lineno)
+    return min(lines) if lines else None
+
+
+_ORDERED = 0
+for _m in REGISTRY.body:
+    if not isinstance(_m, ast.FunctionDef):
+        continue
+    _san = [n.lineno for n in ast.walk(_m) if isinstance(n, ast.Call)
+            and ast.unparse(n.func) in _SANITISERS]
+    if not _san:
+        continue
+    _w = _first_write_line(_m)
+    if _w is None:
+        continue
+    _ORDERED += 1
+    ok(max(_san) < _w,
+       f"Registry.{_m.name}: every reference is sanitised before anything is "
+       f"written or counted",
+       f"last sanitise at line {max(_san)}, first write/counter at line {_w}")
+ok(_ORDERED >= 6, f"the order is pinned on {_ORDERED} writing methods", _ORDERED)
+
+# And the sanitisation is ONE definition. Two ideas of what a relic looks like
+# is one door that lets them in — which is the shape the defect had before:
+# the check existed, on bodies only.
+for _name in ("_relics", "_prose", "_task_prose"):
+    _defs = [n for n in REGISTRY.body
+             if isinstance(n, ast.FunctionDef) and n.name == _name]
+    ok(len(_defs) == 1, f"Registry.{_name} is defined exactly once", len(_defs))
+ok(getattr(_rules.Registry, "SANITISED", "") == "reference sanitisation failed",
+   "the refusal says what failed, in the words the refusal is known by",
+   getattr(_rules.Registry, "SANITISED", None))
+# The canonical form is FOUR digits and the pattern that hunts relics must not
+# have a floor: `VE-5` fell under the old one and was never seen.
+ok(_rules.RE_ID_SHAPED.search("VE-5") is not None,
+   "the relic pattern has no floor: a one-digit ID is caught")
+ok(_rules.RE_ID_SHAPED.search("VE-12345") is not None,
+   "and no ceiling either: a five-digit ID is caught")
+ok(_rules.RE_ID_SHAPED.search("RFC-2119") is None
+   and _rules.RE_ID_SHAPED.search("ISO-8601") is None,
+   "and a three-letter prefix is not an ID of this project")
 
 print("\n== one icon URL, two files, and a check between them ==")
 

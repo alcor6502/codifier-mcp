@@ -29,7 +29,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import rules as _rules                  # for the two constants the suite SHIFTS
-from rules import (ALL, FILE_MODE, MAX_BODY_BYTES, MAX_GET_IDS,
+from rules import (ALL, FILE_MODE, GLOSS_SEP, MAX_BODY_BYTES, MAX_GET_IDS,
                    Registry, RulesError, RulesFault, VERSION, _plus_days,
                    TASKS_GET_BYTES, TASKS_GET_IDS, TASKS_LIST_CAP,
                    TASKS_RECENT_DAYS, TASKS_STALE_DAYS)
@@ -674,8 +674,18 @@ case("a URL, a ticket and a standard are not IDs of this project",
      only_the_project_s_own_domains_are_hunted)
 
 refuses("a mistyped ID of a real domain is still caught",
-        lambda: R.propose(FP, "VE", "R", "x", "Vedi VA-00001 in prosa.", ["*"], "m", "architect"),
+        lambda: R.propose(FP, "VE", "R", "x", "Vedi VA-0001 in prosa.", ["*"], "m", "architect"),
         "bare ID", RulesError)
+# THE ONLY ACCEPTED FORM IS FOUR DIGITS, and every other count is a relic of
+# the old Markdown corpus. One digit used to fall below the bare-ID floor and
+# five above what the citation pattern will match, so BOTH walked straight
+# through — in a bracket the five-digit one was not a citation at all and the
+# short one was silently padded onto a different rule.
+for _bad in ("VA-1", "VA-01", "VA-001", "VA-00001", "(VA-01)", "(VA-00001)"):
+    refuses(f"{_bad}: not four digits, so it is a relic",
+            lambda b=_bad: R.propose(FP, "VE", "R", "x", f"Vedi {b} qui.", ["*"],
+                                     "m", "architect"),
+            "reference sanitisation failed", RulesError)
 refuses("a citation that does not resolve: a chat cannot invent a pointer",
         lambda: R.propose(FP, "VE", "R", "x", "See (VE-0099).", ["*"], "m", "architect"),
         "does not resolve", RulesError)
@@ -692,11 +702,12 @@ refuses("brackets around a SENTENCE are not a citation",
 
 
 def the_two_doors_agree_on_what_an_ID_looks_like():
-    """rules_get tolerates the type suffix and a short number; a body must
-    tolerate exactly the same, or a tolerance documented in one place becomes a
-    refusal in another."""
+    """The type suffix and the case are tolerated at BOTH doors — a tolerance
+    documented in one place must not be a refusal in another. What the two
+    doors deliberately do NOT share any more is the short form: see the case
+    below."""
     rid = R.propose(FP, "VE", "R", "Suffixed citation",
-                    f"Leans on ({PE1}-M) and on (va-01).", ["*"], "test", "architect")["id"]
+                    f"Leans on ({PE1}-M) and on (va-0001).", ["*"], "test", "architect")["id"]
     got = {r[0] for r in R.cx.execute(
         "SELECT dst FROM rule_refs WHERE project=? AND src=?", (NAME_FP, rid))}
     assert got == {PE1, "VA-0001"}, got
@@ -782,17 +793,101 @@ case("the audit reports what the door could not have known",
      the_audit_watches_what_the_door_cannot)
 
 
-def a_short_citation_still_resolves():
-    """Older text says VA-02. Padding is what stops the change costing a rewrite
-    of every body that was ever written."""
-    rid = R.propose(FP, "VE", "R", "Short form", "See (VA-01).", ["*"], "test", "architect")["id"]
-    assert R.cx.execute("SELECT dst FROM rule_refs WHERE project=? AND src=?",
-                        (NAME_FP, rid)).fetchall()[0][0] == "VA-0001"
-    R.deny(FP, [rid], "parsed, done")
+def reading_forgives_a_short_ID_and_writing_does_not():
+    """THE ASYMMETRY, and it is the point rather than an inconsistency.
+
+    Reading `VA-01` identifies a row that EXISTS: a person quoting from memory
+    is not putting anything into the corpus, and the padding costs nothing.
+    Writing `VA-01` into prose is the opposite — in this registry every number
+    is four digits, so a shorter one is an identifier of the old Markdown by
+    construction, and padding it used to make it point SILENTLY at a different
+    rule. The tolerance that was a kindness while the two-digit era's own
+    bodies had to keep resolving became, on a wiped registry seeded by hand,
+    the most effective way to smuggle a relic in."""
+    assert R.get_rules(FP, ["VA-01"], "architect")["found"][0]["id"] == "VA-0001"
+    assert R.get_rules(FP, ["va-001"], "architect")["found"][0]["id"] == "VA-0001"
+    try:
+        R.propose(FP, "VE", "R", "Short form", "See (VA-01).", ["*"], "test", "architect")
+        raise AssertionError("a short form went into a body")
+    except RulesError as e:
+        assert "reference sanitisation failed" in str(e), e
+    # And it is refused in the fields that are NOT a body, which is where the
+    # relics were actually living.
+    try:
+        R.propose(FP, "VE", "R", "x", "Clean body.", ["*"], "absorbs VE-05", "architect")
+        raise AssertionError("a relic went into a reason")
+    except RulesError as e:
+        assert "reference sanitisation failed in `reason`" in str(e), e
 
 
-case("a two-digit citation resolves onto the four-digit rule",
-     a_short_citation_still_resolves)
+case("reading forgives a short ID; prose never does",
+     reading_forgives_a_short_ID_and_writing_does_not)
+
+
+def a_refusal_costs_nothing_at_all():
+    """THE SANITISATION STOPS BEFORE THE DATABASE, and that is not a detail:
+    it corrects nothing, it stores nothing, and it must not spend anything
+    either. A refusal that burnt a number would make a typo permanent — the ID
+    is never reused — and one that ate a slot in the pending queue would make
+    a bad reference cost a good proposal.
+
+    Measured, not asserted: the counter and the queue are read before and
+    after, and a botched proposal moves neither."""
+    before_q = len(R.pending(FP)["waiting"])
+    before_n = R.cx.execute("SELECT IFNULL(MAX(seq), 0) FROM rules WHERE project=? "
+                            "AND domain='VE'", (NAME_FP,)).fetchone()[0]
+    for bad in (dict(body="Vedi VE-05 qui."),          # relic in the body
+                dict(reason="assorbe ST-16"),           # relic in the reason
+                dict(changelog="nato da RL-04"),        # relic in the changelog
+                dict(source="la vecchia FI-19"),        # relic in the source
+                dict(title="Fusioni (VE-03)")):         # relic in the title
+        kw = dict(title="Clean", body="Clean body.", reason="clean why",
+                  changelog="", source="")
+        kw.update(bad)
+        try:
+            R.propose(FP, "VE", "R", kw["title"], kw["body"], ["*"], kw["reason"],
+                      "architect", kw["changelog"], kw["source"])
+            raise AssertionError(f"it went in: {bad}")
+        except RulesError as e:
+            assert "reference sanitisation failed" in str(e), (bad, e)
+    after_q = len(R.pending(FP)["waiting"])
+    after_n = R.cx.execute("SELECT IFNULL(MAX(seq), 0) FROM rules WHERE project=? "
+                           "AND domain='VE'", (NAME_FP,)).fetchone()[0]
+    assert (before_q, before_n) == (after_q, after_n), \
+        f"a refusal spent something: queue {before_q}->{after_q}, counter {before_n}->{after_n}"
+
+
+case("a refused reference spends no number and no slot in the queue",
+     a_refusal_costs_nothing_at_all)
+
+
+def the_sanitisation_reaches_every_door():
+    """ANYWHERE means anywhere. Each of these was a door a relic could walk
+    through while the body-only check stood at the front. Found by injection:
+    taking the sanitisation off the briefs and off the task log left the whole
+    suite green, which is the definition of a guarantee nobody was measuring."""
+    # A consumer's BRIEF — read at the head of every rules_list that consumer
+    # makes, so a relic there is the first thing a role reads all session.
+    try:
+        R.add_consumers(FP, [{"name": "architect", "brief": "vedi VE-05 per il resto"}])
+        raise AssertionError("a relic went into a brief")
+    except RulesError as e:
+        assert "reference sanitisation failed in `brief of" in str(e), e
+    # A DOMAIN's gloss.
+    try:
+        R.add_domains(FP, {"VA": "vault, come da ST-16"})
+        raise AssertionError("a relic went into a domain gloss")
+    except RulesError as e:
+        assert "reference sanitisation failed in `gloss of VA`" in str(e), e
+    # A PROJECT being born: no domain is declared yet and no rule can resolve,
+    # so only the short-form half can fire — and it does.
+    try:
+        R.create_project("Relic bench", [{"name": "a", "brief": "vedi VE-05"}], {})
+        raise AssertionError("a relic went in at creation")
+    except RulesError as e:
+        assert "reference sanitisation failed" in str(e), e
+case("the sanitisation reaches the briefs, the glosses and a project being born",
+     the_sanitisation_reaches_every_door)
 
 
 def reading_expands_the_citation():
@@ -848,22 +943,30 @@ case("reading expands with the current title, and marks the state",
 
 
 def the_ceiling_is_measured_on_WHAT_IS_STORED():
-    """Padding a short citation makes a body BIGGER, and dropping a gloss makes
-    it smaller. Measuring the text as it arrived would let one over the ceiling
-    and refuse another that fits — the same rule answered two ways depending on
-    which form you happened to paste."""
-    unit = f"({VA1[:2]}-01) "                         # 8 bytes stored as 10
-    n = (MAX_BODY_BYTES // len(unit)) - 100
-    fat = unit * n
-    while len(R._compact(fat).encode()) <= MAX_BODY_BYTES:
-        n += 100
-        fat = unit * n
-    assert len(fat.encode()) < MAX_BODY_BYTES < len(R._compact(fat).encode())
-    try:
-        R.propose(FP, "VA", "R", "Fat once padded", fat, ["*"], "m", "architect")
-        raise AssertionError("it should have refused")
-    except RulesError as e:
-        assert "once stored" in str(e), e
+    """Dropping a gloss makes a body SMALLER, so a body that arrives over the
+    ceiling can be under it once stored. Measuring the text as it arrived would
+    refuse a rule that fits — the same rule answered two ways depending on
+    which form you happened to paste.
+
+    ⚠ It used to cut the other way too: a short citation was padded, so the
+    stored form could be BIGGER than what arrived. That half died with the
+    sanitisation — a short form is refused now, not padded — and the guarantee
+    is the same one either way: the ceiling is about what goes into the
+    database."""
+    # The gloss has to be the REAL one: anything else is refused by the door
+    # that stops a registry losing an author's words.
+    gloss = f"({VA1}{GLOSS_SEP}{R._gloss(R._row(NAME_FP, VA1))}) "
+    unit = f"({VA1}) "
+    n = (MAX_BODY_BYTES // len(unit)) - 10
+    fat = gloss * n
+    assert len(fat.encode()) > MAX_BODY_BYTES > len(R._compact(fat).encode()), \
+        "the bench body must arrive over the ceiling and store under it"
+    out = R.propose(FP, "VA", "R", "Thin once compacted", fat, ["*"], "m", "architect")
+    stored = R.cx.execute("SELECT body FROM rules WHERE project=? AND id=?",
+                          (NAME_FP, out["id"])).fetchone()[0]
+    assert len(stored.encode()) <= MAX_BODY_BYTES
+    assert GLOSS_SEP not in stored, "the gloss was stored instead of dropped"
+    R.deny(FP, [out["id"]], "parsed, done")
 
 
 case("the body ceiling is measured after compaction, not before",
@@ -1154,7 +1257,11 @@ ok(FI_NEW == "FI-0004",
 def retire_with_a_successor():
     b = R.batch(FP)
     R.approve(FP, b["digest"])
-    out = R.retire(FP, FI1, reason=f"superseded by {FI_NEW}", superseded_by=FI_NEW)
+    # The reason names the heir the ONLY way a reference may be written now:
+    # inside round brackets, four digits. Bare, it is a forgotten bracket and
+    # the sanitisation refuses it — in a `reason`, which is immutable, that
+    # refusal is the last chance anybody gets.
+    out = R.retire(FP, FI1, reason=f"superseded by ({FI_NEW})", superseded_by=FI_NEW)
     assert out["superseded_by"] == FI_NEW
     assert FI1 not in [x["id"] for x in R.list_rules(FP, "tax")["rules"]]
     assert R.get_rules(FP, FI1, "tax")["found"][0]["status"] == "retired", \
@@ -2906,6 +3013,47 @@ def a_rule_ID_handed_to_a_task_reader_says_so():
 
 case("a rule ID read as a task is named as one, not reported missing",
      a_rule_ID_handed_to_a_task_reader_says_so)
+
+
+def a_relic_is_refused_in_the_task_log_too():
+    """ANYWHERE means anywhere. A task is not law, so an UNRESOLVED pointer is
+    reported in the text rather than refused — but a RELIC of the old Markdown
+    is refused here exactly as it is in a rule. Two different guarantees, both
+    holding. Found by injection: taking the sanitisation off task_add left the
+    whole suite green."""
+    # THE TASK LOG. A task is not law, so an unresolved pointer is reported in
+    # the text rather than refused — but a RELIC is refused here exactly as it
+    # is in a rule. The two are different guarantees and both hold.
+    ok_id = R.task_add(TL, "advisory", "Cita un ente vivo",
+                       "Guarda (VA-0001) e anche (VE-0099), che non esiste ancora.",
+                       "Architect")["id"]
+    R.task_drop(TL, ok_id, "bench cleanup", "advisory")
+    for field, kw in (("title", dict(title="Sistemare VE-05")),
+                      ("body", dict(body="Il paragrafo di ST-16 è sbagliato."))):
+        args = dict(title="Pulito", body="Corpo pulito.")
+        args.update(kw)
+        try:
+            R.task_add(TL, "advisory", args["title"], args["body"], "Architect")
+            raise AssertionError(f"a relic went into a task {field}")
+        except RulesError as e:
+            assert f"reference sanitisation failed in `{field}`" in str(e), (field, e)
+    tid = R.task_add(TL, "advisory", "Da chiudere", "Corpo pulito.", "Architect")["id"]
+    try:
+        R.task_complete(TL, tid, "fatto, come chiedeva VE-05", "advisory")
+        raise AssertionError("a relic went into an outcome")
+    except RulesError as e:
+        assert "reference sanitisation failed in `outcome`" in str(e), e
+    try:
+        R.task_amend(TL, tid, "advisory", body="Vedi RL-04.")
+        raise AssertionError("a relic went into an amended task body")
+    except RulesError as e:
+        assert "reference sanitisation failed in `body`" in str(e), e
+    R.task_drop(TL, tid, "bench cleanup", "advisory")
+
+
+case("a relic is refused in the task log too, and an unresolved pointer is not",
+     a_relic_is_refused_in_the_task_log_too)
+
 
 print(f"\n{OK} passed, {FAIL} failed")
 if FAILURES:

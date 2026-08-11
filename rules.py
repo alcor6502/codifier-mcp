@@ -117,6 +117,16 @@ RE_CITE = re.compile(
 # `va-0001`, `Va-0001`, `vA-0001` are the same mistake, not three different ones,
 # and everywhere else an ID is read case does not matter either.
 RE_BARE = re.compile(r"\b([A-Za-z]{2})-(\d{2,})")
+# ANYTHING SHAPED LIKE AN ID, whatever the digit count — one, two, three,
+# five. RE_BARE starts at two because that is what the old two-digit era could
+# legitimately write; this one starts at ONE because the sanitisation is not
+# looking for valid IDs, it is looking for everything that is NOT the canonical
+# form. `VE-5` and `VE-12345` used to walk straight through: the first was
+# below RE_BARE's floor, the second above what RE_CITE will match, so neither
+# was ever seen. There is exactly one accepted way to point at a rule —
+# `(XX-NNNN)`, four digits, inside round brackets — and every other digit count
+# is an identifier of the old Markdown corpus by construction.
+RE_ID_SHAPED = re.compile(r"\b([A-Za-z]{2})-(\d+)\b")
 # Reading expands a citation with the current title; this lets that expanded
 # form come back in through rules_fix without the gloss having to be stripped
 # by hand. Only the pointer is ever stored, so the gloss cannot go stale.
@@ -1117,6 +1127,17 @@ class Registry:
         for d in domains:
             _valid_domain(d)
         cons = self._normalise_consumers(consumers or [])
+        # The sanitisation runs here too, and at this door it can only do half
+        # its job: the project does not exist yet, so no domain is declared and
+        # no rule can be resolved — what fires is the SHORT-FORM relic, which
+        # needs neither. Said out loud because a half-check nobody declares is
+        # how a guarantee becomes a habit. Everything written afterwards goes
+        # through the full door.
+        for _n, _k, _b in cons:
+            self._relics(name, f"brief of {_n!r}", _b)
+        for _d, _desc in domains.items():
+            self._relics(name, f"gloss of {_d}", _desc)
+        self._relics(name, "description", description)
         while True:
             code = _gen(CODE_LEN)
             if not self.cx.execute("SELECT 1 FROM projects WHERE code=?",
@@ -1229,7 +1250,13 @@ class Registry:
         through the door that already exists, not through a new one. Removing
         a consumer stays impossible — it would orphan the rules aimed at it."""
         p = self._project(code)
-        cons = self._normalise_consumers(consumers)
+        # A BRIEF IS PROSE, and prose is sanitised. It is read at the head of
+        # every rules_list that consumer makes, so a relic sitting there is the
+        # first thing a role reads at the start of every session — which is the
+        # most effective place in the whole registry for an old identifier to
+        # keep itself alive.
+        cons = [(n, k, self._prose(p, f"brief of {n!r}", b))
+                for n, k, b in self._normalise_consumers(consumers)]
         added, brief_set, already = [], [], []
         for cname, kind, brief in cons:
             row = self.cx.execute(
@@ -1273,6 +1300,7 @@ class Registry:
         added, updated = [], []
         for d, desc in (domains or {}).items():
             _valid_domain(d)
+            desc = self._prose(p, f"gloss of {d}", desc)
             row = self.cx.execute("SELECT description FROM project_domains "
                                   "WHERE project=? AND domain=?", (p, d)).fetchone()
             if row:
@@ -1778,13 +1806,91 @@ class Registry:
 
     # ---------- citations ----------
 
-    def _cites(self, p: str, body: str, self_id: str = "") -> list[str]:
+    # ---------- the reference sanitisation ----------
+
+    SANITISED = "reference sanitisation failed"
+
+    def _relics(self, p: str, field: str, text: str) -> None:
+        """THE SANITISATION, and it runs on EVERY piece of prose an author
+        writes — every field, every door, the task log included.
+
+        It exists because of one observed behaviour: the identifiers of the old
+        Markdown corpus get dragged along. Not out of carelessness — out of
+        memory. Somebody who spent two years reading `VE-05` writes `VE-05`,
+        and the registry this is migrating away from grows back one relic at a
+        time. The manual promises those identifiers do not enter the registry
+        AT ALL; before this, they entered through every field that was not a
+        body, and the worst of them is `reason`, which is IMMUTABLE — a relic
+        landing there could never be removed by anything, not even rules_fix.
+
+        Two shapes are refused, and the second is the one that used to slip
+        through in silence:
+
+          · a BARE ID outside brackets of its own, in a domain this project
+            declares. A forgotten bracket, or a relic; either way it must not
+            be able to become a citation nobody sees;
+          · an ID written with FEWER THAN FOUR DIGITS, anywhere, brackets
+            included. In this registry every number is four digits, so a
+            two- or three-digit one is a relic BY CONSTRUCTION. It used to be
+            padded — `(VE-05)` became VE-0005 — which was a kindness when the
+            two-digit era's own bodies had to keep resolving, and is now the
+            most effective way to smuggle an old reference in: it does not
+            fail, it silently points at a DIFFERENT rule.
+
+        Reading still forgives a short ID, and that is not an exception: there
+        it identifies a row that exists, and a person quoting from memory is
+        not writing a relic into the corpus. PROSE never forgives, because
+        prose is what gets stored."""
+        text = text or ""
+        wrong = sorted({m.group(0) for m in RE_ID_SHAPED.finditer(text)
+                        if len(m.group(2)) != ID_DIGITS})
+        if wrong:
+            raise RulesError(
+                f"{self.SANITISED} in `{field}`: {', '.join(wrong)}. There is exactly ONE "
+                f"way to point at a rule here — (XX-{'N' * ID_DIGITS}), {ID_DIGITS} digits, "
+                "inside round brackets — and any other number of digits is an identifier "
+                "of the OLD Markdown corpus by construction. A short one used to be padded "
+                "in silence, which is worse than a refusal: it did not fail, it pointed at "
+                "a DIFFERENT rule and nobody was told. Nothing is deleted here and nothing "
+                "is rewritten for you: say it in words — 'the old rule about mergers' — or "
+                "cite by its real ID the rule that replaced it.")
+        doms = set(self._domains(p))
+        stray = sorted({f"{m.group(1).upper()}-{m.group(2)}"
+                        for m in RE_BARE.finditer(RE_CITE.sub(" ", text))
+                        if m.group(1).upper() in doms})
+        if stray:
+            example = stray[0]
+            try:
+                example = _norm_id(example)
+            except RulesError:
+                pass
+            raise RulesError(
+                f"{self.SANITISED} in `{field}`: bare ID {', '.join(stray)}. A citation "
+                f"is the ID ALONE inside round brackets — ({example}) — so 'see "
+                f"{stray[0]}' and '(see {stray[0]})' are both refused: in the second the "
+                "brackets hold a sentence, not a pointer. Outside a bracket of its own "
+                "an ID is a typo, and a typo must not be able to turn into a citation "
+                "nobody sees. If you did not mean a rule at all, rewrite the token so it "
+                "does not read as one of this project's IDs. There is no exception, on "
+                "purpose.")
+
+    def _prose(self, p: str, field: str, text: str) -> str:
+        """A prose field of a RULE, validated the way a body is and handed back
+        in its stored form. One door, no exceptions: a `reason` that could
+        carry what a `body` cannot would be the hole with a different name —
+        and `reason` is the field that can never be repaired."""
+        if not (text or "").strip():
+            return text or ""
+        self._cites(p, text, field=field)
+        return self._compact(text)
+
+    def _cites(self, p: str, body: str, self_id: str = "", field: str = "body") -> list[str]:
         """Parse a body and VALIDATE its citations. Raises, so this is the door.
 
-        Four refusals:
-          · a bare ID left OUTSIDE the brackets, which is a forgotten bracket
-            and would otherwise become a mute citation. Case does not matter:
-            `va-0001` and `Va-0001` are the same mistake;
+        It opens with `_relics`, the sanitisation every field of every door
+        runs — the bare ID and the short-form relic. What is left here is the
+        part that is about the CORPUS rather than about the old one:
+
           · a citation that does not RESOLVE — a chat cannot hallucinate a
             pointer, because the proposal does not go in;
           · a citation towards a rule that is NOT YET APPROVED;
@@ -1815,6 +1921,11 @@ class Registry:
         trigger calling a REGEXP the application registers would fail the moment
         somebody opened the file with sqlite3 by hand."""
         body = body or ""
+        # THE SANITISATION FIRST, and before any padding happens: `_norm_id`
+        # below would turn a two-digit relic into a valid-looking pointer, so
+        # a check that ran after it would be looking at the cure instead of
+        # the disease.
+        self._relics(p, field, body)
         out: list[str] = []
         glossed: list[tuple[str, str]] = []
         for m in RE_CITE.finditer(body):
@@ -1829,38 +1940,15 @@ class Registry:
                 continue
             if dst not in out:
                 out.append(dst)
-        # Anything shaped like an ID and NOT inside brackets of its own: a
-        # forgotten bracket. An ordinary parenthesis is ordinary prose — what
-        # makes a token a citation is the shape XX-NNNN, not the bracket.
-        #
-        # Only the DECLARED domains of this project are hunted. Refusing every
-        # two-letter-and-digits token caught a URL path, a locale, a ticket
-        # number — things no rewriting of the sentence can fix — while catching
-        # nothing extra: a forgotten bracket is always a forgotten bracket
-        # around a domain that exists.
-        doms = set(self._domains(p))
-        outside = RE_CITE.sub(" ", body)
-        stray = sorted({f"{m.group(1).upper()}-{m.group(2)}"
-                        for m in RE_BARE.finditer(outside)
-                        if m.group(1).upper() in doms})
-        if stray:
-            example = stray[0]
-            try:
-                example = _norm_id(example)
-            except RulesError:
-                pass
-            raise RulesError(
-                f"bare ID in the body: {', '.join(stray)}. A citation is the ID ALONE "
-                f"inside round brackets — ({example}) — so 'see {stray[0]}' and "
-                f"'(see {stray[0]})' are both refused: in the second the brackets hold a "
-                "sentence, not a pointer. Outside a bracket of its own an ID is a typo, and "
-                "a typo must not be able to turn into a citation nobody sees. If you did "
-                "not mean a rule at all, rewrite the token so it does not read as one of "
-                "this project's IDs. There is no exception, on purpose.")
+        # The bare-ID hunt moved into `_relics`, which runs for every field of
+        # every door instead of only for a body. Only the DECLARED domains of
+        # this project are hunted there: refusing every two-letter-and-digits
+        # token caught a URL path, a locale, a ticket number — things no
+        # rewriting of the sentence can fix — while catching nothing extra.
         missing = [d for d in out if self._row(p, d) is None]
         if missing:
             raise RulesError(
-                f"citation that does not resolve: {', '.join(missing)} "
+                f"citation in `{field}` that does not resolve: {', '.join(missing)} "
                 f"{'were' if len(missing) > 1 else 'was'} never defined in this project.")
         unborn = sorted(d for d in out
                         if self._row(p, d)["status"] in ("proposed", "denied"))
@@ -2083,6 +2171,18 @@ class Registry:
         body = self._compact(body)
         if len(body.encode()) > MAX_BODY_BYTES:
             raise RulesError(f"body over {MAX_BODY_BYTES} bytes once stored: split the rule")
+        # EVERY prose field this call carries, through the same door. The
+        # `reason` is the one that made this necessary and the one that can
+        # never be repaired: it is written once and no event rewrites it, so a
+        # relic landing there outlives the rule itself — it survives in
+        # rule_versions, in an export already taken and in a backup already
+        # carried off site. Only `body` records refs; the others are validated
+        # and stored, because a citation graph built out of prose would be a
+        # second registry nobody asked for.
+        title = self._prose(p, "title", title)
+        reason = self._prose(p, "reason", reason)
+        changelog = self._prose(p, "changelog", changelog)
+        source = self._prose(p, "source", source)
         scopes = self._check_scopes(p, _norm_scope_list(scopes))
         if not (proposed_by or "").strip():
             raise RulesError(
@@ -2223,9 +2323,22 @@ class Registry:
         return {"project": p, "count": len(ids), "ids": ids,
                 "proposals": proposals,
                 "digest": digest,
-                "note": "pass this digest to approve: it proves you approve the batch you "
-                        "READ. If a proposal arrives after this call the digest changes "
-                        "and the stale one is refused. That is on purpose."}
+                # THIS NOTE USED TO DESCRIBE A CALL THAT NO LONGER EXISTS —
+                # "pass this digest to approve" was 2.x text left standing when
+                # rules_approve went to the UI in 3.0.0, and it sent a dry run
+                # looking for a tool it could never find. Nothing caught it:
+                # the check that refuses a docstring naming a tool that is gone
+                # looks for the NAME, and this sentence named no tool. A
+                # runtime note is spoken surface too, and it goes stale exactly
+                # like a docstring.
+                "note": "the digest is what the LOT PAGE of the administration UI asks "
+                        "back: approval is not a tool since 3.0.0 — redacting and "
+                        "promulgating stopped being the same power — so this call READS "
+                        "the batch and a person approves it in the browser, against this "
+                        "same digest. If a proposal arrives in between the digest changes "
+                        "and the stale one is refused, which is the proof that what was "
+                        "approved is the batch that was read. Denying IS still a tool: "
+                        "rules_deny, which frees the slots this queue's ceiling counts."}
 
     def approve(self, code: str, digest: str) -> dict:
         """Approve the whole pending batch. The DIGEST is the one check left on
@@ -2294,6 +2407,7 @@ class Registry:
         p = self._project(code)
         if not (reason or "").strip():
             raise RulesError("a denial without a reason teaches nothing: say why")
+        reason = self._prose(p, "reason", reason)
         if isinstance(ids, str):
             ids = [ids]
         out = []
@@ -2382,6 +2496,14 @@ class Registry:
             raise RulesError(f"{rid}: never defined in this project")
         if not (reason or "").strip():
             raise RulesError("reason is mandatory")
+        # The three prose fields this call may carry go through the same door
+        # as a body. A `title` left out is left alone — same reasoning as the
+        # body below: what did not arrive today is not re-judged today.
+        reason = self._prose(p, "reason", reason)
+        if title is not None:
+            title = self._prose(p, "title", title)
+        if changelog is not None:
+            changelog = self._prose(p, "changelog", changelog)
         cur = self._version(p, rid)
         if int(expected_version) != cur:
             raise RulesError(f"{rid} is at version {cur}, you read {expected_version}: "
@@ -2427,6 +2549,7 @@ class Registry:
         rid = _norm_id(rid)
         if self._row(p, rid) is None:
             raise RulesError(f"{rid}: never defined in this project")
+        reason = self._prose(p, "reason", reason)
         scopes = self._check_scopes(p, _norm_scope_list(scopes))
         added = []
         for s in scopes:
@@ -2468,6 +2591,8 @@ class Registry:
             raise RulesError(f"{rid} is already retired")
         if not (reason or "").strip():
             raise RulesError("reason is mandatory")
+        reason = self._prose(p, "reason", reason)
+        changelog = self._prose(p, "changelog", changelog)
         sb = None
         if superseded_by:
             sb = _norm_id(superseded_by)
@@ -2509,6 +2634,27 @@ class Registry:
     # by whoever completes the work at the moment they complete it: the task
     # carries the short, queryable outcome, the Storia the why. Two gestures,
     # one moment.
+
+    def _task_prose(self, p: str, field: str, text: str) -> str:
+        """A task's prose: SANITISED like everything else, and not validated
+        like a rule's.
+
+        The two halves are different guarantees and it is worth keeping them
+        apart. The sanitisation — no relic of the old Markdown, no bare ID —
+        applies here exactly as it does to a rule, because "no old identifiers
+        anywhere" means anywhere. What does NOT apply is the requirement that
+        a pointer RESOLVE: a task legitimately says "propose a rule about X"
+        and names something that does not exist yet, and refusing that would
+        make the work log answerable to the corpus instead of the other way
+        round. An unresolved pointer is reported in the text when the body is
+        read.
+
+        Compacted like a body, so a citation pasted back with its gloss is
+        stored as the bare pointer and cannot carry a stale title."""
+        if not (text or "").strip():
+            return text or ""
+        self._relics(p, field, text)
+        return self._compact(text)
 
     def _consumer_id(self, project: str, name: str) -> tuple[int, str]:
         """The surrogate and the stored spelling, together. Every task lookup
@@ -2627,6 +2773,8 @@ class Registry:
         if len(body.encode()) > MAX_BODY_BYTES:
             raise RulesError(f"the body is over {MAX_BODY_BYTES} bytes: split the task — "
                              "same discipline as a rule's body")
+        title = self._task_prose(p, "title", title)
+        body = self._task_prose(p, "body", body)
         key = (idem_key or "").strip()
         if key:
             # The MECHANICAL cure for duplicates, chosen over discipline
@@ -2836,6 +2984,8 @@ class Registry:
                 "not reopened. Its outcome is what the log is quoted for — open a new "
                 "task instead.")
         _, actor = self._consumer_id(p, by)
+        outcome = self._task_prose(p, "outcome", outcome)
+        reason = self._task_prose(p, "reason", reason)
         now = _now()
         self.cx.execute(
             "UPDATE tasks SET status=?, outcome=?, reason=?, actor=?, closed_at=?, "
@@ -2888,12 +3038,16 @@ class Registry:
         _, actor = self._consumer_id(p, by)
         sets, args, changed = [], [], []
         if (title or "").strip():
-            sets.append("title=?"); args.append(title.strip()); changed.append("title")
+            sets.append("title=?")
+            args.append(self._task_prose(p, "title", title.strip()))
+            changed.append("title")
         if (body or "").strip():
             b = body.strip()
             if len(b.encode()) > MAX_BODY_BYTES:
                 raise RulesError(f"the body is over {MAX_BODY_BYTES} bytes: split the task")
-            sets.append("body=?"); args.append(b); changed.append("body")
+            sets.append("body=?")
+            args.append(self._task_prose(p, "body", b))
+            changed.append("body")
         moved_to = ""
         if (consumer or "").strip():
             cid, moved_to = self._consumer_id(p, consumer)

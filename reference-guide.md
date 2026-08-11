@@ -29,7 +29,9 @@ says so in its body.
 **Scopes** are named sets of consumers. There is no separate notion of "group":
 a single consumer is a set with one element, and its singleton scope is made by
 a database trigger the moment the consumer is born. One kind of pointer, no
-branch. `_ALL_` is a scope too, and the only one whose membership is computed:
+branch. Every scope says which of the two it is: `managed: true` is the
+database's — a consumer's singleton, or `_ALL_` — and it is not yours to edit;
+`managed: false` is a group you made. `_ALL_` is a scope too, and the only one whose membership is computed:
 it must reach consumers that do not exist yet.
 
 **A rule points to a SET of scopes.** Widening it is one more row — the group it
@@ -81,14 +83,48 @@ next number in it, four digits: `VA-0001` for the first of its domain. The
 assigned ID is in the verdict, and it is what other rules must cite.
 
 Four digits because IDs are **never reused**: a domain that retires and rewrites
-burns numbers even while only twenty are alive. Older text may still say
-`VA-02`; wherever an ID is read it is padded, so `VA-02` and `VA-0002` are the
-same rule.
+burns numbers even while only twenty are alive.
 
-The identifiers of the old Markdown do not enter the registry at all: the
-old->new mapping is kept in the migration files, outside, because one thing
-must have one name and a relic conserved in the clean system is how the old
-corpus grows back.
+**Numbers are handed out in order of ARRIVAL, not in the order you wrote the
+calls.** File five proposals in parallel and they come back `VA-0001`,
+`VA-0003`, `VE-0001`, `VA-0002`, `VA-0004`: the counter serves whoever gets
+there first, and in parallel that is decided by the network. It is not a
+defect — a number is a position in a sequence, not a choice — but if you want
+a batch numbered in the order it will be READ, **file it one at a time.** A
+few seconds per rule is nothing next to a foundational lot whose IDs run
+backwards forever.
+
+## THE SANITISATION: the identifiers of the old Markdown do not come in
+
+They do not enter the registry **at all** — the old→new mapping lives in the
+migration files, outside, because one thing must have one name and a relic
+kept inside the clean system is how the old corpus grows back.
+
+That is enforced, in every field, at every door:
+
+> **There is exactly ONE way to point at a rule: `(VA-0002)` — four digits,
+> inside round brackets.** Any other number of digits is refused. Any ID
+> outside brackets of its own is refused. And it is refused in the `reason`,
+> the `changelog`, the `source`, the `title`, a consumer's `brief`, a domain's
+> gloss and a task's body — not only in a rule's body, which is where the
+> check used to stop while the relics lived everywhere else.
+
+`reason` is the field that made this necessary: it is written once and **no
+event ever rewrites it**, so a relic landing there could never be removed by
+anything — not by `rules_fix`, not by anyone. It would survive in the history,
+in an export already taken and in a backup already carried off site.
+
+**The sanitisation refuses; it does not correct and it does not delete.** A
+call with a bad reference does nothing at all: nothing is stored, no number is
+drawn and no slot in the pending queue is spent — so a typo cannot make an ID
+permanent. The refusal names the field and the token, and the cure is yours:
+say it in words (*"the old rule about mergers"*) or cite by its real ID the
+rule that replaced it.
+
+**Reading still forgives a short ID** — `rules_get("VA-02")` resolves onto
+`VA-0002` — and that is not an exception. There you are identifying a row that
+exists; a person quoting from memory is not writing anything into the corpus.
+Prose never forgives, because prose is what gets stored.
 
 ## CITATIONS: `(VA-0002)`
 
@@ -392,6 +428,12 @@ for no master.
         │                              └──> retired
         └──> denied  (with a reason, and the row STAYS)
 
+**The clock starts at APPROVAL, not at filing.** A proposal comes back
+`provisional` with `expires_at: null`, and that is not an omission: a rule
+that reaches nobody is not spending its term. `rules_propose` also hands back
+`reaches_now: []` on everything it files — the same fact as a value you can
+check by machine instead of a sentence you have to trust.
+
 **`rules_batch`** returns the pending proposals — each with its `reason` — and
 a **digest** over the whole. **Approval happens on the LOT PAGE of the UI**,
 behind the master, against that same digest: it proves the approval covers
@@ -491,7 +533,15 @@ too, as it always did.
   project, retired rules included.
 - **`rules_consumers_add` · `rules_domains_add` · `rules_scope_create`** —
   custody of who and what. Consumers and domains are data: a new project does
-  not need a new container. A consumer may be born WITH its `brief` — its
+  not need a new container. **An item in the consumers list may be a plain
+  name or an object, and the object is how the KIND is said:** `"Advisory"` is
+  a chat, `{"name": "FP-Update-Tax", "kind": "skill"}` is a skill. It is
+  stored and it comes back in `rules_project_info` — chat and skill are DATA,
+  not a convention held in somebody's head. A list of bare strings makes
+  everything a chat, silently. A **domain's gloss** is not write-once: adding
+  a domain that already exists with a different description UPDATES it, and
+  the verdict says `updated` next to `added` rather than pretending nothing
+  happened. A consumer may be born WITH its `brief` — its
   mandate, returned at the head of its `rules_list` — and on a consumer that
   already exists, `rules_consumers_add` with a brief updates it: that is the
   door briefs are written through. Versioned by trigger, hand edits included;

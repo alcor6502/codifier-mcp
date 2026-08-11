@@ -658,6 +658,14 @@ def rules_consumers_add(project: str, consumers: list, key: str) -> dict:
     """MAINTENANCE. Add consumers to a project — chats or skills. Each one gets
     a scope of its own name, made by the database.
 
+    AN ITEM MAY BE A PLAIN NAME OR AN OBJECT, and the object is how you say
+    what kind it is: `"Advisory"` is a chat, because `kind` defaults to
+    `"chat"`, while `{"name": "FP-Update-Tax", "kind": "skill"}` is a skill.
+    `kind` is stored and comes back in rules_project_info — the distinction is
+    DATA, not a convention you have to remember. A list of bare strings makes
+    everything a chat, which is the trap a dry run fell into: nine skills came
+    back as chats and nothing said so.
+
     An item may carry a `brief` — the consumer's mandate, in Markdown,
     returned at the head of its rules_list: creating a consumer and giving it
     its identity is one gesture. On a consumer that already EXISTS, an item
