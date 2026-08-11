@@ -1869,6 +1869,49 @@ if _WEB_CHECK:
     ok("web.action_cap_from_env" in ast.unparse(_WEB_CHECK[0]),
        "and the preflight validates it at the edge, like the port")
 
+print("\n== the consultation reads, and only reads ==")
+
+# The four views the spec asks for, each named by the method that serves it.
+# Naming the METHOD and not the route is the point: a page that quietly built
+# its own answer instead of asking the engine would be a second reading of the
+# corpus, and two readings of a corpus disagree.
+for _m, _what in (("list_rules", "the rules in force for a consumer"),
+                  ("history", "a rule's history"),
+                  ("compare", "the diff between two of its versions"),
+                  ("pending", "the pendings and the expiring"),
+                  ("status", "the state of the registry")):
+    ok(any(n.func.attr == _m for n in WEB_CALLS),
+       f"the UI serves {_what} from registry.{_m}()")
+
+# The brief LEADS the list, and the legend travels with it: that is the shape
+# rules_list promises, and a page that dropped either would be showing a
+# consumer something different from what its chat reads.
+ok("brief" in WEB_SRC, "and the rules page carries the brief, as rules_list does")
+ok("domains" in WEB_SRC, "and the legend of the domains present")
+
+# Every route is GET except the three that act, and those three are the whole
+# of what this UI writes. A read page that answered POST would be a door
+# nobody counted — the derived check further down proves no ENGINE write hides
+# behind one, this one proves the surface itself is what it looks like.
+_ROUTES = []
+for _n in ast.walk(WEB_TREE):
+    if (isinstance(_n, ast.Call) and isinstance(_n.func, ast.Name)
+            and _n.func.id == "Route"):
+        _path = _n.args[0].value if _n.args and isinstance(_n.args[0], ast.Constant) else "?"
+        _meth = tuple(sorted(k.value for kw in _n.keywords if kw.arg == "methods"
+                             for k in kw.value.elts))
+        _ROUTES.append((_path, _meth, ast.unparse(_n.args[1]) if len(_n.args) > 1 else "?"))
+ok(bool(_ROUTES), f"web.py declares its routes explicitly: {len(_ROUTES)}")
+_POSTS = sorted(r for r in _ROUTES if "POST" in r[1])
+ok([(r[0], r[2]) for r in _POSTS] == [("/login", "login"), ("/logout", "logout"),
+                                      ("/p/{project}/batch", "batch_action")],
+   "and exactly three of them take POST: login, logout and the lot's action",
+   [(r[0], r[2]) for r in _POSTS])
+ok(all(r[1] in (("GET",), ("POST",)) for r in _ROUTES),
+   "and no route answers both — a page that reads and writes at one address is "
+   "a page whose method is the only thing between the two",
+   [r for r in _ROUTES if r[1] not in (("GET",), ("POST",))])
+
 print("\n== the boot serves two servers on one loop ==")
 
 # C4. The MCP app and the admin UI live in ONE process, on ONE asyncio loop:

@@ -307,10 +307,30 @@ def build(*, registry, log, master: str, action_cap: int, refusal):
                                   f"{_esc(name)}.</p>", nav=NAV), status_code=404)
 
     def _project_nav(name: str) -> str:
-        return (f"<a href='/p/{_esc(name)}/batch'>lot</a>"
-                f"<a href='/'>projects</a>"
+        n = _esc(name)
+        return (f"<a href='/p/{n}/batch'>lot</a><a href='/p/{n}/rules'>rules</a>"
+                f"<a href='/p/{n}/pending'>pending</a>"
+                f"<a href='/p/{n}/status'>state</a><a href='/'>projects</a>"
                 "<form class='inline' method='post' action='/logout'>"
                 "<button type='submit'>sign out</button></form>")
+
+    def _consumer_picker(name: str, code: str, chosen: str, where: str) -> str:
+        """The consumer is a MENU and not a text field, and the list comes from
+        the registry. Typed by hand it would be one more place a name can be
+        spelt wrong, and the engine's refusal for an unknown consumer is not
+        the answer to a typo — it is the answer to asking about somebody who
+        does not exist."""
+        names = [c["name"] for c in registry.project_info(code)["consumers"]]
+        opts = "".join(
+            f"<option value='{_esc(n)}'{' selected' if n == chosen else ''}>"
+            f"{_esc(n)}</option>" for n in names)
+        return (f"<form method='get' action='/p/{_esc(name)}/{where}'>"
+                f"<label for='consumer'>Consumer</label>"
+                f"<select id='consumer' name='consumer'>{opts}</select> "
+                f"<button type='submit'>show</button></form>")
+
+    def _consumers(code: str) -> list[str]:
+        return [c["name"] for c in registry.project_info(code)["consumers"]]
 
     async def project_home(request):
         if not _session_ok(request):
@@ -496,6 +516,169 @@ def build(*, registry, log, master: str, action_cap: int, refusal):
         out.append(f"<p><a href='/p/{_esc(name)}/batch'>Back to the lot</a></p>")
         return "".join(out)
 
+    # ---------- the consultation: it reads, and only reads ----------
+
+    def _read_page(request, render):
+        """The shape every read page shares: a session, a project, and the
+        code resolved from the name. Written once so that adding a page cannot
+        add a page that forgot the session."""
+        if not _session_ok(request):
+            return _guest(request)
+        name = request.path_params["project"]
+        code = _code_of(name)
+        if code is None:
+            return _no_project(name)
+        try:
+            body, title = render(name, code)
+        except refusal as e:
+            log.info("refused web read: %s", e)
+            body, title = f"<p class='bad'>{_esc(e)}</p>", name
+        response = HTMLResponse(_page(title, body, nav=_project_nav(name)))
+        _issue(response)
+        return response
+
+    def _pick(request, code: str) -> str:
+        """The consumer asked for, or the first one there is. Never empty: the
+        readings that want a consumer refuse without one, and a page that
+        opened on a refusal would teach that it is broken."""
+        wanted = (request.query_params.get("consumer") or "").strip()
+        names = _consumers(code)
+        return wanted if wanted in names else (names[0] if names else "")
+
+    async def rules_page(request):
+        def render(name, code):
+            consumer = _pick(request, code)
+            picker = _consumer_picker(name, code, consumer, "rules")
+            if not consumer:
+                return picker + "<p class='note'>No consumer in this project.</p>", name
+            data = registry.list_rules(code, consumer)
+            # The BRIEF leads, exactly as it does in rules_list: "you are
+            # so-and-so, and these are your rules" is one round trip, which is
+            # the reason the field exists at all. Empty is not an error.
+            brief = (f"<p class='ok'>{_esc(data['brief'])}</p>" if data["brief"]
+                     else "<p class='note'>This consumer has no brief.</p>")
+            legend = " · ".join(f"{_esc(d)} {_esc(t)}"
+                                for d, t in data["domains"].items())
+            rows = "".join(
+                f"<tr><td><a href='/p/{_esc(name)}/rule/{_esc(r['id'])}"
+                f"?consumer={_esc(consumer)}'>{_esc(r['id'])}</a></td>"
+                f"<td><pre>{_esc(r['body'])}</pre></td></tr>"
+                for r in data["rules"])
+            return (picker + brief
+                    + (f"<p class='note'>{legend}</p>" if legend else "")
+                    + f"<p class='note'>{data['count']} in force, widest first — "
+                      f"what comes first binds everyone. "
+                      f"{data['outside_your_scope']} are outside this perimeter.</p>"
+                    + (f"<table><tbody>{rows}</tbody></table>" if rows
+                       else "<p class='note'>Nothing in force for this consumer.</p>"),
+                    f"{name} — rules for {consumer}")
+        return _read_page(request, render)
+
+    async def rule_page(request):
+        def render(name, code):
+            rid = request.path_params["rule"]
+            consumer = _pick(request, code)
+            out = [f"<p class='note'>Read as <b>{_esc(consumer)}</b>.</p>"]
+            data = registry.get_rules(code, [rid], consumer)
+            for f in data["found"]:
+                mark = (f" — <b>{_esc(f['status'])}</b>" if f.get("status") else "")
+                if f.get("superseded_by"):
+                    mark += f", superseded by {_esc(f['superseded_by'])}"
+                out.append(f"<p>{_esc(f['id'])}{mark}</p><pre>{_esc(f['body'])}</pre>")
+            for f in data["not_yours"]:
+                out.append(f"<p class='bad'>{_esc(f['id'])} exists and is not this "
+                           f"consumer's: it is held by "
+                           f"{_esc(', '.join(f['held_by']) or 'nobody')}.</p>")
+            for f in data["never_defined"]:
+                out.append(f"<p class='bad'>{_esc(f)} was never defined in this "
+                           f"project — a broken citation, or another project's "
+                           f"code.</p>")
+            # THE HISTORY, which is where the state, the perimeter and the why
+            # live version by version. It is perimeter-free on purpose: what a
+            # rule has BEEN is not addressed to a consumer.
+            versions = []
+            try:
+                versions = registry.history(code, rid)["versions"]
+            except refusal as e:
+                out.append(f"<p class='note'>{_esc(e)}</p>")
+            if versions:
+                rows = "".join(
+                    f"<tr><td>v{_esc(v['version'])}</td><td>{_esc(v['ts'])}</td>"
+                    f"<td>{_esc(v['action'])}</td><td>{_esc(v['status'])} · "
+                    f"{_esc(v['permanence'])}</td><td>{_esc(v['scopes'])}</td>"
+                    f"<td class='note'>{_esc(v['reason'])}</td></tr>"
+                    for v in versions)
+                out.append("<h2>History</h2><table><thead><tr><th></th><th>when</th>"
+                           "<th>what</th><th>state</th><th>perimeter</th><th>why</th>"
+                           f"</tr></thead><tbody>{rows}</tbody></table>")
+                # THE EXPIRY DATE IS NOT HERE, and that is the engine's shape
+                # rather than an omission of this page: no method of Registry
+                # hands out expires_at for one rule chosen at will. It is
+                # published where it is DECIDED — the expiring queue on the
+                # pending page — and reading it out of the whole-project export
+                # would be a machine parsing our own prose back, which is the
+                # thing 2.0.1 stopped doing. Said out loud rather than left as
+                # a gap somebody hunts for.
+                out.append("<p class='note'>The expiry date is not in the "
+                           "history: it is published where it is decided — the "
+                           "expiring queue on the pending page.</p>")
+                latest = versions[-1]["version"]
+                a = int(request.query_params.get("a") or max(1, latest - 1))
+                b = int(request.query_params.get("b") or latest)
+                if latest > 1:
+                    diff = registry.compare(code, rid, a, b)
+                    out.append(f"<h2>v{_esc(a)} to v{_esc(b)}</h2>"
+                               + (f"<pre>{_esc(diff['diff'])}</pre>" if not diff["identical"]
+                                  else "<p class='note'>Identical.</p>"))
+            return "".join(out), f"{name} — {rid}"
+        return _read_page(request, render)
+
+    async def pending_page(request):
+        def render(name, code):
+            consumer = (request.query_params.get("consumer") or "").strip()
+            picker = _consumer_picker(name, code, consumer, "pending")
+            data = registry.pending(code, consumer if consumer in _consumers(code) else "")
+            def table(title, rows, why=False):
+                if not rows:
+                    return f"<h2>{title}</h2><p class='note'>None.</p>"
+                trs = "".join(
+                    f"<tr><td><a href='/p/{_esc(name)}/rule/{_esc(r['id'])}'>"
+                    f"{_esc(r['id'])}</a></td><td>{_esc(r.get('title'))}</td>"
+                    f"<td class='note'>{_esc(r.get('expires_at') or '')}</td>"
+                    f"<td class='note'>{_esc(r.get('reason') or r.get('denied_reason') or '')}"
+                    f"</td></tr>" for r in rows)
+                return f"<h2>{title}</h2><table><tbody>{trs}</tbody></table>"
+            # The expiring queue is per CONSUMER in the engine, and it is the
+            # only list that carries the WHY — it is the one read in order to
+            # decide, and that decision is undecidable without the reason in
+            # front of you. Without a consumer chosen the engine returns none,
+            # and the page says so rather than showing an empty table that
+            # reads like good news.
+            expiring = data["expiring_within_30_days"]
+            tail = ("" if consumer else
+                    "<p class='note'>The expiring queue is per consumer: choose "
+                    "one above to see it.</p>")
+            return (picker + table("Waiting", data["waiting"])
+                    + table("Denied", data["denied"])
+                    + table("Expiring within 30 days", expiring) + tail,
+                    f"{name} — pending")
+        return _read_page(request, render)
+
+    async def status_page(request):
+        def render(name, code):
+            st = registry.status(code)
+            def dl(d):
+                return "".join(f"<tr><td>{_esc(k)}</td><td>{_esc(v)}</td></tr>"
+                               for k, v in d.items())
+            return ("<h2>Rules</h2><table><tbody>" + dl(st["rules"])
+                    + "</tbody></table><h2>By domain</h2><table><tbody>"
+                    + dl(st["by_domain"]) + "</tbody></table>"
+                    + "<h2>By consumer</h2><table><tbody>"
+                    + dl(st["by_consumer"]) + "</tbody></table>"
+                    + "<h2>Database</h2><table><tbody>" + dl(st["database"])
+                    + "</tbody></table>", f"{name} — state")
+        return _read_page(request, render)
+
     routes = [
         Route("/", home, methods=["GET"]),
         Route("/login", login, methods=["POST"]),
@@ -503,5 +686,9 @@ def build(*, registry, log, master: str, action_cap: int, refusal):
         Route("/p/{project}/", project_home, methods=["GET"]),
         Route("/p/{project}/batch", batch_page, methods=["GET"]),
         Route("/p/{project}/batch", batch_action, methods=["POST"]),
+        Route("/p/{project}/rules", rules_page, methods=["GET"]),
+        Route("/p/{project}/rule/{rule}", rule_page, methods=["GET"]),
+        Route("/p/{project}/pending", pending_page, methods=["GET"]),
+        Route("/p/{project}/status", status_page, methods=["GET"]),
     ]
     return Starlette(routes=routes)
