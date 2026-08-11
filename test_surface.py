@@ -1609,6 +1609,54 @@ ok(GUIDE_SRC.count("legend of the domains present") == 1,
    "the manual pins the legend, exactly once",
    GUIDE_SRC.count("legend of the domains present"))
 
+print("\n== the boot serves two servers on one loop ==")
+
+# C4. The MCP app and the admin UI live in ONE process, on ONE asyncio loop:
+# two processes on the same SQLite do not share the RLock, which is why the
+# separate container is a closed alley. The shape is pinned from the AST,
+# because every half of it fails silently on its own: `mcp.run(...)` left
+# behind serves the MCP and never starts the UI, and a single uvicorn.Server
+# serves the UI and never starts the MCP — in both cases the process comes up,
+# the startup line is printed, and only one of the two ports answers.
+_SERVE = next((n for n in SERVER_TREE.body
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and n.name == "_serve"), None)
+ok(isinstance(_SERVE, ast.AsyncFunctionDef),
+   "server.py defines `_serve`, and it is a coroutine: two servers need one loop",
+   type(_SERVE).__name__ if _SERVE is not None else "absent")
+ok(not [n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
+        and ast.unparse(n.func) == "mcp.run"],
+   "and `mcp.run(...)` is gone: it owns the loop and would never let the UI start")
+if _SERVE is not None:
+    _CALLED = {ast.unparse(n.func) for n in ast.walk(_SERVE) if isinstance(n, ast.Call)}
+    _SERVERS = [n for n in ast.walk(_SERVE) if isinstance(n, ast.Call)
+                and ast.unparse(n.func) == "uvicorn.Server"]
+    ok(len(_SERVERS) == 2, "and it builds exactly two uvicorn.Server", len(_SERVERS))
+    ok("mcp.http_app" in _CALLED,
+       "and one of them is handed mcp.http_app() — the MCP surface, unmoved",
+       sorted(_CALLED))
+    ok("web.build" in _CALLED,
+       "and the other the app web.py builds", sorted(_CALLED))
+    _GATHERS = [n for n in ast.walk(_SERVE) if isinstance(n, ast.Call)
+                and ast.unparse(n.func) == "asyncio.gather"]
+    ok(len(_GATHERS) == 1,
+       "and both are awaited together: serving one and then the other is serving one",
+       len(_GATHERS))
+
+# The startup line is what you read to confirm an update took, and the UI's
+# port is the field on it a person needs in order to reach the thing at all.
+# READ from the resolved constant, never spelled out a second time: the line
+# that said "off (not built yet)" stayed true for exactly as long as nobody
+# maintained it.
+if _MAIN is not None:
+    _WEBLINE = [c for c in ast.walk(_MAIN) if isinstance(c, ast.Call)
+                and ast.unparse(c.func) == "log.info"
+                and any(isinstance(a, ast.Name) and a.id == "WEB_PORT" for a in c.args)]
+    ok(bool(_WEBLINE),
+       "the startup line carries WEB_PORT, resolved — not a literal, not a guess")
+ok("not built yet" not in SERVER_SRC,
+   "and it no longer says the UI is not built yet")
+
 print("\n== the preflight declares the migration it performs ==")
 
 # The preflight opens Registry(DB) BEFORE the server, so the migration happens

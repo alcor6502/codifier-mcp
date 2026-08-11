@@ -46,18 +46,20 @@ Configuration, all through environment variables:
   ALLOWED_CIDRS           accepted ranges, ';' between entries and '#' opening a
                           description. Empty string disables the filter
   ANTHROPIC_CIDR          DEPRECATED, still honoured: see ALLOWED_CIDRS
-  WEB_PORT                reserved for the read-only web UI, not built yet. Inert here,
-                          and declared in the template already because Unraid
-                          does not propagate new variables to installed containers
+  WEB_PORT                the port the administration UI listens on (default
+                          9443). Resolved in web.port_from_env so the service
+                          and the preflight cannot disagree about it
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import secrets
 import sys
 from pathlib import Path
 
+import uvicorn
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.github import GitHubProvider
 
@@ -70,6 +72,7 @@ from mcp_common_engine import (VERSION as ENGINE_VERSION, cidrs_from_env,
                                describe_cidrs, log_level_from_env)
 from mcp_common_engine.gate import Gate
 from mcp_common_engine.refusals import make_tool
+import web
 from rules import Registry, RulesError, RulesFault, VERSION
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
@@ -111,6 +114,13 @@ BASE_URL = env("BASE_URL")
 ALLOWED_LOGIN = env("ALLOWED_GITHUB_LOGIN")
 ADMIN_CODE = env("ADMIN_ACCESS_CODE")
 PORT = int(env("PORT", "3001"))
+# The interface the MCP server listens on INSIDE the container. It is read
+# once, here, because the startup line prints it and 0.0.0.0 is the one field
+# on that line where being wrong matters.
+BIND_HOST = os.environ.get("BIND_HOST", "127.0.0.1")
+# Resolved in web.port_from_env for the same reason as the IP filter and the
+# log level: one expression, so the service and the preflight cannot disagree.
+WEB_PORT = web.port_from_env()
 BACKUP_DIR = os.environ.get("BACKUP_DIR") or os.path.join(os.path.dirname(DB_PATH), "backup")
 # Resolved in the engine's cidrs_from_env so the service and the preflight can
 # never disagree about what the filter is.
@@ -737,16 +747,52 @@ def rules_backup(code: str) -> dict:
     return registry.backup(BACKUP_DIR)
 
 
+# The UI binds 0.0.0.0 and the MCP does not, and the asymmetry is not an
+# oversight. The MCP's legitimate traffic arrives from the Funnel, which runs
+# alongside inside the container, so 127.0.0.1 is the whole world it needs. The
+# UI is reached from the LAN through a PUBLISHED port, and Docker's bridge
+# forwards to the container's own address, never to its loopback: bound to
+# BIND_HOST the page would be unreachable from the browser it exists for. The
+# perimeter that follows is the LAN — known, accepted, and written down in
+# `Decisioni aperte.md`; what defends the UI is the master and the session's
+# expiry, not the interface it listens on.
+WEB_BIND_HOST = "0.0.0.0"
+
+
+async def _serve() -> None:
+    """The two servers, on ONE loop.
+
+    `mcp.run(...)` used to be here, and it cannot stay: it builds the loop and
+    owns it, so anything else that had to be served would never be started. In
+    its place the app itself — `mcp.http_app()`, the same surface, which is
+    the reason this delivery needs no reconnection — plus the UI's, each on a
+    `uvicorn.Server`, both awaited together. Serving one and then the other is
+    serving one.
+
+    The access log stays off on both, for the reason it is off on the MCP's:
+    one line per request slowly becomes a record of who asked what and when."""
+    def cfg(app, host: str, port: int) -> uvicorn.Config:
+        return uvicorn.Config(app, host=host, port=port, log_level="warning",
+                              access_log=False, lifespan="on")
+
+    servers = (
+        uvicorn.Server(cfg(mcp.http_app(), BIND_HOST, PORT)),
+        uvicorn.Server(cfg(web.build(registry=registry, log=log),
+                           WEB_BIND_HOST, WEB_PORT)),
+    )
+    await asyncio.gather(*(s.serve() for s in servers))
+
+
 if __name__ == "__main__":
-    # The host is READ, not spelled out again: this line is what you look at to
-    # confirm an update took, and BIND_HOST is the one field on it where being
-    # wrong matters — 0.0.0.0 exposes the service to the LAN, and a startup line
-    # that keeps saying 127.0.0.1 would be lying about exactly that.
-    _HOST = os.environ.get("BIND_HOST", "127.0.0.1")
+    # This line is what you look at to confirm an update took, so every field
+    # on it is READ and not spelled out a second time — the host, because
+    # 0.0.0.0 exposes the service to the LAN and a line that kept saying
+    # 127.0.0.1 would be lying about exactly that, and the UI's port, because
+    # it is what a person needs in order to reach the page at all.
     log.info("codifier-mcp %s — engine %s — starting on %s:%s — base_url %s — allowed user: %s "
-             "— IP filter: %s — token store: %s — db: %s (process uid %s) — web UI: %s",
-             VERSION, ENGINE_VERSION, _HOST, PORT, BASE_URL, ALLOWED_LOGIN, describe_cidrs(ALLOWED_CIDRS),
+             "— IP filter: %s — token store: %s — db: %s (process uid %s) — web UI: http://%s:%s",
+             VERSION, ENGINE_VERSION, BIND_HOST, PORT, BASE_URL, ALLOWED_LOGIN,
+             describe_cidrs(ALLOWED_CIDRS),
              os.environ.get("FASTMCP_HOME", "(default — NOT persistent!)"),
-             DB_PATH, os.geteuid(),
-             os.environ.get("WEB_PORT") or "off (not built yet)")
-    mcp.run(transport="http", host=_HOST, port=PORT)
+             DB_PATH, os.geteuid(), WEB_BIND_HOST, WEB_PORT)
+    asyncio.run(_serve())
