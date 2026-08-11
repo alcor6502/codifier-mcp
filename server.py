@@ -53,6 +53,8 @@ Configuration, all through environment variables:
                           ADMIN_ACCESS_CODE and deliberately NOT the same
                           secret: that one travels in conversations, this one
                           never leaves the browser
+  WEB_ACTION_CAP          how many proposals the UI may approve in one action
+                          (default 5)
 """
 from __future__ import annotations
 
@@ -130,6 +132,8 @@ WEB_PORT = web.port_from_env()
 # second place where it is decided. The preflight has already refused a
 # missing one, a placeholder and anything under 12 characters.
 WEB_MASTER = env("WEB_MASTER_CODE")
+# Resolved in web.action_cap_from_env, once, for the reason the port is.
+WEB_ACTION_CAP = web.action_cap_from_env()
 BACKUP_DIR = os.environ.get("BACKUP_DIR") or os.path.join(os.path.dirname(DB_PATH), "backup")
 # Resolved in the engine's cidrs_from_env so the service and the preflight can
 # never disagree about what the filter is.
@@ -786,7 +790,8 @@ async def _serve() -> None:
 
     servers = (
         uvicorn.Server(cfg(mcp.http_app(), BIND_HOST, PORT)),
-        uvicorn.Server(cfg(web.build(registry=registry, log=log, master=WEB_MASTER),
+        uvicorn.Server(cfg(web.build(registry=registry, log=log, master=WEB_MASTER,
+                                     action_cap=WEB_ACTION_CAP, refusal=RulesError),
                            WEB_BIND_HOST, WEB_PORT)),
     )
     await asyncio.gather(*(s.serve() for s in servers))

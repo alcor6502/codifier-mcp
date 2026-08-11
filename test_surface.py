@@ -1786,6 +1786,89 @@ ok(not _PF_READS_PORT,
    "preflight.py does not read WEB_PORT on its own — it comes from web.py",
    [ast.unparse(n) for n in _PF_READS_PORT])
 
+print("\n== web.py -> rules.py: every call lands ==")
+
+# The SECOND seam, and it is the same class of defect as the first: a renamed
+# parameter between these two files goes unnoticed until somebody clicks. The
+# engine's own suites cannot see it — they call Registry directly — and
+# nothing in the browser would report it as anything but a 500.
+WEB_CALLS = [n for n in ast.walk(WEB_TREE)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and isinstance(n.func.value, ast.Name) and n.func.value.id == "registry"]
+ok(len(WEB_CALLS) >= 3, f"{len(WEB_CALLS)} calls into the engine found in web.py")
+for call in WEB_CALLS:
+    name = call.func.attr
+    where = f"web.py line {call.lineno}"
+    if name not in METHODS:
+        ok(False, f"registry.{name} exists", where)
+        continue
+    pos, kwonly, required = signature(METHODS[name])
+    given_pos = len(call.args)
+    given_kw = {k.arg for k in call.keywords if k.arg}
+    problems = []
+    if given_pos > len(pos):
+        problems.append(f"{given_pos} positional arguments for {len(pos)} parameters")
+    unknown = given_kw - set(pos) - set(kwonly)
+    if unknown:
+        problems.append(f"unknown keywords: {', '.join(sorted(unknown))}")
+    covered = set(pos[:given_pos]) | given_kw
+    missing = required - covered
+    if missing:
+        problems.append(f"missing required: {', '.join(sorted(missing))}")
+    ok(not problems, f"web.py: registry.{name}(...) matches its signature",
+       f"{where}: {'; '.join(problems)}")
+
+print("\n== the lot page: what you saw, what you ticked, and one master ==")
+
+_WEB_FUNCS = {n.name: n for n in ast.walk(WEB_TREE)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+# The DIGEST rides in the page as a hidden field and comes back with the form.
+# It covers what was SEEN, not what was ticked — same contract as
+# rules_approve, on purpose: the page does not invent a contract of its own,
+# it reuses the one belonging to the tool it will replace.
+# Either quoting: the pages are f-strings delimited by double quotes, so the
+# attributes inside them are written with single ones. A check that only knows
+# one of the two forms is a check that fails on correct code, and this file has
+# already learnt what happens to those.
+ok(re.search(r"type=[\"']hidden[\"'][^>]*name=[\"']digest[\"']"
+             r"|name=[\"']digest[\"'][^>]*type=[\"']hidden[\"']", WEB_SRC) is not None,
+   "the digest travels as a hidden field of the form")
+
+# The ORDER inside the action, and it is the whole of "one round": the ones
+# left unticked are DENIED first, and only then is what remains approved.
+# Approving first would approve the whole pending batch — the engine's
+# approve() takes no list — which is the unticked ones let in by the very
+# gesture that meant to keep them out. Read from the AST because the two calls
+# are three lines apart and swapping them looks like tidying.
+_ACT = _WEB_FUNCS.get("batch_action")
+ok(_ACT is not None, "web.py defines the lot page's action")
+if _ACT is not None:
+    # By LINE, not by ast.walk's order, which is breadth-first and had these
+    # two the wrong way round while the code was right — a check that reports
+    # the order of a tree traversal as the order of the source is a check that
+    # cannot see the defect it exists for.
+    _seq = [n.func.attr for n in sorted(
+        (n for n in ast.walk(_ACT)
+         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+         and isinstance(n.func.value, ast.Name) and n.func.value.id == "registry"
+         and n.func.attr in ("deny", "approve")),
+        key=lambda n: (n.lineno, n.col_offset))]
+    ok(_seq == ["deny", "approve"],
+       "and it denies the unticked BEFORE approving the rest: approve() takes "
+       "the whole batch, so the other order lets in exactly what was refused",
+       _seq)
+
+# The CEILING is a knob of the template with a default in the code, resolved
+# once like the port, and refused at the edge rather than at the click.
+ok(getattr(__import__("web"), "DEFAULT_ACTION_CAP", None) is not None,
+   "web.py declares the per-action ceiling's default")
+ok(hasattr(__import__("web"), "action_cap_from_env"),
+   "and resolves it in one expression, for the preflight to share")
+if _WEB_CHECK:
+    ok("web.action_cap_from_env" in ast.unparse(_WEB_CHECK[0]),
+       "and the preflight validates it at the edge, like the port")
+
 print("\n== the boot serves two servers on one loop ==")
 
 # C4. The MCP app and the admin UI live in ONE process, on ONE asyncio loop:

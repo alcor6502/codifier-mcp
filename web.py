@@ -34,6 +34,9 @@ Configuration, all through environment variables:
   WEB_MASTER_CODE   the master. Read by the preflight, which refuses a missing
                     one, a placeholder and anything under 12 characters; handed
                     to build() by server.py, never read from here
+  WEB_ACTION_CAP    how many proposals may be approved in ONE action (default
+                    5). The mechanical form of "at the twelfth in a row a
+                    person signs without reading"
 """
 from __future__ import annotations
 
@@ -74,6 +77,19 @@ SESSION_MAX_IDLE = 3600
 
 SESSION_COOKIE = "codifier_admin"
 
+# How many proposals may enter in ONE action. It is the mechanical form of "at
+# the twelfth signature in a row a person signs without reading", and it is a
+# knob rather than a constant for the reason every knob here is one: a ceiling
+# that is not in the template does not exist.
+#
+# The default is FIVE, which is the pending queue's own default, and the
+# consequence is worth stating rather than discovering: out of the box this
+# ceiling never refuses, because PENDING_CAP has already refused the sixth
+# proposal at the door. It starts to bite the day the queue is widened — which
+# is exactly the day somebody would otherwise approve eleven things in one
+# gesture — and the preflight refuses a value it cannot mean.
+DEFAULT_ACTION_CAP = 5
+
 
 def port_from_env() -> int:
     """The port this server listens on. Born optional with a working default
@@ -84,6 +100,18 @@ def port_from_env() -> int:
         return DEFAULT_PORT
     if not raw.isdigit() or not (1 <= int(raw) <= 65535):
         raise ValueError(f"WEB_PORT={raw!r}: a whole port number between 1 and 65535")
+    return int(raw)
+
+
+def action_cap_from_env() -> int:
+    """The per-action ceiling. Born optional with a working default in the
+    code, like the port and like PENDING_CAP: Unraid does not propagate new
+    variables to containers that are already installed."""
+    raw = (os.environ.get("WEB_ACTION_CAP") or "").strip()
+    if not raw:
+        return DEFAULT_ACTION_CAP
+    if not raw.isdigit() or int(raw) < 1:
+        raise ValueError(f"WEB_ACTION_CAP={raw!r}: a positive whole number of proposals")
     return int(raw)
 
 
@@ -156,11 +184,17 @@ of the service.</p>""")
 # The application
 # =====================================================================
 
-def build(*, registry, log, master: str):
-    """The Starlette application. Handed the engine, the service's own logger
-    and the master: a web layer that reached for any of them itself would be a
-    second place where the configuration is decided, and a second logger is
-    how a refusal stops appearing in the log everybody reads."""
+def build(*, registry, log, master: str, action_cap: int, refusal):
+    """The Starlette application. Handed the engine, the service's own logger,
+    the master and the ceiling: a web layer that reached for any of them itself
+    would be a second place where the configuration is decided, and a second
+    logger is how a refusal stops appearing in the log everybody reads.
+
+    `refusal` is the engine's designed-refusal class, handed in for the same
+    reason `make_tool` is handed it on the MCP side: which exception is a
+    refusal and which is a genuine fault is the one thing neither the engine
+    nor this file can know on its own. A refusal becomes a sentence on the
+    page; a fault is left to rise, with its traceback, at ERROR."""
     from starlette.applications import Starlette
     from starlette.responses import HTMLResponse, RedirectResponse, Response
     from starlette.routing import Route
@@ -255,9 +289,219 @@ def build(*, registry, log, master: str):
         response.delete_cookie(SESSION_COOKIE, path="/")
         return response
 
+    # ---------- a project ----------
+
+    def _code_of(name: str) -> str | None:
+        """Name to code, resolved on EVERY request. The code is the door and it
+        stays in this process: it is never put in a URL, in a cookie or in a
+        page, so a screenshot of the browser and a link sent to somebody are
+        both harmless."""
+        for p in registry.projects()["projects"]:
+            if p["name"] == name:
+                return p["code"]
+        return None
+
+    def _no_project(name: str):
+        return HTMLResponse(_page("Not found",
+                                  f"<p class='bad'>No project called "
+                                  f"{_esc(name)}.</p>", nav=NAV), status_code=404)
+
+    def _project_nav(name: str) -> str:
+        return (f"<a href='/p/{_esc(name)}/batch'>lot</a>"
+                f"<a href='/'>projects</a>"
+                "<form class='inline' method='post' action='/logout'>"
+                "<button type='submit'>sign out</button></form>")
+
+    async def project_home(request):
+        if not _session_ok(request):
+            return _guest(request)
+        name = request.path_params["project"]
+        code = _code_of(name)
+        if code is None:
+            return _no_project(name)
+        info = registry.project_info(code)
+        waiting = len(registry.pending(code)["waiting"])
+        body = (f"<p><a href='/p/{_esc(name)}/batch'>The lot</a> — "
+                f"{waiting} proposal{'' if waiting == 1 else 's'} waiting.</p>"
+                f"<h2>Consumers</h2><p>"
+                + " · ".join(_esc(c["name"]) for c in info["consumers"])
+                + f"</p><h2>Domains</h2><p class='note'>"
+                + " · ".join(f"{_esc(d)} {_esc(t)}" for d, t in info["domains"].items())
+                + "</p>")
+        response = HTMLResponse(_page(name, body, nav=_project_nav(name)))
+        _issue(response)
+        return response
+
+    # ---------- the lot ----------
+
+    def _proposal_html(d: dict) -> str:
+        sup = d.get("supersedes")
+        # BOTH HALVES of the move, where the decision is taken. The engine
+        # hands the field back EXPANDED — the victim's ID with its current
+        # title, and a mark when the victim is no longer in force — so what is
+        # read here is what is being retired and not an ID to go and look up.
+        sup_html = (f"<p class='bad'>Approving this also RETIRES "
+                    f"{_esc(sup)} — one transaction, no window in which both "
+                    f"are in force.</p>") if sup else ""
+        return (f"<article><label><input type='checkbox' name='approve' "
+                f"value='{_esc(d['id'])}'> <b>{_esc(d['id'])}</b> · "
+                f"{_esc(d['title'])} <span class='note'>{_esc(d['type'])} · "
+                f"{_esc(d['permanence'])} · v{_esc(d['version'])} · "
+                f"proposed by {_esc(d['source'])}</span></label>"
+                f"<p class='note'>why: {_esc(d.get('reason'))}</p>"
+                f"{sup_html}"
+                f"<pre>{_esc(d['body'])}</pre>"
+                f"<p class='note'>perimeter: "
+                f"{_esc(', '.join(d['scopes']) or 'none')}</p></article>")
+
+    def _lot_page(name: str, code: str, *, message: str = "", good: str = "",
+                  status: int = 200):
+        current = registry.batch(code)
+        head = (f"<p class='bad'>{_esc(message)}</p>" if message else "") + \
+               (f"<p class='ok'>{_esc(good)}</p>" if good else "")
+        if not current["ids"]:
+            return HTMLResponse(_page(f"{name} — the lot",
+                                      head + "<p class='note'>Nothing is waiting.</p>",
+                                      nav=_project_nav(name)), status_code=status)
+        # The WHOLE pending batch, side by side. That is where three proposals
+        # saying the same thing become visible as what they are, and it is why
+        # ticking does not break the lot: it completes it.
+        blocks = "".join(_proposal_html(d) for d in current["proposals"])
+        body = (f"{head}<form method='post' action='/p/{_esc(name)}/batch'>"
+                f"<input type='hidden' name='digest' value='{_esc(current['digest'])}'>"
+                f"{blocks}"
+                f"<p class='note'>The digest covers what you are LOOKING AT — all "
+                f"{current['count']} of them — not what you tick. If a proposal "
+                f"arrives while you read, this comes back refused and you read "
+                f"again.</p>"
+                f"<label for='reason'>Reason for the ones you leave unticked "
+                f"(they are denied)</label>"
+                f"<input id='reason' type='text' name='reason'>"
+                f"<label for='master'>Master — once for this action, never once "
+                f"per rule</label>"
+                f"<input id='master' type='password' name='master' "
+                f"autocomplete='current-password' required>"
+                f"<p><button type='submit'>Approve the ticked, deny the rest</button></p>"
+                f"</form>")
+        return HTMLResponse(_page(f"{name} — the lot", body, nav=_project_nav(name)),
+                            status_code=status)
+
+    async def batch_page(request):
+        if not _session_ok(request):
+            return _guest(request)
+        name = request.path_params["project"]
+        code = _code_of(name)
+        if code is None:
+            return _no_project(name)
+        response = _lot_page(name, code)
+        _issue(response)
+        return response
+
+    async def batch_action(request):
+        if not _session_ok(request):
+            return _guest(request)
+        name = request.path_params["project"]
+        code = _code_of(name)
+        if code is None:
+            return _no_project(name)
+        form = await request.form()
+        # The master, ONCE for the action and never once per rule: four rules
+        # are not four passwords, and a password typed four times is typed
+        # without looking — which is the very defect the lot was invented to
+        # avoid.
+        if not secrets.compare_digest((form.get("master") or "").strip(), master):
+            log.warning("refused web approval: wrong master, from %s", _client(request))
+            return _lot_page(name, code, status=401,
+                             message="Wrong master. Nothing was changed.")
+        seen = (form.get("digest") or "").strip()
+        ticked = [i.strip() for i in form.getlist("approve") if i.strip()]
+        reason = (form.get("reason") or "").strip()
+        current = registry.batch(code)
+        # THE SAME CONTRACT AS rules_approve, and checked BEFORE anything is
+        # written: what came back must be the batch that was read. Checked
+        # here rather than left to approve() because the denials happen first,
+        # and denying on a stale reading would refuse proposals nobody saw.
+        if seen != current["digest"]:
+            log.info("refused web approval: stale digest, from %s", _client(request))
+            return _lot_page(name, code, status=409, message=(
+                "The batch changed after you read it — something was proposed, "
+                "approved or denied meanwhile. Nothing was changed. This is the "
+                "page as it is now: read it again."))
+        unknown = [i for i in ticked if i not in current["ids"]]
+        if unknown:
+            return _lot_page(name, code, status=400, message=(
+                f"Not in this batch: {', '.join(unknown)}. Nothing was changed."))
+        if len(ticked) > action_cap:
+            return _lot_page(name, code, status=400, message=(
+                f"{len(ticked)} ticked and the ceiling for one action is "
+                f"{action_cap}. Nothing was changed: do it in more than one "
+                f"pass, which is the point of the ceiling."))
+        rest = [i for i in current["ids"] if i not in ticked]
+        if not ticked and not rest:
+            return _lot_page(name, code, status=400,
+                             message="Nothing to do.")
+        try:
+            # DENY FIRST. approve() takes no list — it approves the whole
+            # pending batch — so the unticked have to leave the queue before
+            # it is called. The other order would let in exactly the ones the
+            # gesture meant to keep out.
+            denied = registry.deny(code, rest, reason)["denied"] if rest else []
+            verdict = None
+            if ticked:
+                again = registry.batch(code)
+                if again["ids"] != sorted(ticked):
+                    # Somebody proposed in the moment between the denials and
+                    # the approval. Nothing is approved: what enters must be
+                    # what was read, and this is the one place where saying so
+                    # costs a half-done action rather than a wrong one.
+                    log.info("web approval stopped after the denials: the batch "
+                             "moved again, from %s", _client(request))
+                    return _lot_page(name, code, status=409, message=(
+                        f"Denied {', '.join(denied) or 'nothing'}, and then a "
+                        f"proposal arrived: NOTHING was approved, because what "
+                        f"enters has to be what you read. Here is the batch now."))
+                verdict = registry.approve(code, again["digest"])
+        except refusal as e:
+            # A designed refusal of the engine becomes a sentence on the page.
+            # It is the same conversion the MCP side does in make_tool, for the
+            # same reason: without it a wrong reason or an empty batch arrives
+            # as a 500, which teaches the person nothing and the log a
+            # traceback that is not a fault.
+            log.info("refused web approval: %s", e)
+            return _lot_page(name, code, status=400, message=str(e))
+        return HTMLResponse(_page(f"{name} — done",
+                                  _verdict_html(name, verdict, denied, reason),
+                                  nav=_project_nav(name)))
+
+    def _verdict_html(name: str, verdict, denied, reason: str) -> str:
+        out = []
+        if verdict:
+            out.append(f"<p class='ok'>In force: <b>"
+                       f"{_esc(', '.join(verdict['approved']))}</b> — provisional, "
+                       f"until {_esc(verdict['expires_at'])}. Staying costs a "
+                       f"decision; going is free.</p>")
+            for s in verdict["superseded"]:
+                out.append(f"<p class='ok'>Retired {_esc(s['retired'])}, pointing at "
+                           f"{_esc(s['by'])} — the same transaction.</p>")
+            for s in verdict["supersede_skipped"]:
+                out.append(f"<p class='bad'>{_esc(s['id'])} was to retire "
+                           f"{_esc(s['target'])}, and did not: {_esc(s['why'])}. "
+                           f"Somebody else had already retired it, and that is "
+                           f"not rewritten behind their back.</p>")
+        if denied:
+            out.append(f"<p>Denied: <b>{_esc(', '.join(denied))}</b> — "
+                       f"{_esc(reason)}. The refusal and its reason are on the "
+                       f"noticeboard of whoever filed them: silence became an "
+                       f"answer.</p>")
+        out.append(f"<p><a href='/p/{_esc(name)}/batch'>Back to the lot</a></p>")
+        return "".join(out)
+
     routes = [
         Route("/", home, methods=["GET"]),
         Route("/login", login, methods=["POST"]),
         Route("/logout", logout, methods=["POST"]),
+        Route("/p/{project}/", project_home, methods=["GET"]),
+        Route("/p/{project}/batch", batch_page, methods=["GET"]),
+        Route("/p/{project}/batch", batch_action, methods=["POST"]),
     ]
     return Starlette(routes=routes)

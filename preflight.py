@@ -24,8 +24,8 @@ Its own, because this service keeps a database instead of files:
   approval    the one knob the approval lifecycle reads, PROVISIONAL_DAYS,
               validated at the edge instead of at the first approval
   web         the administration UI: its master present, long enough and not a
-              placeholder, and its port neither publishable by the Funnel nor
-              the MCP's own
+              placeholder, its port neither publishable by the Funnel nor the
+              MCP's own, and its per-action ceiling a number it can mean
 
 Selective skip (for local testing only, never in production):
   PREFLIGHT_SKIP="funnel,node_key"
@@ -212,8 +212,12 @@ def c_web():
         raise RuntimeError(f"WEB_PORT={port} is the MCP's own port: two servers cannot bind "
                            "the same one, and the one that loses dies after the startup "
                            "line has already said everything is fine")
+    try:
+        cap = web.action_cap_from_env()
+    except ValueError as e:
+        raise RuntimeError(str(e)) from e
     return (f"master present ({len(v)} characters) · UI on {port}, "
-            "which the Funnel cannot publish")
+            f"which the Funnel cannot publish · {cap} approvals per action")
 
 
 @check("oauth")
