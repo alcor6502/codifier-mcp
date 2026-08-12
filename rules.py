@@ -176,7 +176,11 @@ FILE_MODE = 0o644                       # root writes, everyone else reads
 DIR_MODE = 0o755
 DEFAULT_PROVISIONAL_DAYS = 90
 MAX_BODY_BYTES = 64_000
-MAX_GET_IDS = 50
+
+# The ceiling of a LIST of rules. Generous on purpose: the cap exists so that a
+# runaway answer cannot eat a chat's context, not to discipline anybody. When
+# it cuts, it says how many there really were.
+RULES_LIST_CAP = 50
 
 # ---------------------------------------------------------------------
 # The task log
@@ -191,24 +195,24 @@ MAX_GET_IDS = 50
 TASK_PREFIX = "TK"
 RESERVED_DOMAINS = (TASK_PREFIX,)
 
-# The ceilings of the task log, NAMED, because the spec asks for names and
-# because a literal repeated in four queries is a number written four times.
+# The ceilings, NAMED, because a literal repeated in four queries is a number
+# written four times.
 #
-# TASKS_LIST_CAP is the ceiling of every LIST (list, search, range). Fifty is
-# generous on purpose: the point of the cap is that a runaway answer cannot
-# eat a chat's context, not that it disciplines anybody.
+# TASKS_LIST_CAP is the ceiling of every list of tasks. Fifty, like the rules'.
 TASKS_LIST_CAP = 50
-# TASKS_GET_IDS is the batch of bodies. Ten, and the arithmetic behind it is
-# the one the spec asked to be done in delivery rather than estimated: a body
-# is capped at MAX_BODY_BYTES, so ten of them is 640,000 characters — far over
-# any client's result ceiling. The count alone therefore does NOT bound the
-# answer, and the real limit is the byte one below.
-TASKS_GET_IDS = 10
+# GET_IDS is the batch of BODIES, and it is the same number for rules and for
+# tasks because it is the same ceiling doing the same job — the surface
+# redesign says so in as many words, and two constants would be one number
+# written twice. Ten, and the arithmetic behind it was done in delivery rather
+# than estimated: a body is capped at MAX_BODY_BYTES, so ten of them is 640,000
+# characters — far over any client's result ceiling. The count alone therefore
+# does NOT bound the answer, and the real limit is the byte one below.
+GET_IDS = 10
 # The byte ceiling of that same batch, and the number that actually bounds it.
-# 60,000 leaves a single full-size body whole — the case where truncating
-# would be useless, since there is nothing smaller to fall back to — and stops
-# the batch at the first body that would cross it, declaring the truncation.
-TASKS_GET_BYTES = 60_000
+# 60,000 leaves a single full-size body whole — the case where truncating would
+# be useless, since there is nothing smaller to fall back to — and stops the
+# batch at the first body that would cross it, declaring the truncation.
+GET_BYTES = 60_000
 # How far back a closed task keeps showing up in `tasks_list`. Past it the
 # task is not gone, it is asked for by date with tasks_range.
 TASKS_RECENT_DAYS = 30
@@ -1115,7 +1119,21 @@ END;
 -- invariant somebody will break with an amendment.
 --
 -- `reach` DECLARED and never deduced is the whole point: a targeted rule
--- whose rows never arrived must FAIL, not quietly become universal.
+-- whose rows never arrived must FAIL, not quietly become universal. And what
+-- these two catch is not a stranger with sqlite3 open on the share — it is a
+-- BRANCH OF THIS ENGINE that writes the rule and forgets the audience. That
+-- rule would reach nobody, and nobody would be told.
+--
+-- Rev. 8 had two more, BEFORE INSERT on the two audience tables, refusing a
+-- row whose rule was not already `targeted`. They are gone, and the reason is
+-- worth keeping: they never had a case to stop. On the creation path the rule
+-- does not exist yet, the subquery reads NULL and they let everything through
+-- by construction; on every other path they fired too early — half the
+-- picture written — and between them and these two there was no legal instant
+-- in which a universal rule could become targeted. `all -> targeted` is the
+-- widest narrowing there is, `rules_amend` is documented to do it, and the
+-- pair made it unreachable in EVERY order. These two carry the invariant on
+-- their own: they fire when the picture is whole.
 CREATE TRIGGER IF NOT EXISTS trg_rule_arc_ins
 AFTER INSERT ON rule
 WHEN (NEW.reach = 'all'
@@ -1138,29 +1156,6 @@ WHEN (NEW.reach = 'all'
         AND NOT EXISTS (SELECT 1 FROM rule_audience_exception WHERE rule_id = NEW.rule_id))
 BEGIN
   SELECT RAISE(ABORT, 'reach does not match the audience: all takes no group and no exception, targeted takes at least one — reach is declared, never deduced');
-END;
-
--- And the same arc watched from the other side: an audience row added to a
--- rule that is already universal. The two above fire on writes to `rule`, so
--- without these a row could be slipped next to a live universal rule and
--- nothing would notice until the rule was next touched.
---
--- The subquery returns NULL while the rule does not exist yet, and NULL is
--- not `<> 'targeted'`, so the creation path — audience first, rule last —
--- passes here and is caught by trg_rule_arc_ins instead. That is deliberate,
--- and it is why the arc is enforced in two places rather than one.
-CREATE TRIGGER IF NOT EXISTS trg_audience_group_arc
-BEFORE INSERT ON rule_audience_group
-WHEN (SELECT reach FROM rule WHERE rule_id = NEW.rule_id) <> 'targeted'
-BEGIN
-  SELECT RAISE(ABORT, 'reach is not targeted: a universal rule takes no audience row — declare reach=targeted first');
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_audience_exception_arc
-BEFORE INSERT ON rule_audience_exception
-WHEN (SELECT reach FROM rule WHERE rule_id = NEW.rule_id) <> 'targeted'
-BEGIN
-  SELECT RAISE(ABORT, 'reach is not targeted: a universal rule takes no audience row — declare reach=targeted first');
 END;
 
 -- CLOSED IS CLOSED. The outcome and the reason are the two sentences the
@@ -1236,7 +1231,6 @@ TRIGGERS = ("trg_profile_ins", "trg_profile_upd",
             "trg_rule_version_audience",
             "trg_domain_code_frozen", "trg_domain_retire_active",
             "trg_rule_arc_ins", "trg_rule_arc_upd",
-            "trg_audience_group_arc", "trg_audience_exception_arc",
             "trg_task_closed_is_closed", "trg_task_archive_closed_only",
             "trg_task_frozen",
             "trg_auth_code_spent_once")
@@ -1840,1005 +1834,285 @@ class Project:
                               "WHERE profile_id=1").fetchone()
         return None if row is None else row["queue_cap"]
 
-    def _record_approval(self, project: str, digest: str, ids: list[str]) -> None:
-        """One row per approval, written by the lifecycle. What it records is
-        WHAT was let in and WHEN — the who is the OAuth gate's business, a
-        layer up, and the signature that used to sit here left in v2.0.0."""
-        self.cx.execute(
-            "INSERT INTO approvals (project, digest, n_rules, rule_ids, approved_at) "
-            "VALUES (?,?,?,?,?)",
-            (project, digest, len(ids), ",".join(ids), _now()))
+    # =================================================================
+    # Resolving a name into a row
+    # =================================================================
+    # Every one of these answers with the STORED spelling, whatever spelling
+    # the call arrived with: identity is the casefolded name, the spelling is
+    # data, and what comes back in a verdict is the name its owner chose.
 
-    # ---------- projects ----------
+    def _profile_row(self):
+        return self.cx.execute("SELECT * FROM project_profile "
+                               "WHERE profile_id=1").fetchone()
 
-    def _project(self, code: str) -> str:
-        """From the CODE to the internal name. Never from the name: the name is
-        not an access key. Identical error for a missing and a wrong code."""
-        c = (code or "").strip()
-        if not c:
-            raise RulesError(ERR_PROJECT)
-        row = self.cx.execute("SELECT name FROM projects WHERE code=?", (c,)).fetchone()
+    def _domain_codes(self) -> list[str]:
+        """Every domain code this project ever declared, retired ones
+        INCLUDED. Retiring a domain does not un-print the IDs it handed out,
+        so a citation towards `VE-0003` has to keep resolving, and the relic
+        hunt has to keep recognising `VE` as one of ours."""
+        return [r[0] for r in self.cx.execute(
+            "SELECT code FROM domain ORDER BY code")]
+
+    def _domain_row(self, code: str, *, live: bool = False):
+        d = (code or "").strip()
+        row = self.cx.execute("SELECT * FROM domain WHERE lower(code)=?",
+                              (d.lower(),)).fetchone()
         if row is None:
-            raise RulesError(ERR_PROJECT)
-        return row[0]
+            declared = ", ".join(self._domain_codes()) or "none"
+            raise RulesError(f"domain {d!r} is not declared by this project "
+                             f"(declared: {declared})")
+        if live and row["retired_at"]:
+            raise RulesError(
+                f"domain {row['code']} was retired on {row['retired_at']}: its numbers "
+                "stay readable for ever, but nothing new is filed under it. Use a live "
+                "domain, or revive that one first.")
+        return row
 
-    def _consumer(self, project: str, name: str) -> str:
-        """Resolve a consumer by its CASEFOLDED name and hand back the STORED
-        spelling. The caller may type `architect` and the registry answers
-        with `Architect`: identity is folded, spelling is data, and every
-        answer carries the spelling the owner chose."""
+    def _consumer_row(self, name: str, *, live: bool = True):
         n = _fold(name)
-        allowed, retired = [], {}
-        for r in self.cx.execute(
-                "SELECT name, retired_at FROM consumers WHERE project=? ORDER BY name",
-                (project,)):
-            if r["retired_at"]:
-                retired[_fold(r["name"])] = (r["name"], r["retired_at"])
-            else:
-                allowed.append(r["name"])
         if not n:
-            raise RulesError(f"consumer not specified. This project has: {', '.join(allowed)}")
-        for stored in allowed:
-            if _fold(stored) == n:
-                return stored
-        # A RETIRED ONE IS NOT AN UNKNOWN ONE, and saying so is the difference
-        # between "you typed it wrong" and "that role ended". This is the door
-        # every other one goes through — list, get, propose, the task log — so
-        # the sentence is written once and every caller gets it.
-        if n in retired:
-            stored, when = retired[n]
+            raise RulesError("consumer not specified: the name is in your instructions, "
+                             f"and project_info lists them all. This project has: "
+                             f"{self._consumer_names() or 'none'}")
+        row = self.cx.execute("SELECT * FROM consumer WHERE lower(name)=?",
+                              (n,)).fetchone()
+        if row is None:
             raise RulesError(
-                f"{stored} was RETIRED on {when}: it reaches nothing, it holds nothing, "
-                "and no rule or task can name it. If that role is back, revive it with "
-                "rules_consumers_add and an item carrying revive:true — which is a "
-                "decision, not a typo, so it has to be said out loud. Live consumers: "
-                f"{', '.join(allowed) or '(none)'}")
-        raise RulesError(
-            f"unknown consumer {name!r}. This project has: {', '.join(allowed) or '(none)'}")
+                f"{name!r} is not a consumer of this project. Live ones: "
+                f"{self._consumer_names() or 'none'}. Names are not guessed — "
+                "project_info reads them.")
+        if live and row["retired_at"]:
+            raise RulesError(
+                f"{row['name']} ENDED on {row['retired_at']}"
+                + (f" — {row['retired_reason']}" if row["retired_reason"] else "")
+                + ". Its row stays because the history points at it, but it takes no "
+                  "work and no rule. Whoever took the work over is the one to name.")
+        return row
 
-    def _domains(self, project: str) -> list[str]:
-        return [r[0] for r in self.cx.execute(
-            "SELECT domain FROM project_domains WHERE project=? ORDER BY domain", (project,))]
+    def _consumer_names(self, live: bool = True) -> str:
+        sql = "SELECT name FROM consumer"
+        if live:
+            sql += " WHERE retired_at IS NULL"
+        return ", ".join(r[0] for r in self.cx.execute(sql + " ORDER BY name"))
 
-    def _legend(self, project: str, ids) -> dict:
-        """The domains PRESENT in a list of IDs, each with its gloss, read
-        from the project's own declarations. Two letters age badly in human
-        memory — even the owner reads these lists, and in six months nobody
-        remembers what LQ was. Surfaced, not new state, and limited to what
-        the list actually contains so it never becomes a second registry."""
-        doms = {str(i).split("-", 1)[0] for i in ids}
-        if not doms:
-            return {}
-        return {r["domain"]: r["description"] or "" for r in self.cx.execute(
-            "SELECT domain, description FROM project_domains WHERE project=? "
-            "ORDER BY domain", (project,)) if r["domain"] in doms}
+    def _group_row(self, name: str, *, live: bool = True):
+        n = _fold(name)
+        row = self.cx.execute("SELECT * FROM consumer_group WHERE lower(name)=?",
+                              (n,)).fetchone()
+        if row is None:
+            groups = ", ".join(r[0] for r in self.cx.execute(
+                "SELECT name FROM consumer_group WHERE retired_at IS NULL "
+                "ORDER BY name")) or "none"
+            raise RulesError(
+                f"{name!r} is not a group of this project (groups: {groups}). A single "
+                "consumer is not a group: name it in `exceptions`, which is what "
+                "exceptions are for.")
+        if live and row["retired_at"]:
+            raise RulesError(f"group {row['name']} was retired on {row['retired_at']}: "
+                             "revive it, or aim at another one.")
+        return row
 
-    @staticmethod
-    def _legend_line(legend: dict) -> str:
-        return " · ".join(f"{d} — {g}" if g else d for d, g in legend.items())
-
-    def projects(self) -> dict:
-        rows = self.cx.execute("SELECT name, code, description, created FROM projects "
-                               "ORDER BY name").fetchall()
-        out = []
-        for r in rows:
-            n = self.cx.execute("SELECT COUNT(*) FROM rules WHERE project=? AND status='active'",
-                                (r["name"],)).fetchone()[0]
-            out.append({"name": r["name"], "code": r["code"], "description": r["description"],
-                        "created": r["created"], "active_rules": n})
-        return {"projects": out, "count": len(out)}
-
-    def project_info(self, code: str) -> dict:
-        p = self._project(code)
-        cons = self.cx.execute("SELECT name, kind FROM consumers WHERE project=? "
-                               "AND retired_at IS NULL ORDER BY kind, name", (p,)).fetchall()
-        gone = self.cx.execute("SELECT name, kind, retired_at, retired_reason FROM consumers "
-                               "WHERE project=? AND retired_at IS NOT NULL ORDER BY name",
-                               (p,)).fetchall()
-        scopes = []
-        for s in self.cx.execute("SELECT name, managed FROM scopes WHERE project=? ORDER BY name",
-                                 (p,)).fetchall():
-            scopes.append({"name": s["name"], "managed": bool(s["managed"]),
-                           "breadth": self._breadth(p, s["name"]),
-                           "members": self._members(p, s["name"])})
-        doms = self.cx.execute("SELECT domain, description FROM project_domains "
-                               "WHERE project=? ORDER BY domain", (p,)).fetchall()
-        return {
-            "project": p,
-            "consumers": [{"name": c["name"], "kind": c["kind"]} for c in cons],
-            # Kept APART, never merged into the list above: a retired consumer
-            # is not one of the project's consumers any more, and a caller
-            # picking a name out of that list must not be able to pick a dead
-            # one. Shown at all because the history keeps resolving, so a name
-            # met in an old version has to be explainable.
-            "retired_consumers": [{"name": c["name"], "kind": c["kind"],
-                                   "retired_at": c["retired_at"],
-                                   "reason": c["retired_reason"]} for c in gone],
-            "scopes": scopes,
-            "domains": {d["domain"]: d["description"] for d in doms},
-            "registry_version": VERSION,
-            "approval": {"provisional_days": self.provisional_days},
-        }
-
-    def create_project(self, name: str, consumers=None, domains=None,
-                       description: str = "") -> dict:
-        """Create a project. The CODE and the ARCHITECT KEY are GENERATED
-        here and returned ONCE, on this receipt: from then on the key exists
-        only as a hash. Consumers and domains are OPTIONAL — a project may be
-        born empty, because seeding it (domains, then consumers, then the
-        rules one by one) is the Architect's first job, done with the very
-        key this call hands out."""
-        name = (name or "").strip()
-        if not name:
-            raise RulesError("the project needs a name")
-        if self.cx.execute("SELECT 1 FROM projects WHERE name=?", (name,)).fetchone():
-            raise RulesError(f"a project named {name!r} already exists")
-        if isinstance(domains, (list, tuple)):
-            domains = {d: "" for d in domains}
-        domains = domains or {}
-        for d in domains:
-            _valid_domain(d)
-        cons = self._normalise_consumers(consumers or [])
-        # The sanitisation runs here too, and at this door it can only do half
-        # its job: the project does not exist yet, so no domain is declared and
-        # no rule can be resolved — what fires is the SHORT-FORM relic, which
-        # needs neither. Said out loud because a half-check nobody declares is
-        # how a guarantee becomes a habit. Everything written afterwards goes
-        # through the full door.
-        for _n, _k, _b, _r in cons:
-            self._relics(name, f"brief of {_n!r}", _b)
-        for _d, _desc in domains.items():
-            self._relics(name, f"gloss of {_d}", _desc)
-        self._relics(name, "description", description)
-        while True:
-            code = _gen(CODE_LEN)
-            if not self.cx.execute("SELECT 1 FROM projects WHERE code=?",
-                                   (code,)).fetchone():
-                break
-        key = _gen(KEY_LEN)
+    def _rule_row(self, rid: str):
+        """A rule by its display ID. Reads forgive the short form — `VA-02`
+        resolves — because there it identifies a row that EXISTS. Prose never
+        forgives, and that is `_relics`' job, not this one."""
         try:
-            self.cx.execute("BEGIN")
-            self.cx.execute("INSERT INTO projects (name, code, architect_key_hash, "
-                            "description, created) VALUES (?,?,?,?,?)",
-                            (name, code, _key_hash(key), description or None, _now()))
-            for d, desc in domains.items():
-                self.cx.execute("INSERT INTO project_domains (project, domain, description) "
-                                "VALUES (?,?,?)", (name, d, desc or None))
-            self.cx.execute("INSERT INTO scopes (project, name, managed) VALUES (?,?,1)",
-                            (name, ALL))
-            for cname, kind, brief, _ in cons:
-                self.cx.execute("INSERT INTO consumers (project, name, kind, brief, "
-                                "created) VALUES (?,?,?,?,?)",
-                                (name, cname, kind or "chat", brief or None, _now()))
-            self.cx.execute("COMMIT")
-        except Exception:
-            self.cx.execute("ROLLBACK")
-            raise
-        return {"created": name, "code": code, "architect_key": key,
-                "consumers": [c for c, _, _, _ in cons], "domains": sorted(domains),
-                "note": "TWO secrets, TWO destinations, shown ONCE: the code goes at "
-                        "the top of the project instructions, the architect key in "
-                        "the password manager. Neither can be read back — losing "
-                        "either costs a rekey, which regenerates the pair."}
-
-    @staticmethod
-    def _normalise_consumers(consumers) -> list[tuple[str, str, str]]:
-        """Each item may carry its BRIEF and its KIND — creating a consumer and
-        giving it its identity is one gesture, not three calls.
-
-        `kind` COMES BACK EMPTY WHEN IT WAS NOT GIVEN, and that distinction is
-        the whole point of this shape. It used to default to 'chat' right here,
-        which threw away the difference between "this is a chat" and "the
-        caller said nothing" — so a later call naming an existing SKILL as a
-        bare string would have silently demoted it. The default is applied
-        where a row is CREATED, which is the only place it means anything."""
-        out: list[tuple[str, str, str, bool]] = []
-        for item in consumers or []:
-            brief, revive = "", False
-            if isinstance(item, str):
-                cname, kind = item, ""
-            elif isinstance(item, dict):
-                cname, kind = item.get("name", ""), item.get("kind", "")
-                brief = item.get("brief") or ""
-                revive = bool(item.get("revive"))
-            else:
-                vals = list(item)
-                cname = vals[0] if vals else ""
-                kind = vals[1] if len(vals) > 1 else ""
-                brief = vals[2] if len(vals) > 2 else ""
-            cname = _valid_name(cname, "consumer")
-            # A NAME keeps its spelling; a KIND does not have one. The rule is
-            # worth stating because it looks like an inconsistency and is the
-            # opposite: `Architect` is somebody's choice and is data, while
-            # `SKILL`, `Skill` and `skill` are one value written three ways —
-            # a closed set of two, where a second spelling buys nothing and
-            # costs a comparison that can disagree with itself.
-            kind = (kind or "").strip().lower()
-            if kind and kind not in KINDS:
-                raise RulesError(f"kind {kind!r}: it must be one of {', '.join(KINDS)}")
-            if _fold(cname) in ALL_ALIASES or cname == ALL:
-                raise RulesError(f"{ALL} is reserved and is not a consumer name")
-            brief = (brief or "").strip()
-            if len(brief.encode()) > MAX_BODY_BYTES:
-                raise RulesError(
-                    f"the brief of {cname!r} is over {MAX_BODY_BYTES} bytes: split it — "
-                    "same discipline as a rule's body")
-            if _fold(cname) not in [_fold(c) for c, _, _, _ in out]:
-                out.append((cname, kind, brief, revive))
-        return out
-
-    def rekey_project(self, code: str) -> dict:
-        """Regenerate the PAIR — code and architect key, always together, and
-        GENERATED here rather than passed in: rekey used to take the new code
-        from the caller, which made it the one place left where a credential
-        was a person's invention. One generator, one format, one receipt —
-        `create` and `rekey` hand out the same two lines. The cost, accepted:
-        the two secrets break for different reasons and the pair pays for
-        both — but they live in a password manager, where "I lost one" does
-        not happen."""
-        p = self._project(code)
-        while True:
-            new_code = _gen(CODE_LEN)
-            if not self.cx.execute("SELECT 1 FROM projects WHERE code=?",
-                                   (new_code,)).fetchone():
-                break
-        new_key = _gen(KEY_LEN)
-        self.cx.execute("UPDATE projects SET code=?, architect_key_hash=? WHERE name=?",
-                        (new_code, _key_hash(new_key), p))
-        return {"project": p, "code": new_code, "architect_key": new_key,
-                "rekeyed": True,
-                "note": "TWO secrets, TWO destinations, shown ONCE: code to the "
-                        "project instructions, key to the password manager — and "
-                        "do both BEFORE closing this page: the old pair no longer "
-                        "reaches anything."}
-
-    def check_architect(self, code: str, key: str) -> str:
-        """The maintenance gate, per project. It resolves the project from
-        its code FIRST, then compares the key's hash on that row — in that
-        order, and with ONE message for every failure, because an answer
-        that told a wrong key apart from a wrong code would confirm a valid
-        code to whoever holds only that. It is not session state: the pair
-        travels on every call."""
-        try:
-            p = self._project(code)
+            full = _norm_id(rid)
         except RulesError:
-            raise RulesError(ERR_MAINT) from None
-        row = self.cx.execute("SELECT architect_key_hash FROM projects WHERE name=?",
-                              (p,)).fetchone()
-        if not row or not row[0] or not secrets.compare_digest(
-                row[0], _key_hash(key)):
-            raise RulesError(ERR_MAINT)
-        return p
-
-    def add_consumers(self, code: str, consumers) -> dict:
-        """Adds consumers — and writes BRIEFS. On a consumer that already
-        exists, an item carrying a brief updates it: the brief is written
-        through the door that already exists, not through a new one. Removing
-        a consumer stays impossible — it would orphan the rules aimed at it."""
-        p = self._project(code)
-        # A BRIEF IS PROSE, and prose is sanitised. It is read at the head of
-        # every rules_list that consumer makes, so a relic sitting there is the
-        # first thing a role reads at the start of every session — which is the
-        # most effective place in the whole registry for an old identifier to
-        # keep itself alive.
-        cons = [(n, k, self._prose(p, f"brief of {n!r}", b), r)
-                for n, k, b, r in self._normalise_consumers(consumers)]
-        added, added_kinds, brief_set, kind_set, already = [], {}, [], [], []
-        revived = []
-        for cname, kind, brief, revive in cons:
-            row = self.cx.execute(
-                "SELECT id, name, kind, retired_at FROM consumers WHERE project=? "
-                "AND lower(name)=?", (p, _fold(cname))).fetchone()
-            if row and row["retired_at"]:
-                # A RETIRED NAME IS NOT FREE AND IS NOT LIVE. Creating it again
-                # would give one name two identities and two histories under the
-                # same key; writing to it as if nothing happened would undo a
-                # decision by accident. So the only way back is SAID: revive.
-                if not revive:
-                    raise RulesError(
-                        f"{row['name']} was RETIRED on {row['retired_at']}. The name is "
-                        "not free — the history still uses it — and it is not live "
-                        "either. If that role is back, say so: pass "
-                        "{'name': '" + row["name"] + "', 'revive': true}. Bringing a "
-                        "consumer back is a decision, and a decision is never the "
-                        "silent effect of a list of names.")
-                # ONE COLUMN, and nothing to rebuild: retirement destroyed no
-                # membership and no perimeter, so clearing the flag puts the
-                # consumer back exactly as it was — its singleton, its groups,
-                # and every rule that reached it. That is what marking instead
-                # of deleting buys, and it is why reviving needs no repair pass
-                # that could get it wrong.
-                self.cx.execute("UPDATE consumers SET retired_at=NULL, retired_reason=NULL, "
-                                "kind=?, brief=? WHERE id=?",
-                                (kind or row["kind"], brief or None, row["id"]))
-                revived.append(row["name"])
-                continue
-            if row:
-                # The consumer EXISTS — under the stored spelling, whatever
-                # spelling the call used. Only the brief is written; the name
-                # is never touched, because spelling is data. And the no-op
-                # is DECLARED, stored spelling included: an `added: []` that
-                # said nothing was how a gloss went missing in silence once.
-                # THE KIND IS WRITTEN HERE TOO, and it is the same defect the
-                # gloss had — the field next door, found the same way. A skill
-                # entered as a chat could only be repaired by creating a new
-                # consumer and abandoning the old, which orphans every rule
-                # aimed at it: a typo would have cost a piece of the corpus.
-                #
-                # Only an EXPLICIT kind moves it. A bare string says nothing
-                # about the kind, so naming an existing skill in a plain list
-                # leaves it a skill instead of quietly demoting it — the
-                # silent write, inverted, which is what made the gloss defect
-                # worth fixing rather than tolerating.
-                touched = False
-                if kind and kind != row["kind"]:
-                    self.cx.execute("UPDATE consumers SET kind=? WHERE id=?",
-                                    (kind, row["id"]))
-                    kind_set.append(f"{row['name']}: {row['kind']} -> {kind}")
-                    touched = True
-                if brief:
-                    self.cx.execute("UPDATE consumers SET brief=? WHERE id=?",
-                                    (brief, row["id"]))
-                    brief_set.append(row["name"])
-                    touched = True
-                if not touched:
-                    already.append(row["name"])
-                continue
-            if self.cx.execute("SELECT 1 FROM scopes WHERE project=? AND lower(name)=?",
-                               (p, _fold(cname))).fetchone():
-                raise RulesError(
-                    f"a scope named {cname!r} already exists: a consumer and a scope share "
-                    "one namespace, because every consumer gets a scope with its own name")
-            # The default lands HERE, on creation, which is the only place it
-            # means anything: an item that said nothing about the kind is a
-            # chat, and one that said nothing about an EXISTING consumer's
-            # kind leaves it alone.
-            self.cx.execute("INSERT INTO consumers (project, name, kind, brief, created) "
-                            "VALUES (?,?,?,?,?)",
-                            (p, cname, kind or "chat", brief or None, _now()))
-            added.append(cname)
-            added_kinds[cname] = kind or "chat"
-        return {"project": p, "added": added, "added_kinds": added_kinds,
-                "brief_set": brief_set, "kind_set": kind_set, "revived": revived,
-                "already_there": already,
-                "note": "each new one also got a scope of its own, made by the database. "
-                        "A bare name is a CHAT: to declare a skill pass an object — "
-                        "{'name': 'FP-Update-Tax', 'kind': 'skill'} — and the same object "
-                        "on a consumer that already exists CORRECTS its kind, which is "
-                        "reported in kind_set and versioned by trigger."}
-
-    def retire_consumer(self, code: str, name: str, reason: str) -> dict:
-        """END A CONSUMER. The row stays; every POINTER goes.
-
-        This is the door the manual promised for a long time and did not have,
-        and its absence made the model rigid in the one place a model must not
-        be: roles end, skills get rewritten, things happen. Until v3.2.0 the
-        nearest thing was to narrow every rule off a consumer by hand and
-        leave it there — where it still showed in the project, and where
-        `_ALL_` still reached it, so it went on being bound by every universal
-        rule. That is not retired, that is invisible bookkeeping.
-
-        IT MARKS. IT DELETES NOTHING. One column moves — `retired_at` — and
-        every read excludes it from then on. Not one row of `scope_members`,
-        not one row of `rule_scopes`: the relations stay exactly as they were.
-
-        THE FIRST VERSION OF THIS METHOD DID DELETE THEM, and it was wrong in
-        a way worth keeping written down, because it looked tidy. Referential
-        integrity was not the problem — both are junction tables and nothing
-        points at their rows. The problem is what a junction row MEANS.
-        Deleting from `rule_scopes` changed the perimeter of LIVE RULES as a
-        side effect of a gesture aimed at somebody else: nobody decided those
-        rules should reach less, and the trigger dutifully recorded a
-        perimeter decision no human had taken. And deleting from
-        `scope_members` threw away the answer to "which rules used to reach
-        it", leaving it reconstructable only out of the text snapshots — the
-        truth migrating from a relational structure into a column of prose.
-
-        So: mark, and filter on every read. The discipline that costs is that
-        every query joining `consumers` has to exclude the retired ones —
-        `_CONSUMERS_OF`, `_breadth`, `_members`, `_reaching`, `_holders`, and
-        every enumeration — which is why a static check pins it rather than
-        leaving it to memory.
-
-        WHAT FOLLOWS FROM THAT:
-
-          · the row stays and so does everything pointing at it. A rule goes
-            on DECLARING the same scopes; what changed is who is on the other
-            end. `rules_check` reports the ones that now reach nobody live;
-          · `_ALL_` stops reaching it — one clause, because that branch
-            enumerates consumers directly instead of going through membership;
-          · every door that names it refuses, with a sentence that says
-            RETIRED and not 'unknown' — the difference between a typo and a
-            role that ended;
-          · reviving is the same column back to NULL, and everything returns
-            as it was: no rebuild, no repair pass, nothing to get wrong.
-
-        OPEN TASKS BLOCK IT, and that is not caution. A task is somebody's
-        work waiting: retiring its owner would make it unreachable by every
-        reading, which is a `dropped` with no reason performed by
-        housekeeping. Close them or hand them to somebody, then retire."""
-        p = self._project(code)
-        stored = self._consumer(p, name)          # refuses an already retired one
-        if not (reason or "").strip():
-            raise RulesError(
-                "reason is mandatory: ending a role is a decision, and one with no "
-                "reason gets re-taken from scratch the day somebody asks why.")
-        reason = self._prose(p, "reason", reason)
-        cid = self.cx.execute("SELECT id FROM consumers WHERE project=? AND name=?",
-                              (p, stored)).fetchone()[0]
-        open_tasks = [r[0] for r in self.cx.execute(
-            "SELECT id FROM tasks WHERE project=? AND consumer_id=? AND status='pending' "
-            "ORDER BY seq", (p, cid))]
-        if open_tasks:
-            raise RulesError(
-                f"{stored} still owns {len(open_tasks)} open task(s): "
-                f"{', '.join(open_tasks)}. Retiring it now would leave that work "
-                "unreachable by every reading — a drop with no reason, performed by "
-                "housekeeping. Close them with an outcome, drop them with a reason, or "
-                "hand them to somebody else with tasks_amend.")
-        # The rules aimed AT IT, read BEFORE the pointers go, so the verdict can
-        # name them.
-        aimed = [r[0] for r in self.cx.execute(
-            "SELECT DISTINCT rs.rule_id FROM rule_scopes rs JOIN scopes s ON s.id=rs.scope_id "
-            "WHERE rs.project=? AND s.managed=1 AND lower(s.name)=lower(?) ORDER BY rs.rule_id",
-            (p, stored))]
-        groups = [r[0] for r in self.cx.execute(
-            "SELECT s.name FROM scope_members m JOIN scopes s ON s.id=m.scope_id "
-            "WHERE m.consumer_id=? AND s.managed=0 ORDER BY s.name", (cid,))]
-        # Read BEFORE the flag moves, because afterwards the reads exclude it —
-        # which is the whole design and is also why the verdict has to be taken
-        # now if it is going to name anything.
-        now = _now()
-        # ONE COLUMN MOVES, AND NOTHING ELSE. Not one row of scope_members and
-        # not one row of rule_scopes is touched — see the docstring for why the
-        # first version of this method, which deleted both, was wrong.
-        self.cx.execute("UPDATE consumers SET retired_at=?, retired_reason=? WHERE id=?",
-                        (now, reason, cid))
-        orphaned = [rid for rid in aimed if not self._holders(p, rid)]
-        return {"project": p, "retired": stored, "at": now, "reason": reason,
-                "was_in_groups": groups, "losing_a_reader": aimed,
-                "now_reaching_nobody_live": orphaned,
-                "note": "MARKED, never deleted, and no membership and no perimeter was "
-                        "touched: the relations stay whole and every read excludes it "
-                        "instead. So `which rules used to reach it` is still a query, "
-                        "reviving puts everything back exactly as it was, and no rule's "
-                        "perimeter was re-decided by a gesture aimed at somebody else. "
-                        "The rules above still DECLARE the same scopes; what changed is "
-                        "who is on the other end. Those reaching nobody live are listed "
-                        "and rules_check keeps listing them."}
-
-    def add_domains(self, code: str, domains) -> dict:
-        """Adds domains — and UPDATES the gloss of one that already exists,
-        declaring it. The 'only adding' rule covers the LETTERS (removing a
-        domain would orphan its IDs), not the glosses, which are for humans
-        and correcting one orphans nothing. What a tool does not do, it says:
-        the old shape returned `added: []` on an existing domain and silently
-        dropped the new gloss — a verdict that read like success."""
-        p = self._project(code)
-        if isinstance(domains, (list, tuple)):
-            domains = {d: "" for d in domains}
-        added, updated = [], []
-        for d, desc in (domains or {}).items():
-            _valid_domain(d)
-            desc = self._prose(p, f"gloss of {d}", desc)
-            row = self.cx.execute("SELECT description FROM project_domains "
-                                  "WHERE project=? AND domain=?", (p, d)).fetchone()
-            if row:
-                if desc and desc != (row["description"] or ""):
-                    self.cx.execute("UPDATE project_domains SET description=? "
-                                    "WHERE project=? AND domain=?", (desc, p, d))
-                    updated.append(d)
-                continue
-            self.cx.execute("INSERT INTO project_domains (project, domain, description) "
-                            "VALUES (?,?,?)", (p, d, desc or None))
-            added.append(d)
-        return {"project": p, "added": added, "updated": updated}
-
-    # ---------- scopes ----------
-
-    def _scope_id(self, project: str, scope: str):
-        """Casefolded name to surrogate id, or None. The one lookup every
-        scope reference goes through, so there is one idea of equality."""
-        row = self.cx.execute(
-            "SELECT id FROM scopes WHERE project=? AND lower(name)=?",
-            (project, _fold(scope))).fetchone()
-        return row[0] if row else None
-
-    def _breadth(self, project: str, scope: str) -> int:
-        """How many consumers a scope reaches. _ALL_ is not a listed set: it must
-        reach consumers that do not exist yet, so its breadth is computed."""
-        if scope == ALL:
-            return self.cx.execute("SELECT COUNT(*) FROM consumers WHERE project=? "
-                                   "AND retired_at IS NULL", (project,)).fetchone()[0]
+            return None
+        dom, seq = full.split("-")
         return self.cx.execute(
-            "SELECT COUNT(*) FROM scope_members m JOIN scopes s ON s.id=m.scope_id "
-            "  JOIN consumers c ON c.id=m.consumer_id "
-            "WHERE s.project=? AND lower(s.name)=? AND c.retired_at IS NULL",
-            (project, _fold(scope))).fetchone()[0]
+            "SELECT * FROM v_rule WHERE lower(display_id)=?",
+            (f"{dom}-{seq}".lower(),)).fetchone()
 
-    def _members(self, project: str, scope: str) -> list[str]:
-        if scope == ALL:
-            return [r[0] for r in self.cx.execute(
-                "SELECT name FROM consumers WHERE project=? AND retired_at IS NULL "
-                "ORDER BY name", (project,))]
-        return [r[0] for r in self.cx.execute(
-            "SELECT c.name FROM scope_members m "
-            "  JOIN scopes s ON s.id=m.scope_id JOIN consumers c ON c.id=m.consumer_id "
-            " WHERE s.project=? AND lower(s.name)=? AND c.retired_at IS NULL "
-            " ORDER BY c.name", (project, _fold(scope)))]
+    def _rule_by_pk(self, rule_id):
+        if rule_id is None:
+            return None
+        return self.cx.execute("SELECT * FROM v_rule WHERE rule_id=?",
+                               (rule_id,)).fetchone()
 
-    def create_scope(self, code: str, name: str, members) -> dict:
-        p = self._project(code)
-        name = _valid_name(name, "scope")
-        if self.cx.execute("SELECT 1 FROM scopes WHERE project=? AND lower(name)=?",
-                           (p, _fold(name))).fetchone():
-            raise RulesError(f"a scope named {name!r} already exists")
-        if self.cx.execute("SELECT 1 FROM consumers WHERE project=? AND lower(name)=?",
-                           (p, _fold(name))).fetchone():
-            raise RulesError(f"{name!r} is a consumer: its singleton scope already exists")
-        members = [self._consumer(p, m) for m in (members or [])]
-        if len(members) < 2:
+    def _display(self, rule_id) -> str:
+        row = self._rule_by_pk(rule_id)
+        return row["display_id"] if row is not None else ""
+
+    # =================================================================
+    # The audience: groups UNION exceptions, and it is computed
+    # =================================================================
+
+    def _audience(self, rule_id) -> dict:
+        """What the rule DECLARES: the names of its groups and of its
+        exceptions. The perimeter is shown, never guessed — every read of a
+        rule carries this."""
+        groups = [r[0] for r in self.cx.execute(
+            "SELECT g.name FROM rule_audience_group a "
+            "JOIN consumer_group g ON g.group_id = a.group_id "
+            "WHERE a.rule_id=? ORDER BY g.name", (rule_id,))]
+        exceptions = [r[0] for r in self.cx.execute(
+            "SELECT c.name FROM rule_audience_exception e "
+            "JOIN consumer c ON c.consumer_id = e.consumer_id "
+            "WHERE e.rule_id=? ORDER BY c.name", (rule_id,))]
+        return {"groups": groups, "exceptions": exceptions}
+
+    def _live_consumer_ids(self) -> set:
+        return {r[0] for r in self.cx.execute(
+            "SELECT consumer_id FROM consumer WHERE retired_at IS NULL")}
+
+    def _members_of(self, group_ids) -> set:
+        """The LIVE consumers a set of groups expands to. Retired members are
+        not in it: a group is a door, and a door onto nobody opens onto
+        nobody."""
+        if not group_ids:
+            return set()
+        marks = ",".join("?" * len(group_ids))
+        return {r[0] for r in self.cx.execute(
+            f"SELECT m.consumer_id FROM consumer_group_member m "
+            f"JOIN consumer c ON c.consumer_id = m.consumer_id "
+            f"WHERE m.group_id IN ({marks}) AND c.retired_at IS NULL",
+            tuple(group_ids))}
+
+    def _effective(self, rule_id, reach: str) -> set:
+        """WHO this rule reaches right now. `all` is every live consumer;
+        `targeted` is the union of the groups' live members and the
+        exceptions.
+
+        This is the set `rules_amend` compares — the shape is not trusted,
+        because two different shapes can describe the same people and the same
+        shape can describe different people a week later."""
+        if reach == "all":
+            return self._live_consumer_ids()
+        gids = [r[0] for r in self.cx.execute(
+            "SELECT group_id FROM rule_audience_group WHERE rule_id=?", (rule_id,))]
+        exc = {r[0] for r in self.cx.execute(
+            "SELECT e.consumer_id FROM rule_audience_exception e "
+            "JOIN consumer c ON c.consumer_id = e.consumer_id "
+            "WHERE e.rule_id=? AND c.retired_at IS NULL", (rule_id,))}
+        return self._members_of(gids) | exc
+
+    def _would_reach(self, reach: str, group_ids, exception_ids) -> set:
+        """The same computation on a perimeter that is not written yet."""
+        if reach == "all":
+            return self._live_consumer_ids()
+        live = self._live_consumer_ids()
+        return self._members_of(group_ids) | ({int(c) for c in exception_ids} & live)
+
+    def _containment(self, group_ids, exception_ids) -> None:
+        """THE INVARIANT, checked where the rule is written.
+
+        An exception that is already inside this rule's own groups is refused:
+        either it is a mistake, or it is a tie that survives in silence the day
+        that consumer leaves the group — and a perimeter nobody can read off
+        the page is a perimeter that will be read wrong. Group-with-group
+        overlap is allowed on purpose: the structure moves on its own, and
+        forbidding it would mean revalidating every rule at every tweak. An
+        exception that belongs to OTHER groups of the project is its own
+        business: what counts is the perimeter of THIS rule."""
+        if not (group_ids and exception_ids):
+            return
+        covered = self._members_of(group_ids)
+        clash = [int(c) for c in exception_ids if int(c) in covered]
+        if not clash:
+            return
+        names, doors = [], []
+        for cid in clash:
+            names.append(self.cx.execute("SELECT name FROM consumer WHERE consumer_id=?",
+                                         (cid,)).fetchone()[0])
+            marks = ",".join("?" * len(group_ids))
+            doors += [r[0] for r in self.cx.execute(
+                f"SELECT g.name FROM consumer_group_member m "
+                f"JOIN consumer_group g ON g.group_id = m.group_id "
+                f"WHERE m.consumer_id=? AND m.group_id IN ({marks})",
+                (cid, *group_ids))]
+        raise RulesError(
+            f"{', '.join(sorted(set(names)))} "
+            f"{'are' if len(set(names)) > 1 else 'is'} already inside "
+            f"{', '.join(sorted(set(doors)))}, which this rule already reaches: drop the "
+            "exception. An exception stands NEXT TO the groups and can only ADD — one "
+            "that repeats what a group already covers is either a mistake or a tie that "
+            "outlives the moment that consumer leaves the group, quietly.")
+
+    def _reach_of(self, reach: str) -> str:
+        r = (reach or "").strip().lower()
+        if r not in REACH:
             raise RulesError(
-                "a scope with fewer than two members adds nothing: every consumer already "
-                "has its own singleton, made by the database")
-        self.cx.execute("BEGIN")
-        try:
-            self.cx.execute("INSERT INTO scopes (project, name, managed) VALUES (?,?,0)",
-                            (p, name))
-            sid = self.cx.execute("SELECT id FROM scopes WHERE project=? AND lower(name)=?",
-                                  (p, _fold(name))).fetchone()[0]
-            for m in members:
-                self.cx.execute(
-                    "INSERT INTO scope_members (scope_id, consumer_id) "
-                    "SELECT ?, id FROM consumers WHERE project=? AND lower(name)=?",
-                    (sid, p, _fold(m)))
-            self.cx.execute("COMMIT")
-        except Exception:
-            self.cx.execute("ROLLBACK")
-            raise
-        return {"project": p, "scope": name, "members": members, "breadth": len(members)}
+                f"reach {reach!r}: it is 'all' — everyone, no audience row — or "
+                "'targeted', at least one group or one exception. It is DECLARED and "
+                "never deduced: a targeted rule whose perimeter never arrived must "
+                "fail, not quietly bind the whole project.")
+        return r
 
-    def edit_scope(self, code: str, name: str, add=None, remove=None) -> dict:
-        """Careful: this changes the perimeter of EVERY rule pointing at this
-        scope. To widen a single rule use widen_rule instead."""
-        p = self._project(code)
-        name = _valid_name(name, "scope")
-        row = self.cx.execute("SELECT id, name, managed FROM scopes "
-                              "WHERE project=? AND lower(name)=?",
-                              (p, _fold(name))).fetchone()
-        if row is None:
-            raise RulesError(f"no scope named {name!r} in this project")
-        if row["managed"]:
-            raise RulesError(f"{name!r} is a managed scope (a consumer singleton, or {ALL}): "
-                             "its membership is fixed by construction")
-        sid, name = row["id"], row["name"]
-        for m in (add or []):
-            self._consumer(p, m)
-            self.cx.execute(
-                "INSERT OR IGNORE INTO scope_members (scope_id, consumer_id) "
-                "SELECT ?, id FROM consumers WHERE project=? AND lower(name)=?",
-                (sid, p, _fold(m)))
-        for m in (remove or []):
-            self.cx.execute(
-                "DELETE FROM scope_members WHERE scope_id=? AND consumer_id IN "
-                "(SELECT id FROM consumers WHERE project=? AND lower(name)=?)",
-                (sid, p, _fold(m)))
-        n = self.cx.execute("SELECT COUNT(*) FROM rule_scopes WHERE scope_id=?",
-                            (sid,)).fetchone()[0]
-        return {"project": p, "scope": name, "members": self._members(p, name),
-                "rules_affected": n}
+    def _resolve_audience(self, reach: str, groups, exceptions) -> tuple:
+        """Names in, surrogate keys out, with the invariant already checked.
 
-    # ---------- reading rules ----------
+        Refuses the empty targeted perimeter here as well as in the schema: the
+        trigger's message is about the arc, and this one can say which list was
+        left empty."""
+        reach = self._reach_of(reach)
+        groups = [g for g in (groups or []) if str(g).strip()]
+        exceptions = [e for e in (exceptions or []) if str(e).strip()]
+        if reach == "all":
+            if groups or exceptions:
+                raise RulesError(
+                    "reach='all' takes no group and no exception: a universal rule binds "
+                    "everyone, including whoever is created tomorrow. If you meant a "
+                    "perimeter, declare reach='targeted'.")
+            return reach, [], []
+        if not groups and not exceptions:
+            raise RulesError(
+                "reach='targeted' with no group and no exception reaches NOBODY. Name at "
+                "least one group, or one consumer in `exceptions` — or say reach='all' "
+                "if it really binds the whole project.")
+        gids = [self._group_row(g)["group_id"] for g in groups]
+        cids = [self._consumer_row(e)["consumer_id"] for e in exceptions]
+        if len(set(gids)) != len(gids) or len(set(cids)) != len(cids):
+            raise RulesError("the same group or the same consumer is named twice in the "
+                             "perimeter: say it once.")
+        self._containment(gids, cids)
+        return reach, gids, cids
 
-    def _row(self, p: str, rid: str):
-        return self.cx.execute("SELECT * FROM rules WHERE project=? AND id=?", (p, rid)).fetchone()
+    def _write_audience(self, rule_id, gids, cids) -> None:
+        """The perimeter, replaced whole. Called INSIDE the transaction and
+        BEFORE the write to `rule`, always — the AFTER INSERT trigger on the
+        rule photographs the audience, so an audience that arrives after the
+        rule is a version 1 that photographed nobody."""
+        self.cx.execute("DELETE FROM rule_audience_group WHERE rule_id=?", (rule_id,))
+        self.cx.execute("DELETE FROM rule_audience_exception WHERE rule_id=?", (rule_id,))
+        for g in gids:
+            self.cx.execute("INSERT INTO rule_audience_group (rule_id, group_id) "
+                            "VALUES (?,?)", (rule_id, g))
+        for c in cids:
+            self.cx.execute("INSERT INTO rule_audience_exception (rule_id, consumer_id) "
+                            "VALUES (?,?)", (rule_id, c))
 
-    def _scopes_of(self, p: str, rid: str) -> list[str]:
-        return [r[0] for r in self.cx.execute(
-            "SELECT s.name FROM rule_scopes rs JOIN scopes s ON s.id=rs.scope_id "
-            " WHERE rs.project=? AND rs.rule_id=? ORDER BY s.name", (p, rid))]
+    def _orphaned_by(self, gone_consumers: set, *, ignore_rule=None) -> list[str]:
+        """THE EMPTY GUARD (A3-a), and it names the rules.
 
-    def _version(self, p: str, rid: str) -> int:
-        r = self.cx.execute("SELECT IFNULL(MAX(version),0) FROM rule_versions "
-                            "WHERE project=? AND rule_id=?", (p, rid)).fetchone()
-        return r[0]
+        Given a set of consumers about to stop being reachable — retired, or
+        pulled out of a group — which rules IN FORCE would be left reaching
+        nobody? Those rules are still law, and law that binds nobody is a
+        retirement nobody decided and nobody can find. So the gesture is
+        refused, the rules are named, and they get sorted out first: retired
+        properly, or given a perimeter that still means something.
 
-    def _dict(self, row, p: str, expand: bool = True, why: bool = False) -> dict:
-        """The MAINTENANCE shape of a rule — the consumer reading is not built
-        here: list_rules, get_rules and search strip their answers down to the
-        ID and the body themselves. `expand` is TRUE by default because a chat
-        is never offered a choice it can get wrong: what reaches a consumer
-        always carries the gloss. `why` adds `reason` and the last `event`: it
-        is on only where a person decides — the batch and the export."""
-        body = row["body"]
-        d = {"id": row["id"], "type": row["type"], "title": row["title"],
-             "body": self._expand(p, body) if expand else body,
-             "status": row["status"], "permanence": row["permanence"],
-             "expires_at": row["expires_at"], "scopes": self._scopes_of(p, row["id"]),
-             "version": self._version(p, row["id"]), "changelog": row["changelog"],
-             "source": row["source"], "updated_at": row["updated_at"]}
-        if row["superseded_by"]:
-            d["superseded_by"] = row["superseded_by"]
-        if row["supersedes"]:
-            # On a PROPOSAL: whoever approves must see that letting this in
-            # also retires that — a supersede invisible in the batch would be
-            # worse than the defect it cures.
-            d["supersedes"] = row["supersedes"]
-        if row["denied_reason"]:
-            d["denied_reason"] = row["denied_reason"]
-        if why:
-            d["reason"] = row["reason"]
-            if row["event"]:
-                d["event"] = row["event"]
-        return d
-
-    _IN_FORCE = ("status = 'active' AND (permanence = 'permanent' "
-                 "OR expires_at IS NULL OR expires_at > :now)")
-
-    @staticmethod
-    def _in_force(row, now: str = "") -> bool:
-        """The same predicate as _IN_FORCE, for a row already in hand: one
-        definition each side of the SQL boundary, held together by the suite."""
-        return (row["status"] == "active"
-                and (row["permanence"] == "permanent" or not row["expires_at"]
-                     or row["expires_at"] > (now or _now())))
-
-    def _reaching(self, p: str, consumer: str) -> dict[str, tuple[int, list[str]]]:
-        """rule_id -> (breadth of the widest scope it arrives through, scopes)."""
-        rows = self.cx.execute(
-            "SELECT rs.rule_id, sc.name AS scope FROM rule_scopes rs "
-            "  JOIN scopes sc ON sc.id = rs.scope_id "
-            " WHERE rs.project = :p AND (sc.name = :all OR EXISTS ("
-            # No `retired_at` clause here, and its absence is deliberate: this
-            # asks whether ONE NAMED consumer is a member, and a read for a
-            # retired consumer never gets this far — `_consumer()` refuses the
-            # name first. A filter nobody can ever see fail is not a filter,
-            # and this file does not keep those.
-            "   SELECT 1 FROM scope_members m JOIN consumers k ON k.id = m.consumer_id "
-            "    WHERE m.scope_id = rs.scope_id AND lower(k.name) = :c))",
-            {"p": p, "c": _fold(consumer), "all": ALL}).fetchall()
-        out: dict[str, tuple[int, list[str]]] = {}
-        cache: dict[str, int] = {}
-        for r in rows:
-            sc = r["scope"]
-            if sc not in cache:
-                cache[sc] = self._breadth(p, sc)
-            b, lst = out.get(r["rule_id"], (0, []))
-            out[r["rule_id"]] = (max(b, cache[sc]), sorted(lst + [sc]))
-        return out
-
-    def _rules_for(self, p: str, c: str, expand: bool = True) -> dict:
-        """The full rows in force for one consumer, ordered by the breadth of
-        the scope they arrive through. The shared engine under TWO readings:
-        list_rules strips it down to what a consumer gets, export keeps it
-        whole because a person maintaining the corpus reads it."""
-        reaching = self._reaching(p, c)
-        now = _now()
-        rules = []
-        for rid, (breadth, scopes) in reaching.items():
-            row = self._row(p, rid)
-            if row is None:
+        It is a REFUSAL and not a report because the damage is silent — unlike
+        an overlap, which is visible in the next read of the rule."""
+        stuck = []
+        for row in self.cx.execute(
+                "SELECT rule_id, display_id, title, reach FROM v_rule "
+                "WHERE status='active'"):
+            if ignore_rule is not None and row["rule_id"] == ignore_rule:
                 continue
-            if row["status"] != "active":
-                continue
-            if row["permanence"] != "permanent" and row["expires_at"] and row["expires_at"] <= now:
-                continue
-            d = self._dict(row, p, expand, why=True)
-            d["via"] = scopes
-            d["breadth"] = breadth
-            rules.append(d)
-        rules.sort(key=lambda d: (-d["breadth"], d["id"][:2], int(d["id"].split("-")[1])))
-        total = self.cx.execute(
-            "SELECT COUNT(*) FROM rules WHERE project=:p AND " + self._IN_FORCE,
-            {"p": p, "now": now}).fetchone()[0]
-        return {"rules": rules, "outside": total - len(rules)}
+            now = self._effective(row["rule_id"], row["reach"])
+            if now and not (now - gone_consumers):
+                stuck.append(f"{row['display_id']} — {row['title']}")
+        return stuck
 
-    def list_rules(self, code: str, consumer: str, expand: bool = True) -> dict:
-        """Every rule in force for one consumer, in ONE call, ordered from the
-        most widespread to the most specific. The order IS the breadth of the
-        scope: it stays right on its own when a consumer is added.
-
-        THE CONSUMER READING: each rule arrives as its ID and its body — the
-        citations expanded with the current title of what they point at — and
-        nothing else. The title, the dates, the perimeter and the why are
-        administration, and they cost context in every chat that works under
-        the rules: they live in the maintenance reading (rules_batch,
-        rules_export). The ORDER is still the breadth; only the fields that
-        said so went out."""
-        p = self._project(code)
-        c = self._consumer(p, consumer)
-        data = self._rules_for(p, c, expand)
-        rules = [{"id": d["id"], "body": d["body"]} for d in data["rules"]]
-        # The BRIEF leads: "you are so-and-so, and these are your rules" is one
-        # round trip, which is the reason the field exists. Empty is not an
-        # error — a consumer without a mandate written down is still a
-        # consumer, and skills leave it empty on purpose.
-        brief = self.cx.execute("SELECT brief FROM consumers WHERE project=? AND name=?",
-                                (p, c)).fetchone()[0]
-        return {"project": p, "consumer": c, "brief": brief or "",
-                "domains": self._legend(p, [d["id"] for d in rules]),
-                "rules": rules, "count": len(rules),
-                "outside_your_scope": data["outside"],
-                "note": "ordered by breadth: what comes first binds everyone. If an ID you "
-                        "need is missing it is not undefined — it belongs to someone else"}
-
-    def get_rules(self, code: str, ids, consumer: str) -> dict:
-        """One or MANY rules by ID. Three different answers, kept apart per ID:
-        the rule · it exists but is not yours · never defined, which means a
-        broken citation and must be reported."""
-        p = self._project(code)
-        c = self._consumer(p, consumer)
-        if isinstance(ids, str):
-            ids = [ids]
-        ids = [_norm_id(i) for i in (ids or [])]
-        if not ids:
-            raise RulesError("no ID asked for")
-        if len(ids) > MAX_GET_IDS:
-            raise RulesError(f"{len(ids)} IDs at once: the ceiling is {MAX_GET_IDS}")
-        reaching = self._reaching(p, c)
-        found, not_yours, never = [], [], []
-        for rid in ids:
-            row = self._row(p, rid)
-            if row is None:
-                never.append(rid)
-            elif rid in reaching:
-                # The consumer reading: the ID and the body. One exception,
-                # and it is a verdict rather than a field: a rule NOT in force
-                # says so, because handing back a retired body as if it bound
-                # anybody would be the reading lying by omission.
-                d = {"id": rid, "body": self._expand(p, row["body"])}
-                if row["status"] != "active":
-                    d["status"] = row["status"]
-                    if row["status"] == "retired" and row["superseded_by"]:
-                        d["superseded_by"] = row["superseded_by"]
-                elif row["permanence"] != "permanent" and row["expires_at"] \
-                        and row["expires_at"] <= _now():
-                    d["status"] = "expired"
-                found.append(d)
-            else:
-                not_yours.append({"id": rid, "held_by": self._holders(p, rid)})
-        out = {"project": p, "consumer": c, "found": found,
-               "not_yours": not_yours, "never_defined": never}
-        if never:
-            out["warning"] = ("never_defined means a BROKEN CITATION: those IDs were never "
-                              "defined in this project. Report them to the Architect — or you "
-                              "are using another project's code.")
-        return out
-
-    def _holders(self, p: str, rid: str) -> list[str]:
-        rows = self.cx.execute(
-            "SELECT DISTINCT c.name FROM rule_scopes rs "
-            "  JOIN scope_members m ON m.scope_id=rs.scope_id "
-            "  JOIN consumers c ON c.id=m.consumer_id "
-            " WHERE rs.project=? AND rs.rule_id=? AND c.retired_at IS NULL "
-            " ORDER BY c.name", (p, rid)).fetchall()
-        return [r[0] for r in rows]
-
-    def search(self, code: str, text: str, consumer: str) -> dict:
-        p = self._project(code)
-        c = self._consumer(p, consumer)
-        q = (text or "").strip().lower()
-        if len(q) < 2:
-            raise RulesError("search text: at least two characters")
-        reaching = self._reaching(p, c)
-        now = _now()
-        hits, outside = [], 0
-        rows = self.cx.execute("SELECT * FROM rules WHERE project=:p AND " + self._IN_FORCE,
-                               {"p": p, "now": now}).fetchall()
-        for row in rows:
-            if q not in (row["title"] or "").lower() and q not in (row["body"] or "").lower():
-                continue
-            if row["id"] in reaching:
-                hits.append({"id": row["id"], "body": self._expand(p, row["body"])})
-            else:
-                outside += 1
-        hits.sort(key=lambda d: (d["id"][:2], int(d["id"].split("-")[1])))
-        return {"project": p, "consumer": c, "hits": hits, "count": len(hits),
-                "outside_your_scope": outside}
-
-    def pending(self, code: str, consumer: str = "") -> dict:
-        """The consumer's noticeboard: my proposals waiting, my denied ones with
-        the reason, my provisional rules about to expire. This replaces the
-        notes a chat used to keep in its own memory."""
-        p = self._project(code)
-        c = self._consumer(p, consumer) if consumer else ""
-        where = "project=:p" + (" AND proposed_by=:c" if c else "")
-        args = {"p": p, "c": c} if c else {"p": p}
-        waiting = [self._dict(r, p) for r in self.cx.execute(
-            f"SELECT * FROM rules WHERE {where} AND status='proposed' ORDER BY id",
-            args).fetchall()]
-        denied = [self._dict(r, p) for r in self.cx.execute(
-            f"SELECT * FROM rules WHERE {where} AND status='denied' ORDER BY updated_at DESC",
-            args).fetchall()]
-        soon = _plus_days(30)
-        now = _now()
-        expiring = []
-        if c:
-            for rid in self._reaching(p, c):
-                row = self._row(p, rid)
-                if row is None or row["status"] != "active":
-                    continue
-                if row["permanence"] == "permanent" or not row["expires_at"]:
-                    continue
-                if now < row["expires_at"] <= soon:
-                    # The renewals queue carries the WHY, and only this queue
-                    # does: it is the one list read to decide, and the
-                    # decision is undecidable without the reason in front of
-                    # you. The waiting and denied lists keep their shape.
-                    expiring.append(self._dict(row, p, why=True))
-        return {"project": p, "consumer": c or "(all)",
-                "waiting": waiting, "denied": denied, "expiring_within_30_days": expiring,
-                "note": "a denied proposal is kept on purpose, with its reason. The registry "
-                        "no longer refuses a re-proposal — the number is assigned by the "
-                        "counter, so the same text filed again simply takes a new one. "
-                        "Reading this list before proposing is now a habit, not a guard rail"}
-
-    # ---------- verdicts ----------
-
-    def status(self, code: str) -> dict:
-        p = self._project(code)
-        now = _now()
-        q = lambda sql, **kw: self.cx.execute(sql, {"p": p, "now": now, **kw}).fetchone()[0]
-        by_domain = {r[0]: r[1] for r in self.cx.execute(
-            "SELECT domain, COUNT(*) FROM rules WHERE project=:p AND " + self._IN_FORCE +
-            " GROUP BY domain ORDER BY domain", {"p": p, "now": now})}
-        by_consumer = {}
-        for c in [r[0] for r in self.cx.execute(
-                "SELECT name FROM consumers WHERE project=? AND retired_at IS NULL "
-                "ORDER BY name", (p,))]:
-            by_consumer[c] = len(self.list_rules(code, c)["rules"])
-        return {
-            "project": p,
-            "database": {"path": self.path,
-                         "integrity": self.cx.execute("PRAGMA integrity_check").fetchone()[0],
-                         "journal_mode": self.cx.execute("PRAGMA journal_mode").fetchone()[0],
-                         "mode": oct(os.stat(self.path).st_mode & 0o777),
-                         "owner_uid": os.stat(self.path).st_uid},
-            "rules": {
-                "in_force": q("SELECT COUNT(*) FROM rules WHERE project=:p AND " + self._IN_FORCE),
-                "proposed": q("SELECT COUNT(*) FROM rules WHERE project=:p AND status='proposed'"),
-                "denied": q("SELECT COUNT(*) FROM rules WHERE project=:p AND status='denied'"),
-                "retired": q("SELECT COUNT(*) FROM rules WHERE project=:p AND status='retired'"),
-                "expired_not_retired": q(
-                    "SELECT COUNT(*) FROM rules WHERE project=:p AND status='active' "
-                    "AND permanence='provisional' AND expires_at IS NOT NULL "
-                    "AND expires_at <= :now"),
-                "permanent": q("SELECT COUNT(*) FROM rules WHERE project=:p "
-                               "AND status='active' AND permanence='permanent'"),
-            },
-            "by_domain": by_domain,
-            "by_consumer": by_consumer,
-            "approval": {"provisional_days": self.provisional_days,
-                         "batches_approved": q(
-                             "SELECT COUNT(*) FROM approvals WHERE project=:p")},
-            "registry_version": VERSION,
-            "repaired_at_open": self.repaired,
-        }
-
-    def check(self, code: str) -> dict:
-        """Audit: broken pointers, citations of retired rules, rules with no
-        perimeter, redundancy candidates.
-
-        NUMBERING GAPS ARE GONE, and deliberately. The number is assigned by the
-        database now, so a gap is impossible: the counter does not skip, and
-        retiring leaves none because the row stays. A check that at steady state
-        cannot tell a fault from a choice is not a check — it is a line you
-        learn to skip, and the day it reports something true you have already
-        stopped reading it."""
-        p = self._project(code)
-        now = _now()
-        known = {r[0] for r in self.cx.execute("SELECT id FROM rules WHERE project=?", (p,))}
-        retired = {r[0] for r in self.cx.execute(
-            "SELECT id FROM rules WHERE project=? AND status='retired'", (p,))}
-        # A citation is only a problem when the rule MAKING it is in force. The
-        # door refuses a denied target and a target that does not resolve, but
-        # it cannot refuse a target that changes state afterwards: a rule is
-        # filed citing a proposal, the proposal is denied or the target is
-        # retired, and nothing ever says so. Hence the three buckets — and hence
-        # the filter on the SOURCE, without which a batch citing itself would
-        # report the project as incoherent every single time.
-        by_status = {r[0]: r[1] for r in self.cx.execute(
-            "SELECT id, status FROM rules WHERE project=?", (p,))}
-        in_force = {r[0] for r in self.cx.execute(
-            "SELECT id FROM rules WHERE project=:p AND " + self._IN_FORCE,
-            {"p": p, "now": now})}
-        broken, to_retired, to_denied, to_proposed = [], [], [], []
-        for r in self.cx.execute("SELECT src, dst FROM rule_refs WHERE project=? "
-                                 "ORDER BY src, dst", (p,)):
-            if r[1] not in known:
-                broken.append({"from": r[0], "cites": r[1]})
-                continue
-            if r[0] not in in_force:
-                continue
-            bucket = {"retired": to_retired, "denied": to_denied,
-                      "proposed": to_proposed}.get(by_status.get(r[1]))
-            if bucket is not None:
-                bucket.append({"from": r[0], "cites": r[1]})
-        no_scope = [r[0] for r in self.cx.execute(
-            "SELECT id FROM rules r WHERE r.project=? AND r.status='active' AND NOT EXISTS "
-            "(SELECT 1 FROM rule_scopes s WHERE s.project=r.project AND s.rule_id=r.id)", (p,))]
-        # Redundancy CANDIDATES, not a verdict: two rules in force, in the same
-        # perimeter, citing the same IDs. The registry puts the pairs under your
-        # eyes; deciding they say the same thing is a judgement.
-        cand = []
-        rows = self.cx.execute("SELECT id FROM rules WHERE project=:p AND " + self._IN_FORCE,
-                               {"p": p, "now": now}).fetchall()
-        info = {r[0]: (frozenset(self._scopes_of(p, r[0])),
-                       frozenset(x[0] for x in self.cx.execute(
-                           "SELECT dst FROM rule_refs WHERE project=? AND src=?", (p, r[0]))))
-                for r in rows}
-        ids = sorted(info)
-        for i, a in enumerate(ids):
-            for b in ids[i + 1:]:
-                sa, ra = info[a]
-                sb, rb = info[b]
-                if sa and sa == sb and ra and ra == rb:
-                    cand.append({"pair": [a, b], "same_scopes": sorted(sa),
-                                 "same_citations": sorted(ra)})
-        clean = not (broken or to_retired or to_denied or to_proposed or no_scope)
-        return {"project": p, "coherent": clean,
-                "broken_pointers": broken, "citations_to_retired": to_retired,
-                "citations_to_denied": to_denied,
-                "citations_to_proposed": to_proposed,
-                "rules_without_perimeter": no_scope,
-                "redundancy_candidates": cand,
-                "verdict": "coherent" if clean else "there are things to fix"}
-
-    def expiry(self, code: str, rid: str) -> dict:
-        """The expiry of ONE rule, chosen at will. Born in C5: the UI's
-        detail page used to DECLARE that no method handed this out — the
-        date was published only where it is decided, the expiring queue —
-        and saying so out loud was the honest form of the gap. Now the
-        method exists, and it hands out exactly the lifecycle fields:
-        status, permanence, the date, and whether the rule is in force."""
-        p = self._project(code)
-        rid = _norm_id(rid)
-        row = self._row(p, rid)
-        if row is None:
-            raise RulesError(f"{rid}: never defined in this project")
-        return {"project": p, "id": rid, "status": row["status"],
-                "permanence": row["permanence"], "expires_at": row["expires_at"],
-                "in_force": self._in_force(row)}
-
-    def history(self, code: str, rid: str) -> dict:
-        p = self._project(code)
-        rid = _norm_id(rid)
-        rows = self.cx.execute(
-            "SELECT version, ts, action, reason, status, permanence, scopes, consumers "
-            "  FROM rule_versions WHERE project=? AND rule_id=? ORDER BY version", (p, rid)).fetchall()
-        if not rows:
-            raise RulesError(f"{rid}: no history — this ID was never defined in this project")
-        return {"project": p, "id": rid, "versions": [dict(r) for r in rows],
-                "count": len(rows)}
-
-    def compare(self, code: str, rid: str, va: int, vb: int) -> dict:
-        p = self._project(code)
-        rid = _norm_id(rid)
-        def grab(v):
-            r = self.cx.execute("SELECT * FROM rule_versions WHERE project=? AND rule_id=? "
-                                "AND version=?", (p, rid, v)).fetchone()
-            if r is None:
-                raise RulesError(f"{rid}: version {v} does not exist (see history)")
-            return r
-        a, b = grab(int(va)), grab(int(vb))
-        def text(r):
-            return (f"type: {r['type']}\ntitle: {r['title']}\nstatus: {r['status']}\n"
-                    f"permanence: {r['permanence']}\nscopes: {r['scopes']}\n"
-                    f"consumers: {r['consumers']}\n\n{r['body']}\n").splitlines()
-        diff = list(difflib.unified_diff(text(a), text(b),
-                                         fromfile=f"v{va}", tofile=f"v{vb}", lineterm=""))
-        return {"project": p, "id": rid, "from": int(va), "to": int(vb),
-                "identical": not diff, "diff": "\n".join(diff)}
-
-    # ---------- writing ----------
-
-    # ---------- citations ----------
-
-    # ---------- the reference sanitisation ----------
+    # =================================================================
+    # Prose: the sanitisation, the citations, the gloss
+    # =================================================================
 
     SANITISED = "reference sanitisation failed"
 
-    def _relics(self, p: str, field: str, text: str) -> None:
+    def _relics(self, field: str, text: str) -> None:
         """THE SANITISATION, and it runs on EVERY piece of prose an author
         writes — every field, every door, the task log included.
 
@@ -2849,7 +2123,7 @@ class Project:
         time. The manual promises those identifiers do not enter the registry
         AT ALL; before this, they entered through every field that was not a
         body, and the worst of them is `reason`, which is IMMUTABLE — a relic
-        landing there could never be removed by anything, not even rules_fix.
+        landing there could never be removed by anything.
 
         Two shapes are refused, and the second is the one that used to slip
         through in silence:
@@ -2860,10 +2134,9 @@ class Project:
           · an ID written with FEWER THAN FOUR DIGITS, anywhere, brackets
             included. In this registry every number is four digits, so a
             two- or three-digit one is a relic BY CONSTRUCTION. It used to be
-            padded — `(VE-05)` became VE-0005 — which was a kindness when the
-            two-digit era's own bodies had to keep resolving, and is now the
-            most effective way to smuggle an old reference in: it does not
-            fail, it silently points at a DIFFERENT rule.
+            padded — `(VE-05)` became VE-0005 — which is the most effective
+            way to smuggle an old reference in: it does not fail, it silently
+            points at a DIFFERENT rule.
 
         Reading still forgives a short ID, and that is not an exception: there
         it identifies a row that exists, and a person quoting from memory is
@@ -2882,7 +2155,7 @@ class Project:
                 "a DIFFERENT rule and nobody was told. Nothing is deleted here and nothing "
                 "is rewritten for you: say it in words — 'the old rule about mergers' — or "
                 "cite by its real ID the rule that replaced it.")
-        doms = set(self._domains(p))
+        doms = set(self._domain_codes())
         stray = sorted({f"{m.group(1).upper()}-{m.group(2)}"
                         for m in RE_BARE.finditer(RE_CITE.sub(" ", text))
                         if m.group(1).upper() in doms})
@@ -2902,22 +2175,22 @@ class Project:
                 "does not read as one of this project's IDs. There is no exception, on "
                 "purpose.")
 
-    def _prose(self, p: str, field: str, text: str) -> str:
+    def _prose(self, field: str, text: str) -> str:
         """A prose field of a RULE, validated the way a body is and handed back
         in its stored form. One door, no exceptions: a `reason` that could
         carry what a `body` cannot would be the hole with a different name —
         and `reason` is the field that can never be repaired."""
         if not (text or "").strip():
             return text or ""
-        self._cites(p, text, field=field)
+        self._cites(text, field=field)
         return self._compact(text)
 
-    def _cites(self, p: str, body: str, self_id: str = "", field: str = "body") -> list[str]:
+    def _cites(self, body: str, self_id: str = "", field: str = "body") -> list[str]:
         """Parse a body and VALIDATE its citations. Raises, so this is the door.
 
         It opens with `_relics`, the sanitisation every field of every door
-        runs — the bare ID and the short-form relic. What is left here is the
-        part that is about the CORPUS rather than about the old one:
+        runs. What is left here is the part about THIS corpus rather than the
+        old one:
 
           · a citation that does not RESOLVE — a chat cannot hallucinate a
             pointer, because the proposal does not go in;
@@ -2926,41 +2199,30 @@ class Project:
             them is not stored and dropping it silently would be worse.
 
         THE THIRD ONE IS THE LOAD-BEARING ONE, and it is a decision about how
-        the corpus is built, not a technicality. You may only cite a rule that
-        has already been through approval. So the order of work is forced: file
-        the cited rule, get it approved, then file the one that cites it. A
-        proposal that needs a rule which does not exist yet simply waits.
+        the corpus is built. You may only cite a rule that has already been
+        through approval, so the order of work is forced: file the cited rule,
+        get it approved, then file the one that cites it. A batch whose members
+        cite each other can be approved into a state where the pointers were
+        only ever right at the moment they were written.
 
-        The alternative — citing something still in the batch — looks convenient
-        and is a trap: the number of a proposal is not final until it is in, so
-        a batch whose members cite each other is a batch that can be approved
-        into an inconsistent state. Nobody is writing twelve thousand rules
-        here; waiting one round is cheaper than a registry whose pointers were
-        right only at the moment they were written.
-
-        There is NO escape hatch on the bare-ID check, and the reason is worth
-        keeping: an exception was proposed — IDs inside backticks do not count —
-        so that a rule ABOUT the format of IDs could be written. A rule about
-        how rules are written must not exist: that matter belongs to the manual,
-        which a chat reads before writing. If a body ever trips over the check,
-        the cure is to rewrite the sentence, never to add an exception.
+        There is NO escape hatch on the bare-ID check. An exception was
+        proposed once — IDs inside backticks do not count — so that a rule
+        ABOUT the format of IDs could be written. A rule about how rules are
+        written must not exist: that matter belongs to the manual, which a chat
+        reads before writing.
 
         It cannot live in a trigger: SQLite has no regular expressions, and a
-        trigger calling a REGEXP the application registers would fail the moment
-        somebody opened the file with sqlite3 by hand."""
+        trigger calling a REGEXP the application registers would fail the
+        moment somebody opened the file with sqlite3 by hand."""
         body = body or ""
         # THE SANITISATION FIRST, and before any padding happens: `_norm_id`
-        # below would turn a two-digit relic into a valid-looking pointer, so
-        # a check that ran after it would be looking at the cure instead of
-        # the disease.
-        self._relics(p, field, body)
+        # below would turn a two-digit relic into a valid-looking pointer, so a
+        # check that ran after it would be looking at the cure instead of the
+        # disease.
+        self._relics(field, body)
         out: list[str] = []
         glossed: list[tuple[str, str]] = []
         for m in RE_CITE.finditer(body):
-            # ONE normalising door, the same one rules_get uses. Two doors with
-            # two ideas of what an ID looks like is how a tolerance documented
-            # in one place becomes a refusal in another. The pattern already
-            # guarantees the shape, so this cannot raise.
             dst = _norm_id(m.group(1))
             if m.group(2) is not None:
                 glossed.append((dst, m.group(2).strip()))
@@ -2968,18 +2230,21 @@ class Project:
                 continue
             if dst not in out:
                 out.append(dst)
-        # The bare-ID hunt moved into `_relics`, which runs for every field of
-        # every door instead of only for a body. Only the DECLARED domains of
-        # this project are hunted there: refusing every two-letter-and-digits
-        # token caught a URL path, a locale, a ticket number — things no
-        # rewriting of the sentence can fix — while catching nothing extra.
-        missing = [d for d in out if self._row(p, d) is None]
+        tasks = [d for d in out if d.startswith(TASK_PREFIX + "-")]
+        if tasks:
+            raise RulesError(
+                f"a rule cites a rule, never a task: {', '.join(tasks)} in `{field}`. "
+                "Rules bind and tasks wait — a rule that pointed at a piece of work would "
+                "be law with an expiry date nobody set. Say it in words, or cite the rule "
+                "the work came from.")
+        found = {d: self._rule_row(d) for d in out}
+        missing = [d for d, row in found.items() if row is None]
         if missing:
             raise RulesError(
                 f"citation in `{field}` that does not resolve: {', '.join(missing)} "
                 f"{'were' if len(missing) > 1 else 'was'} never defined in this project.")
-        unborn = sorted(d for d in out
-                        if self._row(p, d)["status"] in ("proposed", "denied"))
+        unborn = sorted(d for d, row in found.items()
+                        if row["status"] in ("proposed", "denied"))
         if unborn:
             raise RulesError(
                 f"citation towards a rule that is not in force yet: {', '.join(unborn)}. "
@@ -2987,16 +2252,14 @@ class Project:
                 "rule first, have it approved, then file this one — a batch whose members "
                 "cite each other can be approved into a state where the pointers were only "
                 "ever right at the moment they were written. If it was refused, "
-                "rules_pending says why.")
+                "rules_list(pending=True) says why.")
         # THE GLOSS IS CHECKED, NOT SWALLOWED. Reading hands back
         # `(VA-0002 — its title)` and pasting that straight back must work — but
         # anything else inside those brackets is the author's own words, and
         # dropping them on the way to storage would be a registry losing text in
-        # silence. So the only gloss accepted is the one the registry itself
-        # would have written.
+        # silence.
         for dst, gloss in glossed:
-            row = self._row(p, dst)
-            wanted = self._gloss(row)
+            wanted = self._gloss(found[dst])
             if gloss == wanted or gloss.startswith(wanted + " ·"):
                 continue
             raise RulesError(
@@ -3015,10 +2278,7 @@ class Project:
 
         Reading expands, and a maintainer is told to paste back what they read —
         so without this the gloss WOULD be stored, and a title changed the next
-        day would leave a stale copy of itself inside somebody else's rule. That
-        is the staleness of a materialised export, except inside the
-        authoritative source instead of a derivative. Only the pointer is
-        stored, and that is what makes the gloss unable to rot."""
+        day would leave a stale copy of itself inside somebody else's rule."""
         def one(m):
             try:
                 return f"({_norm_id(m.group(1))})"
@@ -3026,23 +2286,30 @@ class Project:
                 return m.group(0)
         return RE_CITE.sub(one, body or "")
 
-    def _write_refs(self, p: str, rid: str, cites: list[str]) -> int:
-        self.cx.execute("DELETE FROM rule_refs WHERE project=? AND src=?", (p, rid))
+    def _write_refs(self, rule_id, cites: list[str]) -> int:
+        """The citations, as FOREIGN KEYS. In 3.x these were text and an audit
+        went hunting for pointers that pointed nowhere; the database refuses to
+        write one now, so the audit is gone and `project_status` only looks at
+        the prose."""
+        self.cx.execute("DELETE FROM rule_ref WHERE src_rule_id=?", (rule_id,))
+        n = 0
         for dst in cites:
-            if dst == rid:
+            row = self._rule_row(dst)
+            if row is None or row["rule_id"] == rule_id:
                 continue
-            self.cx.execute("INSERT OR IGNORE INTO rule_refs (project, src, dst) VALUES (?,?,?)",
-                            (p, rid, dst))
-        return len(cites)
+            self.cx.execute("INSERT OR IGNORE INTO rule_ref (src_rule_id, dst_rule_id) "
+                            "VALUES (?,?)", (rule_id, row["rule_id"]))
+            n += 1
+        return n
 
-    def _expand(self, p: str, body: str) -> str:
-        """Expand every citation with the CURRENT title of the rule it points at.
+    def _expand(self, body: str) -> str:
+        """Expand every citation with the CURRENT title of the rule it points
+        at.
 
-        The gloss is NOT written, it is GENERATED — so it cannot go stale, which
-        is the same defect as a materialised export but inside the authoritative
-        source instead of a derivative. And the expansion knows the STATE of the
-        rule it points at, so a citation towards a retired one arrives already
-        marked as such, in the text, while the chat is reading.
+        The gloss is NOT written, it is GENERATED — so it cannot go stale. And
+        the expansion knows the STATE of the rule it points at, so a citation
+        towards a retired one arrives already marked as such, in the text,
+        while the chat is reading.
 
         It never raises: what is in the database has already passed the door,
         and a reading path that can fail is a reading path that will."""
@@ -3053,24 +2320,27 @@ class Project:
                 rid = _norm_id(m.group(1))
             except RulesError:
                 return m.group(0)
-            row = self._row(p, rid)
+            if rid.startswith(TASK_PREFIX + "-"):
+                # A task can be cited too, and in a task's body it is the
+                # commonest citation there is. It never refuses: a broken
+                # pointer is NAMED in the text and reading carries on.
+                trow = self.cx.execute("SELECT * FROM v_task WHERE display_id=?",
+                                       (rid,)).fetchone()
+                if trow is None:
+                    return f"({rid}{GLOSS_SEP}⚠ no such task)"
+                mark = "" if trow["status"] == "pending" else f" · {trow['status']}"
+                return f"({rid}{GLOSS_SEP}{self._gloss(trow)}{mark})"
+            row = self._rule_row(rid)
             if row is None:
                 return f"({rid}{GLOSS_SEP}⚠ never defined)"
             mark = ""
-            if row["status"] == "retired" and row["superseded_by"]:
-                # The retired rule points forward, in the text, while the
-                # reader is reading: the heir is one ID away.
-                mark = f" · retired → superseded by {row['superseded_by']}"
+            if row["status"] == "retired" and row["superseded_by_rule_id"]:
+                mark = f" · retired → superseded by {self._display(row['superseded_by_rule_id'])}"
             elif row["status"] != "active":
                 mark = f" · {row['status']}"
             elif (row["permanence"] != "permanent" and row["expires_at"]
                   and row["expires_at"] <= now):
                 mark = " · expired"
-            # The title gives up its own round brackets before it goes inside
-            # a round bracket. Without this a title holding a ')' closes the
-            # citation early, and pasting the body back into rules_fix is
-            # refused for text the registry itself generated — blaming the
-            # author for the writer's mistake.
             return f"({rid}{GLOSS_SEP}{self._gloss(row)}{mark})"
 
         return RE_CITE.sub(one, body or "")
@@ -3078,104 +2348,432 @@ class Project:
     @staticmethod
     def _gloss(row) -> str:
         """The title as it appears inside a citation. It gives up its own round
-        brackets first: a title holding a ')' would close the citation early, and
-        pasting the body back into rules_fix would then be refused for text the
-        registry itself generated — blaming the author for the writer's
-        mistake."""
+        brackets first: a title holding a ')' would close the citation early,
+        and pasting the body back would then be refused for text the registry
+        itself generated — blaming the author for the writer's mistake."""
         return (row["title"] or "").replace("(", "[").replace(")", "]")
 
-    def _check_scopes(self, p: str, scopes: list[str]) -> list[str]:
-        """Resolve every scope reference and hand back the STORED spellings:
-        what goes into a verdict is the name the owner chose, whatever
-        spelling the call arrived with."""
-        if not scopes:
-            raise RulesError("a rule with no perimeter reaches nobody: give at least one "
-                             f"scope, or {ALL} if it binds everyone")
-        out = []
-        for s in scopes:
-            row = self.cx.execute("SELECT name FROM scopes WHERE project=? AND lower(name)=?",
-                                  (p, _fold(s))).fetchone()
-            if row is None:
-                raise RulesError(
-                    f"{s!r} is neither a consumer nor a scope of this project. "
-                    "Every consumer has a scope with its own name; groups are made "
-                    "with create_scope.")
-            # A RETIRED CONSUMER'S SINGLETON SURVIVES ITS OWNER — the scope row
-            # is managed and carries that spelling, so dropping it would mean
-            # dropping a name the history still uses. It must not be a TARGET
-            # though: a rule aimed there would reach nobody, quietly, which is
-            # the one thing a perimeter must never do.
-            dead = self.cx.execute(
-                "SELECT retired_at FROM consumers WHERE project=? AND lower(name)=? "
-                "AND retired_at IS NOT NULL", (p, _fold(s))).fetchone()
-            if dead is not None:
-                raise RulesError(
-                    f"{row['name']} was RETIRED on {dead[0]}: a rule aimed at it would "
-                    "reach nobody. Aim it at whoever took the work over, or leave it out.")
-            out.append(row["name"])
+    def _task_prose(self, field: str, text: str) -> str:
+        """The task log's prose goes through the same door as the corpus'. It
+        was not so until 3.1.0, and the hole was found by an injection: the
+        relics came back in through the titles of tasks."""
+        if not (text or "").strip():
+            return text or ""
+        self._relics(field, text)
+        return self._compact(text)
+
+    # =================================================================
+    # Reading
+    # =================================================================
+
+    @staticmethod
+    def _in_force(row, now: str = "") -> bool:
+        """Active, and not past its expiry. Permanence is checked first because
+        a permanent rule has no expiry to be past."""
+        if row["status"] != "active":
+            return False
+        if row["permanence"] == "permanent" or not row["expires_at"]:
+            return True
+        return row["expires_at"] > (now or _now())
+
+    LEGEND = {
+        "type": {"R": "binding rule", "M": "method", "F": "technical fact"},
+        "reach": {"all": "binds every consumer of the project, present and future",
+                  "targeted": "binds the union of the groups and the exceptions listed"},
+        "permanence": {"provisional": "expires on the date shown unless it is promoted",
+                       "permanent": "stays until it is retired or superseded"},
+        "citation": f"(XX-{'N' * ID_DIGITS}) — the ID alone, inside round brackets",
+    }
+
+    def profile(self) -> dict:
+        """The project talking about itself: brief, specs, queue cap.
+
+        A project that has never been given a profile answers with nulls rather
+        than with an error — a fresh database is a legitimate state, and the
+        registry line that created it says so in the log."""
+        row = self._profile_row()
+        if row is None:
+            return {"brief": None, "specs": None, "queue_cap": None,
+                    "updated_at": None}
+        return {"brief": row["brief"], "specs": row["specs"],
+                "queue_cap": row["queue_cap"], "updated_at": row["updated_at"]}
+
+    def project_info(self) -> dict:
+        """The living structure: the profile, the domains with their gloss, the
+        consumers with kind and brief, the groups with their members, and
+        counts computed on read.
+
+        The first call of a new chat, and the reason it exists is narrow: the
+        names read here are the names every other tool expects. Guessing a
+        consumer or a group is how a proposal gets refused for a reason that
+        has nothing to do with what it says."""
+        domains = []
+        for d in self.cx.execute("SELECT * FROM domain ORDER BY code"):
+            n = self.cx.execute("SELECT COUNT(*) FROM rule WHERE domain_id=? "
+                                "AND status='active'", (d["domain_id"],)).fetchone()[0]
+            domains.append({"code": d["code"], "description": d["description"],
+                            "reason": d["reason"], "rules_in_force": n,
+                            "retired_at": d["retired_at"],
+                            "retired_reason": d["retired_reason"]})
+        consumers = []
+        for c in self.cx.execute("SELECT * FROM consumer ORDER BY name"):
+            consumers.append({"name": c["name"], "kind": c["kind"],
+                              "brief": c["brief"], "specs": c["specs"],
+                              # The secret itself never leaves the database; what
+                              # a caller needs to know is whether its gestures
+                              # have to be signed.
+                              "signed": bool(c["secret"]),
+                              "retired_at": c["retired_at"],
+                              "retired_reason": c["retired_reason"]})
+        groups = []
+        for g in self.cx.execute("SELECT * FROM consumer_group ORDER BY name"):
+            members = [r[0] for r in self.cx.execute(
+                "SELECT c.name FROM consumer_group_member m "
+                "JOIN consumer c ON c.consumer_id = m.consumer_id "
+                "WHERE m.group_id=? ORDER BY c.name", (g["group_id"],))]
+            groups.append({"name": g["name"], "members": members,
+                           "retired_at": g["retired_at"],
+                           "retired_reason": g["retired_reason"]})
+        now = _now()
+        in_force = sum(1 for r in self.cx.execute(
+            "SELECT * FROM rule WHERE status='active'") if self._in_force(r, now))
+        return {
+            "project": self.name,
+            "profile": self.profile(),
+            "domains": domains, "consumers": consumers, "groups": groups,
+            "counts": {
+                "rules_in_force": in_force,
+                "proposed": self.cx.execute("SELECT COUNT(*) FROM rule WHERE "
+                                            "status='proposed'").fetchone()[0],
+                "consumers_live": sum(1 for c in consumers if not c["retired_at"]),
+                "groups_live": sum(1 for g in groups if not g["retired_at"]),
+                "domains_live": sum(1 for d in domains if not d["retired_at"]),
+                "tasks_open": self.cx.execute("SELECT COUNT(*) FROM task WHERE "
+                                              "status='pending'").fetchone()[0],
+            },
+            "note": "the names here are the names every other call expects: a consumer or "
+                    "a group is READ, never guessed.",
+        }
+
+    def _reaching(self, consumer_id) -> dict:
+        """Every rule in force that reaches this consumer, and BY WHICH DOOR.
+
+        The door decides the reading order — universal first, then groups from
+        the widest, then the exceptions — because that is the order in which a
+        person builds the picture: what binds everybody, what binds my kind of
+        work, what was aimed at me by name. Breadth is the count of LIVE
+        members, computed now: a group that has emptied out sorts where it
+        belongs today, not where it belonged when the rule was written."""
+        out = {}
+        now = _now()
+        for row in self.cx.execute("SELECT * FROM v_rule WHERE status='active' "
+                                   "ORDER BY domain_id, seq"):
+            if not self._in_force(row, now):
+                continue
+            if row["reach"] == "all":
+                out[row["rule_id"]] = (row, "all", 10 ** 9, ["everyone"])
+                continue
+            direct = self.cx.execute(
+                "SELECT 1 FROM rule_audience_exception WHERE rule_id=? AND consumer_id=?",
+                (row["rule_id"], consumer_id)).fetchone()
+            doors = [r[0] for r in self.cx.execute(
+                "SELECT g.name FROM rule_audience_group a "
+                "JOIN consumer_group g ON g.group_id = a.group_id "
+                "JOIN consumer_group_member m ON m.group_id = g.group_id "
+                "WHERE a.rule_id=? AND m.consumer_id=? ORDER BY g.name",
+                (row["rule_id"], consumer_id))]
+            if direct:
+                # An exception was declared BY HAND, so it is the door that gets
+                # named even when a group happens to cover the same person: the
+                # snapshot works the same way, and two answers that disagreed
+                # about the door would be worse than either.
+                out[row["rule_id"]] = (row, "exception", -1, ["by name"])
+            elif doors:
+                gids = [r[0] for r in self.cx.execute(
+                    "SELECT a.group_id FROM rule_audience_group a WHERE a.rule_id=?",
+                    (row["rule_id"],))]
+                out[row["rule_id"]] = (row, "group", len(self._members_of(gids)), doors)
         return out
 
-    def _split_id(self, p: str, rid: str) -> tuple[str, int]:
-        m = RE_ID.match(rid)
-        dom, seq = m.group(1), int(m.group(2))
-        if dom not in self._domains(p):
-            raise RulesError(f"domain {dom!r} is not declared by this project "
-                             f"(declared: {', '.join(self._domains(p)) or 'none'})")
-        return dom, seq
-
-    def _check_domain(self, p: str, domain: str) -> str:
-        d = (domain or "").strip().upper()
-        if not d:
-            raise RulesError("the rule needs a DOMAIN: the number is not yours to pick, "
-                             "the registry assigns it")
-        # Checked at USE as well as at declaration: a row written by hand with
-        # sqlite3 never passed the declaring door, and a guarantee that only
-        # holds on one door is not one.
-        if d in RESERVED_DOMAINS:
-            raise RulesError(
-                f"domain {d!r} is RESERVED: it is the prefix of the task log, and a "
-                f"rule numbered {d}-0001 could not be told apart from a task.")
-        if d not in self._domains(p):
-            raise RulesError(f"domain {d!r} is not declared by this project "
-                             f"(declared: {', '.join(self._domains(p)) or 'none'})")
+    def _brief(self, row, via: str = "", doors=None, fragment: str = "") -> dict:
+        """A rule in short form: what a list shows. The perimeter is IN it —
+        `reach` plus the names — because a line that hides who it binds is a
+        line that gets quoted at the wrong person."""
+        aud = self._audience(row["rule_id"])
+        d = {"id": row["display_id"], "type": row["type"], "title": row["title"],
+             "reach": row["reach"], "permanence": row["permanence"],
+             "expires_at": row["expires_at"], "status": row["status"]}
+        if row["reach"] == "targeted":
+            d["groups"] = aud["groups"]
+            d["exceptions"] = aud["exceptions"]
+        if via:
+            d["reaches_you"] = "everyone" if via == "all" else ", ".join(doors or [])
+        if fragment:
+            d["fragment"] = fragment
+        if row["superseded_by_rule_id"]:
+            d["superseded_by"] = self._display(row["superseded_by_rule_id"])
         return d
 
-    def _next_seq(self, p: str, dom: str) -> int:
+    @staticmethod
+    def _fragment(q: str, text: str, width: int = 60) -> str:
+        """The piece of text a query matched, with a little air around it: a
+        search that answers with titles alone makes the caller open every hit."""
+        t = (text or "").replace("\n", " ")
+        i = t.lower().find((q or "").lower())
+        if i < 0:
+            return ""
+        a, b = max(0, i - width // 2), min(len(t), i + len(q) + width // 2)
+        return ("…" if a else "") + t[a:b].strip() + ("…" if b < len(t) else "")
+
+    def _desk(self, consumer_id) -> dict:
+        """TWO counters, and the number two is the decision: the summary at the
+        end of a session start says whether there is post, not what it says.
+        The list is `tasks_list`'s job, and this line exists to say what does
+        NOT get added here the next time somebody finds it handy."""
+        open_n = self.cx.execute(
+            "SELECT COUNT(*) FROM task WHERE consumer_id=? AND status='pending'",
+            (consumer_id,)).fetchone()[0]
+        urgent = self.cx.execute(
+            "SELECT COUNT(*) FROM task WHERE consumer_id=? AND status='pending' "
+            "AND urgent=1", (consumer_id,)).fetchone()[0]
+        return {"open": open_n, "urgent": urgent}
+
+    def list_rules(self, consumer: str, query: str = "", pending: bool = False) -> dict:
+        """SESSION START, in one call.
+
+        The project first — brief then specs, identity then the living facts —
+        then this consumer's brief and specs, the legend, the rules in force
+        for it, and the desk summary. One call because the alternative was four,
+        and a chat that has to make four calls before it can work makes three
+        of them wrong once.
+
+        `query` filters on title and body and hands back the matching fragment.
+        `pending=True` answers with the proposal queue instead: reasons and
+        proposers, which is what you look at before proposing something that is
+        already in there."""
+        c = self._consumer_row(consumer)
+        head = {"project": self.name, "profile": self.profile(),
+                "consumer": {"name": c["name"], "kind": c["kind"],
+                             "brief": c["brief"], "specs": c["specs"],
+                             "signed": bool(c["secret"])},
+                "legend": self.LEGEND}
+        if pending:
+            queue = []
+            for row in self.cx.execute("SELECT * FROM v_rule WHERE status='proposed' "
+                                       "ORDER BY rule_id"):
+                d = self._brief(row)
+                d["reason"] = row["reason"]
+                d["proposed_by"] = row["proposed_by"]
+                d["proposed_at"] = row["created_at"]
+                if row["supersedes_rule_id"]:
+                    victim = self._rule_by_pk(row["supersedes_rule_id"])
+                    d["supersedes"] = f"{victim['display_id']} — {victim['title']}"
+                queue.append(d)
+            cap = self.queue_cap()
+            head.update({"pending": queue, "count": len(queue), "queue_cap": cap,
+                         "note": "approval is on the web page, never here: unticked means "
+                                 "denied, and the noes are recorded with their reason."})
+            return head
+        q = (query or "").strip()
+        rows = self._reaching(c["consumer_id"])
+        ordered = sorted(rows.values(), key=lambda t: (-t[2], t[0]["display_id"]))
+        out, total = [], 0
+        for row, via, _breadth, doors in ordered:
+            frag = ""
+            if q:
+                frag = self._fragment(q, row["title"]) or self._fragment(q, row["body"])
+                if not frag:
+                    continue
+            total += 1
+            if len(out) < RULES_LIST_CAP:
+                out.append(self._brief(row, via, doors, frag))
+        head.update({"rules": out, "count": total,
+                     "truncated": total > len(out),
+                     "desk": self._desk(c["consumer_id"])})
+        if total > len(out):
+            head["note"] = (f"{total} rules reach you and the first {len(out)} are here: "
+                            "narrow with `query`, or read them by ID.")
+        return head
+
+    def _gestures(self, rule_id) -> list[dict]:
+        """The history as DATED GESTURES: for every version, the date, the verb,
+        the hand, and ONLY the fields that differ from the version before.
+
+        Whole snapshots go in and the diff comes out here, which is the whole
+        of decision 7 of the schema redesign: a stored delta cannot tell
+        "unchanged" from "cleared", and it would fail to tell them apart
+        precisely on `expires_at`. The audience is diffed too, and by NAMES —
+        a photograph that answered in surrogate keys would be a photograph
+        nobody can read."""
+        fields = ("type", "title", "body", "status", "permanence", "expires_at",
+                  "reach", "superseded_by_rule_id")
+        out, prev, prev_aud = [], None, None
+        for v in self.cx.execute("SELECT * FROM rule_version WHERE rule_id=? "
+                                 "ORDER BY version", (rule_id,)):
+            names = sorted(r[0] for r in self.cx.execute(
+                "SELECT c.name FROM rule_version_audience a "
+                "JOIN consumer c ON c.consumer_id = a.consumer_id "
+                "WHERE a.rule_id=? AND a.version=?", (rule_id, v["version"])))
+            changed = {}
+            for f in fields:
+                now = v[f]
+                if prev is None or prev[f] != now:
+                    if f == "superseded_by_rule_id":
+                        if now:
+                            changed["superseded_by"] = self._display(now)
+                    else:
+                        changed[f] = now
+            g = {"version": v["version"], "timestamp": v["timestamp"],
+                 "action": v["action"], "actor": v["actor"], "changed": changed}
+            if v["reason"]:
+                g["reason"] = v["reason"]
+            if prev_aud is None:
+                g["reaches"] = names
+            elif names != prev_aud:
+                g["reaches"] = names
+                g["joined"] = sorted(set(names) - set(prev_aud))
+                g["left"] = sorted(set(prev_aud) - set(names))
+            g["reaches_count"] = len(names)
+            out.append(g)
+            prev, prev_aud = v, names
+        return out
+
+    def get_rules(self, ids, consumer: str = "", history: bool = False) -> dict:
+        """Full detail, up to GET_IDS rules at a time.
+
+        The two ceilings are of different natures on purpose: too many IDs is
+        REFUSED, because a caller who asked for thirty wanted thirty and a
+        silent ten would be an answer to a different question; too many BYTES
+        truncates and says so, because there the caller cannot know in advance."""
+        if isinstance(ids, str):
+            ids = [i.strip() for i in ids.replace(",", " ").split() if i.strip()]
+        ids = [str(i).strip() for i in (ids or []) if str(i).strip()]
+        if not ids:
+            raise RulesError("no ID given: rules_get takes the IDs of the rules to read, "
+                             "up to " + str(GET_IDS) + " at a time.")
+        if len(ids) > GET_IDS:
+            raise RulesError(
+                f"{len(ids)} IDs asked for and the ceiling is {GET_IDS}: this one is "
+                "REFUSED and not trimmed, because a silent cut answers a question you did "
+                "not ask. Split the batch.")
+        if consumer:
+            self._consumer_row(consumer)
+        out, missing, size, cut = [], [], 0, False
+        for rid in ids:
+            row = self._rule_row(rid)
+            if row is None:
+                missing.append(rid)
+                continue
+            if cut:
+                continue
+            aud = self._audience(row["rule_id"])
+            body = self._expand(row["body"])
+            d = {"id": row["display_id"], "type": row["type"], "title": row["title"],
+                 "body": body, "status": row["status"],
+                 "in_force": self._in_force(row),
+                 "permanence": row["permanence"], "expires_at": row["expires_at"],
+                 "reach": row["reach"], "groups": aud["groups"],
+                 "exceptions": aud["exceptions"],
+                 "reaches_count": len(self._effective(row["rule_id"], row["reach"])),
+                 "reason": row["reason"], "source": row["source"],
+                 "event": row["event"], "proposed_by": row["proposed_by"],
+                 "created_at": row["created_at"], "updated_at": row["updated_at"]}
+            if row["supersedes_rule_id"]:
+                d["supersedes"] = self._display(row["supersedes_rule_id"])
+            if row["superseded_by_rule_id"]:
+                d["superseded_by"] = self._display(row["superseded_by_rule_id"])
+            cited_by = [r[0] for r in self.cx.execute(
+                "SELECT v.display_id FROM rule_ref f JOIN v_rule v "
+                "ON v.rule_id = f.src_rule_id WHERE f.dst_rule_id=? "
+                "ORDER BY v.display_id", (row["rule_id"],))]
+            if cited_by:
+                d["cited_by"] = cited_by
+            if history:
+                d["history"] = self._gestures(row["rule_id"])
+            size += len(str(d).encode())
+            if size > GET_BYTES and out:
+                cut = True
+                continue
+            out.append(d)
+        res = {"project": self.name, "rules": out, "count": len(out)}
+        if missing:
+            res["not_found"] = missing
+            res["note"] = ("never defined in this project: " + ", ".join(missing)
+                           + ". Reading forgives a short ID — VA-02 resolves — so this is "
+                             "not a formatting refusal: those rules are not here.")
+        if cut:
+            res["truncated"] = True
+            res["note"] = (f"cut at {GET_BYTES} bytes: {len(out)} of {len(ids)} read. "
+                           "Ask for the rest in a second call.")
+        return res
+
+    def expiry(self, rid: str) -> dict:
+        """State, permanence, date and in-force for one rule. It exists because
+        the detail page needed it and a page must not compute a lifecycle by
+        itself: the engine is the one that knows when a provisional rule stops
+        binding."""
+        row = self._rule_row(rid)
+        if row is None:
+            raise RulesError(f"{rid}: never defined in this project.")
+        return {"id": row["display_id"], "status": row["status"],
+                "permanence": row["permanence"], "expires_at": row["expires_at"],
+                "in_force": self._in_force(row)}
+
+    # =================================================================
+    # Writing rules
+    # =================================================================
+
+    def _next_seq(self, domain_id, code: str) -> int:
         """The next number in that domain, counting from the LAST ever used —
         retired and denied rows included, because an ID is never reused."""
-        last = self.cx.execute("SELECT IFNULL(MAX(seq), 0) FROM rules "
-                               "WHERE project=? AND domain=?", (p, dom)).fetchone()[0]
+        last = self.cx.execute("SELECT IFNULL(MAX(seq),0) FROM rule WHERE domain_id=?",
+                               (domain_id,)).fetchone()[0]
         n = int(last) + 1
         if n > MAX_SEQ:
-            raise RulesError(f"domain {dom} has burned all {MAX_SEQ} numbers: it needs a "
-                             "new domain, because IDs are never reused")
+            raise RulesError(f"domain {code} has burned all {MAX_SEQ} numbers: it needs a "
+                             "new domain, because IDs are never reused.")
         return n
 
-    def propose(self, code: str, domain: str, rtype: str, title: str, body: str,
-                scopes, reason: str, proposed_by: str = "",
-                changelog: str = "", source: str = "", supersedes: str = "") -> dict:
-        """File a proposal. It reaches NOBODY until the batch is approved — which
-        is why this needs only the project code: an unapproved proposal cannot
-        do harm, and a chat that deposits one stops keeping a note about it.
+    def _check_consumer_key(self, row, consumer_key: str, *, admin: bool = False) -> None:
+        """A consumer's identity is declarative until somebody decides it is
+        not. `secret` NULL means the name is enough — which is the truth of
+        today, and pretending otherwise would be theatre. Set, and every
+        gesture in that consumer's name carries `consumer_key`.
 
-        THE NUMBER IS NOT A PARAMETER. You give the DOMAIN and the registry
-        assigns the next number in it, four digits. A number is not a choice, it
-        is a position in a sequence: whoever does not pass it cannot pick it,
-        which is a structural guarantee and not a rule anybody has to remember.
+        The admin code goes over the top of it: whoever holds that already has
+        more than this protects."""
+        if admin or not row["secret"]:
+            return
+        if not secrets.compare_digest((consumer_key or "").strip(), row["secret"]):
+            raise RulesError(
+                f"{row['name']} signs its gestures: this call needs `consumer_key`, the "
+                "secret in that consumer's own instructions. It was switched on for this "
+                "consumer alone — the others still go by name.")
 
-        `supersedes` names the rule this proposal REPLACES — a dedicated field,
-        never a citation in the body, so the registry can impose the atomicity:
-        at approval, in the same transaction, the heir goes active and the
-        named rule is retired pointing at it. The target must be IN FORCE, and
-        only one pending proposal may claim it (a partial unique index, so it
-        holds no matter which door the write came through). The heir DECLARES
-        its own scopes: the supersede is the moment the perimeter gets
-        re-decided, not inherited.
+    def propose(self, domain: str, rtype: str, title: str, body: str, reason: str,
+                reach: str, proposed_by: str, groups=None, exceptions=None,
+                supersedes: str = "", source: str = "",
+                consumer_key: str = "", admin: bool = False) -> dict:
+        """File a proposal. It reaches NOBODY until a person approves it on the
+        page, which is why this needs only the reference code: an unapproved
+        proposal cannot do harm, and a chat that deposits one stops carrying a
+        note about it.
 
-        The ID assigned comes back in the verdict — without it you could not
-        write the citations that point at this rule."""
-        p = self._project(code)
-        dom = self._check_domain(p, domain)
+        Everything is validated BEFORE anything is written — the perimeter
+        resolved, the citations checked, the prose sanitised — so a refusal
+        spends neither a number nor a place in the queue.
+
+        `supersedes` names the rule this one REPLACES: a field of its own,
+        never a citation in the body, so the registry can impose the atomicity
+        — at approval, in the same transaction, the heir goes active and the
+        named rule is retired pointing at it. Changing a decision is ONE
+        gesture."""
+        dom = self._domain_row(domain, live=True)
+        if dom["code"] in RESERVED_DOMAINS:
+            raise RulesError(
+                f"domain {dom['code']!r} is RESERVED: it is the prefix of the task log, "
+                f"and a rule numbered {dom['code']}-0001 could not be told apart from a "
+                "task.")
         rtype = (rtype or "").strip().upper()
         if rtype not in TYPES:
             raise RulesError(f"type {rtype!r}: R binding, M method, F technical fact. "
@@ -3187,1089 +2785,1373 @@ class Project:
         if not (reason or "").strip():
             raise RulesError("reason is mandatory: without the why a rule cannot be "
                              "defended, and at the first opportunity it gets reopened")
-        sup = None
+        author = (proposed_by or "").strip()
+        if not author:
+            raise RulesError(
+                "proposed_by is required: an unsigned proposal is an orphan, and whoever "
+                "reads the queue has to know who to ask. It is a signature — the name of "
+                "the consumer, or of a person.")
+        signer = self.cx.execute("SELECT * FROM consumer WHERE lower(name)=?",
+                                 (_fold(author),)).fetchone()
+        if signer is not None:
+            self._check_consumer_key(signer, consumer_key, admin=admin)
+
+        cap = self.queue_cap()
+        if cap is not None:
+            n = self.cx.execute("SELECT COUNT(*) FROM rule "
+                                "WHERE status='proposed'").fetchone()[0]
+            if cap == 0:
+                raise RulesError(
+                    "the proposal queue is CLOSED on this project (queue_cap 0). Nothing "
+                    "is lost by waiting: say it to whoever administers the project.")
+            if n >= cap:
+                raise RulesError(
+                    f"the queue already holds {n} proposals and the ceiling is {cap}. The "
+                    "ceiling is there so that whoever approves reads what they tick: the "
+                    "queue has to be decided before it grows. Titles waiting: "
+                    + "; ".join(r[0] for r in self.cx.execute(
+                        "SELECT title FROM rule WHERE status='proposed' ORDER BY rule_id")))
+
+        victim = None
         if (supersedes or "").strip():
             sup = _norm_id(supersedes)
-            target = self._row(p, sup)
-            if target is None:
+            victim = self._rule_row(sup)
+            if victim is None:
                 raise RulesError(
-                    f"{sup}: never defined in this project. `supersedes` must name a "
-                    "rule in force — the one this proposal replaces.")
-            if not self._in_force(target):
+                    f"{sup}: never defined in this project. `supersedes` must name a rule "
+                    "in force — the one this proposal replaces.")
+            if not self._in_force(victim):
                 raise RulesError(
-                    f"{sup} is {target['status']} and not in force: only a rule in "
-                    "force can be superseded. A defect in a living rule is rules_fix; "
-                    "a rule already retired needs no heir declared after the fact.")
-        # Citations are validated BEFORE anything is written: a chat cannot
-        # hallucinate a pointer, because the proposal does not go in.
-        # VALIDATED ON WHAT ARRIVED, then compacted, then measured. The order is
+                    f"{sup} is {victim['status']} and not in force: only a rule in force "
+                    "can be superseded. A rule already retired needs no heir declared "
+                    "after the fact.")
+            claimed = self.cx.execute(
+                "SELECT v.display_id, v.title FROM v_rule v WHERE v.status='proposed' "
+                "AND v.supersedes_rule_id=?", (victim["rule_id"],)).fetchone()
+            if claimed is not None:
+                raise RulesError(
+                    f"{sup} is already claimed by the pending proposal {claimed[0]} — "
+                    f"{claimed[1]!r}. Two heirs for one rule is a batch that decides by "
+                    "order of approval: settle that one first.")
+
+        # Validated on WHAT ARRIVED, then compacted, then measured. The order is
         # the whole safety of it: compacting first would drop a gloss before the
         # bare-ID check could look at it, so a body could lose a pointer and a
-        # sentence without anybody being told. Measured last because the ceiling
-        # has to be about what actually goes into the database.
-        cites = self._cites(p, body)
+        # sentence without anybody being told. Measured last, because the
+        # ceiling has to be about what actually goes into the database.
+        cites = self._cites(body)
         body = self._compact(body)
         if len(body.encode()) > MAX_BODY_BYTES:
-            raise RulesError(f"body over {MAX_BODY_BYTES} bytes once stored: split the rule")
-        # EVERY prose field this call carries, through the same door. The
-        # `reason` is the one that made this necessary and the one that can
-        # never be repaired: it is written once and no event rewrites it, so a
-        # relic landing there outlives the rule itself — it survives in
-        # rule_versions, in an export already taken and in a backup already
-        # carried off site. Only `body` records refs; the others are validated
-        # and stored, because a citation graph built out of prose would be a
-        # second registry nobody asked for.
-        title = self._prose(p, "title", title)
-        reason = self._prose(p, "reason", reason)
-        changelog = self._prose(p, "changelog", changelog)
-        source = self._prose(p, "source", source)
-        scopes = self._check_scopes(p, _norm_scope_list(scopes))
-        if not (proposed_by or "").strip():
-            raise RulesError(
-                "proposed_by is mandatory: it is your own consumer name, and it is what "
-                "makes the proposal YOURS. Omitted, the proposal would be an orphan — "
-                "rules_pending could never show it to whoever filed it — and a silent "
-                "orphan is exactly the class of error this registry refuses at the door.")
-        by = self._consumer(p, proposed_by)
-        # IMMEDIATE, not the default deferred: the write lock is taken BEFORE
-        # the counter is read, so nobody can read the same MAX(seq) in between.
-        # A plain BEGIN would upgrade from read to write halfway through, and in
-        # WAL that upgrade cannot wait — the loser dies with "database is
-        # locked" no matter how long the busy timeout is.
-        self.cx.execute("BEGIN IMMEDIATE")
-        try:
-            # The ceiling on the pending queue, counted under the SAME write
-            # lock as the counter: two writers racing past a Python check
-            # would both see room where there is one slot. The owner reads
-            # and decides in batches of 3-4 — the ceiling is that rhythm as a
-            # number that refuses, and the refusal is the rhythm's whole
-            # enforcement: no override, because an override would be the
-            # extra proposal with extra steps. Approval and denial free the
-            # slots by themselves.
-            pend = self.cx.execute(
-                "SELECT title FROM rules WHERE project=? AND status='proposed' "
-                "ORDER BY id", (p,)).fetchall()
-            cap = self.queue_cap()
-            if cap is not None and len(pend) >= cap:
-                queue = " · ".join(r[0] for r in pend)
-                raise RulesError(
-                    f"there are already {len(pend)} pending proposals in this project "
-                    f"and the ceiling is {cap}: wait for them to be "
-                    f"approved or denied before filing more. In the queue: {queue}")
-            # The number is read and taken in one go, and
-            # UNIQUE(project, domain, seq) is the net underneath.
-            seq = self._next_seq(p, dom)
-            rid = f"{dom}-{seq:0{ID_DIGITS}d}"
-            for s in scopes:
-                self.cx.execute(
-                    "INSERT INTO rule_scopes (project, rule_id, scope_id) "
-                    "SELECT ?, ?, id FROM scopes WHERE project=? AND lower(name)=?",
-                    (p, rid, p, _fold(s)))
+            raise RulesError(f"the body is {len(body.encode())} bytes and the ceiling is "
+                             f"{MAX_BODY_BYTES}: a rule that long is two rules.")
+        title = self._prose("title", title)
+        reason = self._prose("reason", reason)
+        source = self._prose("source", source)
+        reach, gids, cids = self._resolve_audience(reach, groups, exceptions)
+
+        with self._transaction():
+            rule_id = self.cx.execute(
+                "SELECT IFNULL(MAX(rule_id),0)+1 FROM rule").fetchone()[0]
+            # THE AUDIENCE FIRST. The two references are DEFERRED for exactly
+            # this: the AFTER INSERT trigger on `rule` photographs the
+            # perimeter, so a perimeter written afterwards is a version 1 that
+            # photographed nobody — and nobody would complain.
+            self._write_audience(rule_id, gids, cids)
+            now = _now()
             self.cx.execute(
-                "INSERT INTO rules (project, id, domain, seq, type, title, body, status, "
-                "permanence, changelog, source, reason, proposed_by, supersedes, "
-                "updated_at) "
-                "VALUES (?,?,?,?,?,?,?,'proposed','provisional',?,?,?,?,?,?)",
-                (p, rid, dom, seq, rtype, title.strip(), body, changelog or None,
-                 source or None, reason.strip(), by, sup, _now()))
-            self._write_refs(p, rid, cites)
-            self.cx.execute("COMMIT")
-        except sqlite3.IntegrityError as e:
-            self.cx.execute("ROLLBACK")
-            # ONE integrity error here is a refusal, and it is the race on the
-            # counter: two writers took the same number, nothing was written,
-            # filing it again works. Everything else that the integrity layer
-            # can raise — a foreign key, a NOT NULL, a CHECK — means the schema
-            # and the code disagree, which no caller can fix and which will
-            # fail again for ever. Telling THEM to retry is the worst answer
-            # available. The discrimination is on the constraint, not on prose:
-            # this branch used to say "if it names the unique constraint …" and
-            # classify unconditionally, which is a comment doing a condition's
-            # job.
-            if "rules.project, rules.supersedes" in str(e):
-                raise RulesError(
-                    f"a pending proposal already supersedes {sup}: one victim, one "
-                    "heir. Have that batch approved or denied first — approval and "
-                    "denial free the slot by themselves.")
-            if "rules.project, rules.domain, rules.seq" not in str(e).replace(
-                    "UNIQUE constraint failed: ", ""):
-                raise RulesFault(
-                    f"the database refused the proposal for a reason that is not the "
-                    f"counter race: {e}. Schema and code disagree — retrying will not "
-                    f"help.")
-            raise RulesError(
-                f"the proposal for domain {dom} was refused by the database: {e}. Two "
-                "writers took the same number — nothing was written, so filing it again "
-                "is safe.")
-        except Exception:
-            self.cx.execute("ROLLBACK")
-            raise
-        out = {"project": p, "id": rid, "domain": dom, "seq": seq,
-               "status": "proposed", "scopes": scopes, "cites": cites,
-               "reaches_now": [],
-               "note": "the ID above was ASSIGNED by the registry: write it down, it is what "
-                       "other rules must cite. It reaches nobody until the batch is "
-                       "approved — check back with pending instead of keeping a note."}
-        if sup:
-            out["supersedes"] = sup
-            out["note"] += (f" At approval {sup} is retired in the same "
-                            "transaction, pointing at this rule.")
+                "INSERT INTO rule (rule_id, domain_id, seq, type, title, body, status, "
+                "permanence, reach, supersedes_rule_id, source, reason, event, "
+                "proposed_by, actor, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,'proposed','provisional',?,?,?,?,?,?,?,?,?)",
+                (rule_id, dom["domain_id"], self._next_seq(dom["domain_id"], dom["code"]),
+                 rtype, title, body, reach,
+                 victim["rule_id"] if victim is not None else None,
+                 source or None, reason, "proposed", author, author, now, now))
+            self._write_refs(rule_id, cites)
+            display = self._display(rule_id)
+        out = {"id": display, "status": "proposed", "reach": reach,
+               "reaches": len(self._would_reach(reach, gids, cids)),
+               "queued": self.cx.execute("SELECT COUNT(*) FROM rule "
+                                         "WHERE status='proposed'").fetchone()[0],
+               "note": "it binds nobody until a person approves it on the page. The "
+                       "outcome is in rules_list(pending=True)."}
+        if victim is not None:
+            out["supersedes"] = victim["display_id"]
+        if cites:
+            out["cites"] = cites
         return out
 
-    def batch(self, code: str) -> dict:
-        """The pending batch plus its DIGEST — sha256 over the ordered list of
-        IDs and bodies. You approve the batch, not the single rule: seen side
-        by side, three proposals that say the same thing become visible as
-        what they are.
+    def amend_rule(self, rid: str, reach: str, groups, exceptions,
+                   expected_version: int, reason: str, actor: str = "") -> dict:
+        """THE PERIMETER of a rule in force, NARROWED, as one atomic gesture.
 
-        Each proposal carries its `reason`: the why being let in is on the
-        table where the decision happens, not a history call away."""
-        p = self._project(code)
-        rows = self.cx.execute("SELECT * FROM rules WHERE project=? AND status='proposed' "
-                               "ORDER BY id", (p,)).fetchall()
-        ids = [r["id"] for r in rows]
-        h = hashlib.sha256()
-        h.update(p.encode())
-        for r in rows:
-            h.update(b"\x00")
-            h.update(r["id"].encode())
-            h.update(b"\x00")
-            h.update((r["body"] or "").encode())
-        digest = h.hexdigest()
-        proposals = [self._dict(r, p, why=True) for r in rows]
-        # The supersede arrives EXPANDED, like a citation in reading: the
-        # batch is where the approver decides, and deciding to retire a rule
-        # requires reading WHICH rule, not going to look an ID up. The state
-        # mark matters most when it is bad news: a victim that vanished while
-        # the proposal was pending is announced here, before the approval —
-        # the no-op verdict after it is the receipt, not the warning.
-        # `approve` does NOT read this field: it takes its (heir, victim)
-        # pairs from the table, so the display can serve the person without
-        # the machine parsing its own prose back.
-        now = _now()
-        for d in proposals:
-            sup = d.get("supersedes")
-            if not sup:
-                continue
-            victim = self._row(p, sup)
-            mark = ""
-            if victim["status"] == "retired" and victim["superseded_by"]:
-                mark = f" · retired → superseded by {victim['superseded_by']}"
-            elif victim["status"] != "active":
-                mark = f" · {victim['status']}"
-            elif (victim["permanence"] != "permanent" and victim["expires_at"]
-                  and victim["expires_at"] <= now):
-                mark = " · expired"
-            d["supersedes"] = f"{sup}{GLOSS_SEP}{self._gloss(victim)}{mark}"
-        return {"project": p, "count": len(ids), "ids": ids,
-                "proposals": proposals,
-                "digest": digest,
-                # THIS NOTE USED TO DESCRIBE A CALL THAT NO LONGER EXISTS —
-                # "pass this digest to approve" was 2.x text left standing when
-                # rules_approve went to the UI in 3.0.0, and it sent a dry run
-                # looking for a tool it could never find. Nothing caught it:
-                # the check that refuses a docstring naming a tool that is gone
-                # looks for the NAME, and this sentence named no tool. A
-                # runtime note is spoken surface too, and it goes stale exactly
-                # like a docstring.
-                "note": "the digest is what the LOT PAGE of the administration UI asks "
-                        "back: approval is not a tool since 3.0.0 — redacting and "
-                        "promulgating stopped being the same power — so this call READS "
-                        "the batch and a person approves it in the browser, against this "
-                        "same digest. If a proposal arrives in between the digest changes "
-                        "and the stale one is refused, which is the proof that what was "
-                        "approved is the batch that was read. Denying IS still a tool: "
-                        "rules_deny, which frees the slots this queue's ceiling counts."}
+        The new effective set of consumers — the union of the groups and the
+        exceptions — must be CONTAINED in the old one. Both are computed and
+        compared: the shape is not trusted, because two shapes can describe the
+        same people and one shape can describe different people a week later.
 
-    def approve(self, code: str, digest: str) -> dict:
-        """Approve the whole pending batch. The DIGEST is the one check left on
-        this door, and it is not ceremony: it proves the approval covers the
-        batch that was read, not the batch that exists now.
+        And never to zero. A narrowing that leaves nobody is a retirement in
+        disguise, and retirement is the least reversible gesture on this
+        surface — it does not get to happen through the side door.
 
-        A proposal that carries `supersedes` does BOTH ITS MOVES here, in the
-        same transaction: the heir goes active and the named rule is retired
-        pointing at it. There is no window in which both are in force, and no
-        third step anybody can forget. A victim that somebody else retired
-        while the proposal was pending is a DECLARED no-op: the approval goes
-        through, the verdict says which supersede was skipped, and the other
-        maintainer's retirement is not rewritten behind their back."""
-        p = self._project(code)
-        current = self.batch(code)
-        if (digest or "").strip() != current["digest"]:
+        Widening binds somebody new, which is promulgation, and promulgation
+        goes through the page: propose a supersede with the wider audience. The
+        CONTENT is not touched from here either — a rule that must SAY
+        something else is a new decision."""
+        row = self._rule_row(rid)
+        if row is None:
+            raise RulesError(f"{rid}: never defined in this project.")
+        if not self._in_force(row):
             raise RulesError(
-                "that digest is not the current one: the batch changed after you read it "
-                "(someone proposed or denied something). Ask for the batch again and "
-                "re-read it. You cannot read one batch and have another approved.")
-        if not current["ids"]:
-            raise RulesError("nothing to approve: the batch is empty")
-        expires = _plus_days(self.provisional_days)
-        superseded, skipped = [], []
-        self.cx.execute("BEGIN IMMEDIATE")
-        try:
-            # (heir, victim) from the TABLE, before the status flips: the
-            # batch decorates its `supersedes` for the person reading it, and
-            # a machine that parsed that prose back would break the day the
-            # gloss changes shape.
-            sup_pairs = [(r["id"], r["supersedes"]) for r in self.cx.execute(
-                "SELECT id, supersedes FROM rules WHERE project=? AND "
-                "status='proposed' AND supersedes IS NOT NULL ORDER BY id",
-                (p,))]
-            self._record_approval(p, current["digest"], current["ids"])
-            for rid in current["ids"]:
-                self.cx.execute(
-                    "UPDATE rules SET status='active', permanence='provisional', "
-                    "expires_at=?, event=?, updated_at=? WHERE project=? AND id=?",
-                    (expires, "approved", _now(), p, rid))
-            for heir, sup in sup_pairs:
-                target = self._row(p, sup)
-                if target is not None and self._in_force(target):
-                    self.cx.execute(
-                        "UPDATE rules SET status='retired', superseded_by=?, event=?, "
-                        "updated_at=? WHERE project=? AND id=?",
-                        (heir, f"superseded by {heir}", _now(), p, sup))
-                    superseded.append({"retired": sup, "by": heir})
-                else:
-                    skipped.append({"id": heir, "target": sup,
-                                    "why": "no longer in force"})
-            self.cx.execute("COMMIT")
-        except Exception:
-            self.cx.execute("ROLLBACK")
-            raise
-        out = {"project": p, "approved": current["ids"], "count": len(current["ids"]),
-               "expires_at": expires, "superseded": superseded,
-               "supersede_skipped": skipped,
-               "note": ("they are PROVISIONAL: unless renewed they leave the lists by "
-                        "themselves. Staying costs a decision, going is free.")}
-        return out
-
-    def deny(self, code: str, ids, reason: str) -> dict:
-        """No digest: denying cannot do harm. And an explicit denial turns
-        silence into an answer — the chat learns instead of guessing."""
-        p = self._project(code)
+                f"{row['display_id']} is {row['status']} and not in force: there is no "
+                "perimeter to narrow. A proposal changes by being withdrawn and filed "
+                "again; a retired rule comes back through a proposal.")
         if not (reason or "").strip():
-            raise RulesError("a denial without a reason teaches nothing: say why")
-        reason = self._prose(p, "reason", reason)
-        if isinstance(ids, str):
-            ids = [ids]
-        out = []
-        for rid in [_norm_id(i) for i in (ids or [])]:
-            row = self._row(p, rid)
-            if row is None:
-                raise RulesError(f"{rid}: no such proposal")
-            if row["status"] != "proposed":
-                raise RulesError(f"{rid} is {row['status']}, not a pending proposal")
-            self.cx.execute("UPDATE rules SET status='denied', denied_reason=?, event=?, "
-                            "updated_at=? WHERE project=? AND id=?",
-                            (reason.strip(), "denied", _now(), p, rid))
-            out.append(rid)
-        return {"project": p, "denied": out, "reason": reason.strip(),
-                "note": "the row stays and the ID is burnt. It no longer BLOCKS the same "
-                        "idea coming back — with the counter a re-proposal takes a new "
-                        "number — but rules_pending shows the refusal and its reason to "
-                        "whoever filed it"}
+            raise RulesError("reason is required: a perimeter that shrank without a "
+                             "sentence is a change nobody can explain six months later.")
+        current = self.cx.execute("SELECT IFNULL(MAX(version),0) FROM rule_version "
+                                  "WHERE rule_id=?", (row["rule_id"],)).fetchone()[0]
+        if int(expected_version or 0) != current:
+            raise RulesError(
+                f"{row['display_id']} is at version {current} and you wrote against "
+                f"{expected_version}: somebody changed it after you read it. Read it "
+                "again — rules_get(history=True) says what moved — and decide on what "
+                "is there now.")
+        reason = self._prose("reason", reason)
+        new_reach, gids, cids = self._resolve_audience(reach, groups, exceptions)
+        before = self._effective(row["rule_id"], row["reach"])
+        after = self._would_reach(new_reach, gids, cids)
+        if not after:
+            raise RulesError(
+                "this narrowing leaves NO consumer: that is a retirement in disguise, and "
+                "the way out is rules_retire — which costs a reason and a one-time code, "
+                "on purpose. A rule in force that binds nobody is a decision nobody took "
+                "and nobody can find.")
+        grown = after - before
+        if grown:
+            names = ", ".join(sorted(
+                self.cx.execute("SELECT name FROM consumer WHERE consumer_id=?",
+                                (c,)).fetchone()[0] for c in grown))
+            raise RulesError(
+                f"this is not a narrowing: it would newly bind {names}. Widening is "
+                "PROMULGATION — it puts an obligation on somebody who did not have it — "
+                "and it goes through the page: propose a supersede carrying the wider "
+                "audience, and let the approval retire this one in the same decision.")
+        with self._transaction():
+            self._write_audience(row["rule_id"], gids, cids)
+            self.cx.execute(
+                "UPDATE rule SET reach=?, event=?, actor=?, updated_at=? WHERE rule_id=?",
+                (new_reach, reason, (actor or "").strip() or None, _now(),
+                 row["rule_id"]))
+        left = sorted(self.cx.execute("SELECT name FROM consumer WHERE consumer_id=?",
+                                      (c,)).fetchone()[0] for c in (before - after))
+        return {"id": row["display_id"], "reach": new_reach,
+                "version": current + 1,
+                "reaches": len(after), "no_longer_reaches": left,
+                "note": "narrowed. The action in the history stays 'amended' — narrowing "
+                        "a targeted rule leaves `reach` where it was, so the verb is not "
+                        "one the database can derive — and the reason is next to a "
+                        "snapshot that shows the audience shrink."}
 
-    def renew(self, code: str, ids, days: int = 0) -> dict:
-        """Keeping a rule alive is letting it in again — which is why the
-        renewal is where the corpus is governed, and why it goes behind the
-        admin code in the server."""
-        p = self._project(code)
-        if isinstance(ids, str):
-            ids = [ids]
-        ids = sorted(_norm_id(i) for i in (ids or []))
-        if not ids:
-            raise RulesError("no ID to renew")
-        for rid in ids:
-            row = self._row(p, rid)
-            if row is None or row["status"] != "active":
-                raise RulesError(f"{rid}: not an active rule")
-        # The ORIGINAL reason, next to each rule: renewal is where the corpus
-        # is governed, and "would I file this today, for the reason it was
-        # filed for?" is undecidable without the reason in front of you. The
-        # manual used to patch this with a habit; the tool does it now.
-        reasons = {rid: self._row(p, rid)["reason"] for rid in ids}
-        expires = _plus_days(int(days) or self.provisional_days)
-        for rid in ids:
-            self.cx.execute("UPDATE rules SET expires_at=?, event=?, updated_at=? "
-                            "WHERE project=? AND id=?",
-                            (expires, "renewed", _now(), p, rid))
-        return {"project": p, "renewed": ids, "expires_at": expires,
-                "reasons": reasons}
-
-    def promote(self, code: str, ids) -> dict:
-        """From provisional to permanent. Rare and deliberate: a permanent rule
-        is one you promise to notice when it goes stale."""
-        p = self._project(code)
-        if isinstance(ids, str):
-            ids = [ids]
-        ids = sorted(_norm_id(i) for i in (ids or []))
-        if not ids:
-            raise RulesError("no ID to promote")
-        for rid in ids:
-            row = self._row(p, rid)
-            if row is None or row["status"] != "active":
-                raise RulesError(f"{rid}: not an active rule")
-        for rid in ids:
-            self.cx.execute("UPDATE rules SET permanence='permanent', expires_at=NULL, "
-                            "event=?, updated_at=? WHERE project=? AND id=?",
-                            ("promoted to permanent", _now(), p, rid))
-        return {"project": p, "promoted": ids}
-
-    def amend(self, code: str, rid: str, expected_version: int, reason: str,
-              title: str = None, body: str = None, rtype: str = None,
-              changelog: str = None) -> dict:
-        """Fix a DEFECT in place: a wrong number, a broken pointer, a sentence
-        that says something false. Same ID, the rule stays in force.
-        A superseded DECISION is not fixed this way: propose the new one and
-        retire the old pointing at it.
-
-        A new body goes through the SAME citation check as a proposal: this is
-        the door the second seeding pass uses, so it cannot be the door that
-        lets an unresolved pointer in. The body you read back is expanded — you
-        can paste it here as it came, the gloss is dropped.
-
-        The `reason` asked for here is the why of the FIX: it lands in the
-        event column and in the history. The rule's own `reason` — the why it
-        exists — is never rewritten by any event."""
-        p = self._project(code)
-        rid = _norm_id(rid)
-        row = self._row(p, rid)
+    def retire(self, rid: str, reason: str, actor: str = "",
+               superseded_by=None) -> dict:
+        """End a rule without an heir. With an heir the road is the supersede,
+        which retires the victim inside the same decision — this is for the rule
+        that simply stops applying."""
+        row = self._rule_row(rid)
         if row is None:
-            raise RulesError(f"{rid}: never defined in this project")
-        if not (reason or "").strip():
-            raise RulesError("reason is mandatory")
-        # The three prose fields this call may carry go through the same door
-        # as a body. A `title` left out is left alone — same reasoning as the
-        # body below: what did not arrive today is not re-judged today.
-        reason = self._prose(p, "reason", reason)
-        if title is not None:
-            title = self._prose(p, "title", title)
-        if changelog is not None:
-            changelog = self._prose(p, "changelog", changelog)
-        cur = self._version(p, rid)
-        if int(expected_version) != cur:
-            raise RulesError(f"{rid} is at version {cur}, you read {expected_version}: "
-                             "someone wrote in the meantime. Re-read and retry.")
-        if rtype is not None and rtype.strip().upper() not in TYPES:
-            raise RulesError(f"type {rtype!r}: R, M or F")
-        if body is None:
-            # NO NEW BODY, so nothing is re-validated. Otherwise a rule written
-            # before the citation format existed could never be renamed,
-            # retyped or given a changelog again: the check would refuse a
-            # sentence nobody touched today, and rules_fix is exactly the tool
-            # the conversion pass needs. What is already in the database gets
-            # audited by rules_check, which is the right place — a report, not a
-            # door slammed on unrelated work.
-            new_body, cites = row["body"], None
-        else:
-            # A body that ARRIVED is always checked, before it is compacted.
-            cites = self._cites(p, body, self_id=rid)
-            new_body = self._compact(body)
-            if len(new_body.encode()) > MAX_BODY_BYTES:
-                raise RulesError(f"body over {MAX_BODY_BYTES} bytes once stored: split the rule")
-            if new_body == row["body"]:
-                # Pasting back what you read is not an edit.
-                cites = None
-        self.cx.execute(
-            "UPDATE rules SET type=?, title=?, body=?, changelog=?, event=?, updated_at=? "
-            "WHERE project=? AND id=?",
-            (row["type"] if rtype is None else rtype.strip().upper(),
-             row["title"] if title is None else title.strip(),
-             new_body,
-             row["changelog"] if changelog is None else changelog,
-             reason.strip(), _now(), p, rid))
-        if cites is not None:
-            self._write_refs(p, rid, cites)
-        return {"project": p, "id": rid, "version": self._version(p, rid),
-                "amended": True, "cites": cites if cites is not None else "unchanged"}
-
-    def widen(self, code: str, rid: str, scopes, reason: str = "") -> dict:
-        """Make a rule also reach someone else. One more row in rule_scopes: the
-        scope it already belonged to is NOT touched, because that scope has other
-        tenants who have nothing to do with this."""
-        p = self._project(code)
-        rid = _norm_id(rid)
-        if self._row(p, rid) is None:
-            raise RulesError(f"{rid}: never defined in this project")
-        reason = self._prose(p, "reason", reason)
-        scopes = self._check_scopes(p, _norm_scope_list(scopes))
-        added = []
-        for s in scopes:
-            sid = self._scope_id(p, s)
-            if self.cx.execute("SELECT 1 FROM rule_scopes WHERE project=? AND rule_id=? "
-                               "AND scope_id=?", (p, rid, sid)).fetchone():
-                continue
-            self.cx.execute("INSERT INTO rule_scopes (project, rule_id, scope_id) "
-                            "VALUES (?,?,?)", (p, rid, sid))
-            added.append(s)
-        return {"project": p, "id": rid, "added": added,
-                "scopes": self._scopes_of(p, rid), "reaches": self._holders(p, rid)}
-
-    def narrow(self, code: str, rid: str, scopes) -> dict:
-        p = self._project(code)
-        rid = _norm_id(rid)
-        if self._row(p, rid) is None:
-            raise RulesError(f"{rid}: never defined in this project")
-        removed = []
-        for s in _norm_scope_list(scopes):
-            n = self.cx.execute(
-                "DELETE FROM rule_scopes WHERE project=? AND rule_id=? AND scope_id IN "
-                "(SELECT id FROM scopes WHERE project=? AND lower(name)=?)",
-                (p, rid, p, _fold(s))).rowcount
-            if n:
-                removed.append(s)
-        left = self._scopes_of(p, rid)
-        return {"project": p, "id": rid, "removed": removed, "scopes": left,
-                "warning": "this rule now reaches nobody" if not left else None}
-
-    def retire(self, code: str, rid: str, reason: str, superseded_by: str = "",
-               changelog: str = "") -> dict:
-        p = self._project(code)
-        rid = _norm_id(rid)
-        row = self._row(p, rid)
-        if row is None:
-            raise RulesError(f"{rid}: never defined in this project")
+            raise RulesError(f"{rid}: never defined in this project.")
         if row["status"] == "retired":
-            raise RulesError(f"{rid} is already retired")
+            raise RulesError(f"{row['display_id']} was already retired on "
+                             f"{row['updated_at']}.")
+        if not self._in_force(row) and row["status"] != "active":
+            raise RulesError(
+                f"{row['display_id']} is {row['status']}: only a rule in force is "
+                "retired. A proposal is denied on the page, not retired here.")
         if not (reason or "").strip():
-            raise RulesError("reason is mandatory")
-        reason = self._prose(p, "reason", reason)
-        changelog = self._prose(p, "changelog", changelog)
-        sb = None
+            raise RulesError("reason is the price of a retirement: a rule that disappears "
+                             "without one comes back as an argument.")
+        reason = self._prose("reason", reason)
+        with self._transaction():
+            self.cx.execute(
+                "UPDATE rule SET status='retired', event=?, actor=?, "
+                "superseded_by_rule_id=?, updated_at=? WHERE rule_id=?",
+                (reason, (actor or "").strip() or None, superseded_by, _now(),
+                 row["rule_id"]))
+        out = {"id": row["display_id"], "status": "retired", "reason": reason}
         if superseded_by:
-            sb = _norm_id(superseded_by)
-            target = self._row(p, sb)
-            if target is None:
-                raise RulesError(f"{sb} does not exist: create the new rule first")
-            if sb == rid:
-                raise RulesError(f"{rid} cannot supersede itself")
-            # The same rule as a citation, and for the same reason: the number
-            # of a proposal is not final until it is in, and a successor that is
-            # never approved leaves the retired rule pointing at nothing for
-            # good. superseded_by is not written to rule_refs, so no audit would
-            # ever come back to it — the check has to be here or nowhere.
-            if target["status"] in ("proposed", "denied"):
+            out["superseded_by"] = self._display(superseded_by)
+        return out
+
+    # =================================================================
+    # The batch page: one gesture, two verdicts
+    # =================================================================
+
+    def _digest(self, rows) -> str:
+        """The fingerprint of WHAT WAS LOOKED AT. It covers the ID and the last
+        write of every proposal in the queue, so a proposal that arrives — or
+        changes — between the reading and the tick makes the digest stale and
+        the whole gesture is refused. Nothing is approved that nobody read."""
+        material = "|".join(f"{r['display_id']}@{r['updated_at']}" for r in rows)
+        return hashlib.sha256(material.encode()).hexdigest()
+
+    def batch(self) -> dict:
+        """The queue as the page shows it: the WHOLE lot, never a page of it,
+        because unticked means denied and a lot cut in half would deny the
+        other half.
+
+        THREE ROWS per proposal, and the third is the one that was missing:
+
+          · the perimeter as DECLARED — reach, groups, exceptions;
+          · the consumers it EFFECTIVELY reaches, expanded and counted, because
+            a group is a label and a chat can have filled it a minute ago;
+          · what already binds that same audience — the rules in force that
+            reach every one of them — because a rule that repeats one already
+            in force is the commonest thing worth catching at the door."""
+        rows = list(self.cx.execute("SELECT * FROM v_rule WHERE status='proposed' "
+                                    "ORDER BY rule_id"))
+        items = []
+        for row in rows:
+            aud = self._audience(row["rule_id"])
+            reached = self._effective(row["rule_id"], row["reach"])
+            names = sorted(self.cx.execute("SELECT name FROM consumer WHERE consumer_id=?",
+                                           (c,)).fetchone()[0] for c in reached)
+            already = []
+            for other in self.cx.execute("SELECT * FROM v_rule WHERE status='active' "
+                                         "ORDER BY domain_id, seq"):
+                if not self._in_force(other):
+                    continue
+                if reached and reached <= self._effective(other["rule_id"], other["reach"]):
+                    already.append(f"{other['display_id']} — {other['title']}")
+            d = {"id": row["display_id"], "type": row["type"], "title": row["title"],
+                 "body": self._expand(row["body"]), "reason": row["reason"],
+                 "proposed_by": row["proposed_by"], "proposed_at": row["created_at"],
+                 "source": row["source"],
+                 "declared": {"reach": row["reach"], "groups": aud["groups"],
+                              "exceptions": aud["exceptions"]},
+                 "reaches": names, "reaches_count": len(names),
+                 "already_bound_by": already}
+            if row["supersedes_rule_id"]:
+                victim = self._rule_by_pk(row["supersedes_rule_id"])
+                d["supersedes"] = {"id": victim["display_id"], "title": victim["title"]}
+            items.append(d)
+        return {"project": self.name, "pending": items, "count": len(items),
+                "digest": self._digest(rows), "queue_cap": self.queue_cap(),
+                "contract": "ticked is approved, unticked is DENIED, in one turn. A "
+                            "proposal that arrives between reading and posting makes the "
+                            "digest stale and nothing is written."}
+
+    def decide(self, digest: str, approve, denials=None, actor: str = "web ui") -> dict:
+        """ONE turn of the page: the ticks go in, the rest are refused with
+        their reason, and both halves are recorded as a single DECISION.
+
+        Approving and denying are the same gesture here, so an "approval" that
+        forgot the noes would be a record of half of what happened. Denying
+        costs a sentence — the schema's CHECK is the guarantee — and approving
+        does not, because the yes is the tick and the rule's own reason is
+        already written."""
+        denials = {str(k).strip().upper(): v for k, v in (denials or {}).items()}
+        rows = list(self.cx.execute("SELECT * FROM v_rule WHERE status='proposed' "
+                                    "ORDER BY rule_id"))
+        if not rows:
+            raise RulesError("the queue is empty: there is nothing to decide.")
+        if not secrets.compare_digest((digest or "").strip(), self._digest(rows)):
+            raise RulesError(
+                "the queue changed between the reading and this post: nothing was "
+                "written. Read it again — a proposal that arrived in between would "
+                "otherwise be denied by a tick nobody put on it.")
+        by_id = {r["display_id"]: r for r in rows}
+        ticked = []
+        for a in (approve or []):
+            aid = _norm_id(str(a))
+            if aid not in by_id:
+                raise RulesError(f"{aid} is not in this lot: nothing was written.")
+            ticked.append(aid)
+        cap = self.queue_cap()
+        if cap is not None and cap > 0 and len(ticked) > cap:
+            raise RulesError(
+                f"{len(ticked)} ticks against a ceiling of {cap}. The ceiling is the "
+                "point: at the twelfth signature in a row a person signs without reading.")
+        refused = [r["display_id"] for r in rows if r["display_id"] not in ticked]
+        for rid in refused:
+            if not (denials.get(rid) or "").strip():
                 raise RulesError(
-                    f"{sb} has not been approved yet, so it cannot supersede anything. "
-                    "Have the successor approved first, then retire the rule it replaces.")
-        self.cx.execute("UPDATE rules SET status='retired', superseded_by=?, changelog=?, "
-                        "event=?, updated_at=? WHERE project=? AND id=?",
-                        (sb, changelog or row["changelog"], reason.strip(), _now(), p, rid))
-        citing = [r[0] for r in self.cx.execute(
-            "SELECT DISTINCT f.src FROM rule_refs f JOIN rules r "
-            "  ON r.project=f.project AND r.id=f.src "
-            " WHERE f.project=? AND f.dst=? AND r.status='active' ORDER BY f.src", (p, rid))]
-        return {"project": p, "id": rid, "retired": True, "superseded_by": sb,
-                "still_cited_by": citing,
-                "note": "the row stays: the ID is never reused and citations must keep "
-                        "resolving. Active rules still citing it need fixing."}
+                    f"{rid} is not ticked, so it is DENIED, and a denial costs a sentence. "
+                    "Say why — it is what the proposer reads, and what stops the same "
+                    "proposal coming back next week unchanged.")
+        approved_out, denied_out = [], []
+        with self._transaction():
+            now = _now()
+            self.cx.execute("INSERT INTO decision (digest, decided_at) VALUES (?,?)",
+                            (digest, now))
+            did = self.cx.execute("SELECT last_insert_rowid()").fetchone()[0]
+            for rid in ticked:
+                row = by_id[rid]
+                expires = _plus_days(self.provisional_days)
+                self.cx.execute(
+                    "UPDATE rule SET status='active', permanence='provisional', "
+                    "expires_at=?, event='approved', actor=?, updated_at=? "
+                    "WHERE rule_id=?", (expires, actor, now, row["rule_id"]))
+                self.cx.execute("INSERT INTO decision_rule (decision_id, rule_id, verdict) "
+                                "VALUES (?,?,'approved')", (did, row["rule_id"]))
+                approved_out.append({"id": rid, "expires_at": expires})
+                if row["supersedes_rule_id"]:
+                    victim = self._rule_by_pk(row["supersedes_rule_id"])
+                    self.cx.execute(
+                        "UPDATE rule SET status='retired', superseded_by_rule_id=?, "
+                        "event=?, actor=?, updated_at=? WHERE rule_id=?",
+                        (row["rule_id"], f"superseded by {rid}", actor, now,
+                         victim["rule_id"]))
+                    approved_out[-1]["retired"] = victim["display_id"]
+            for rid in refused:
+                row = by_id[rid]
+                why = (denials.get(rid) or "").strip()
+                self.cx.execute(
+                    "UPDATE rule SET status='denied', event=?, actor=?, updated_at=? "
+                    "WHERE rule_id=?", (why, actor, now, row["rule_id"]))
+                self.cx.execute("INSERT INTO decision_rule (decision_id, rule_id, verdict, "
+                                "reason) VALUES (?,?,'denied',?)", (did, row["rule_id"], why))
+                denied_out.append({"id": rid, "reason": why})
+        return {"decision": did, "approved": approved_out, "denied": denied_out,
+                "provisional_days": self.provisional_days}
 
-    # ---------- the task log ----------
-    #
-    # Work, not law. The task log replaces both the per-role changelog and the
-    # "pending" sections the role memories used to carry, and its whole point
-    # is that "what is open for me?" becomes ONE query — and, because closing
-    # costs an outcome, "what did I do lately?" is the same query with another
-    # filter.
-    #
-    # It writes no file. The project's own Storia stays the long story, told
-    # by whoever completes the work at the moment they complete it: the task
-    # carries the short, queryable outcome, the Storia the why. Two gestures,
-    # one moment.
+    def renew(self, ids, days: int = 0, actor: str = "web ui") -> dict:
+        """Push the expiry of a provisional rule out by another term. It is a
+        decision to keep something, so it is taken on the page and it is
+        recorded like every other gesture."""
+        days = int(days or self.provisional_days)
+        out = []
+        with self._transaction():
+            for rid in (ids or []):
+                row = self._rule_row(str(rid))
+                if row is None:
+                    raise RulesError(f"{rid}: never defined in this project.")
+                if row["status"] != "active":
+                    raise RulesError(f"{row['display_id']} is {row['status']}: only a rule "
+                                     "in force is renewed.")
+                if row["permanence"] == "permanent":
+                    raise RulesError(f"{row['display_id']} is permanent: it has no expiry "
+                                     "to push.")
+                expires = _plus_days(days)
+                self.cx.execute(
+                    "UPDATE rule SET expires_at=?, event=?, actor=?, updated_at=? "
+                    "WHERE rule_id=?",
+                    (expires, f"renewed for {days} days", actor, _now(), row["rule_id"]))
+                out.append({"id": row["display_id"], "expires_at": expires})
+        return {"renewed": out, "days": days}
 
-    def _task_prose(self, p: str, field: str, text: str) -> str:
-        """A task's prose: SANITISED like everything else, and not validated
-        like a rule's.
+    def promote(self, ids, actor: str = "web ui") -> dict:
+        """From provisional to permanent: the rule stops having to be renewed.
+        Staying costs a decision, and this is that decision."""
+        out = []
+        with self._transaction():
+            for rid in (ids or []):
+                row = self._rule_row(str(rid))
+                if row is None:
+                    raise RulesError(f"{rid}: never defined in this project.")
+                if row["status"] != "active":
+                    raise RulesError(f"{row['display_id']} is {row['status']}: only a rule "
+                                     "in force is promoted.")
+                self.cx.execute(
+                    "UPDATE rule SET permanence='permanent', expires_at=NULL, "
+                    "event='promoted to permanent', actor=?, updated_at=? "
+                    "WHERE rule_id=?", (actor, _now(), row["rule_id"]))
+                out.append(row["display_id"])
+        return {"promoted": out}
 
-        The two halves are different guarantees and it is worth keeping them
-        apart. The sanitisation — no relic of the old Markdown, no bare ID —
-        applies here exactly as it does to a rule, because "no old identifiers
-        anywhere" means anywhere. What does NOT apply is the requirement that
-        a pointer RESOLVE: a task legitimately says "propose a rule about X"
-        and names something that does not exist yet, and refusing that would
-        make the work log answerable to the corpus instead of the other way
-        round. An unresolved pointer is reported in the text when the body is
-        read.
+    # =================================================================
+    # The anagrafica: the project itself, and its structure
+    # =================================================================
 
-        Compacted like a body, so a citation pasted back with its gloss is
-        stored as the bare pointer and cannot carry a stale title."""
-        if not (text or "").strip():
-            return text or ""
-        self._relics(p, field, text)
-        return self._compact(text)
+    ENTITIES = ("project", "domain", "consumer", "group")
+    ACTIONS = ("create", "amend", "retire", "revive")
 
-    def _consumer_id(self, project: str, name: str) -> tuple[int, str]:
-        """The surrogate and the stored spelling, together. Every task lookup
-        goes through the same casefolded resolution the rules use, so
-        `architect` and `Architect` are one owner and the answer carries the
-        spelling its owner chose."""
-        stored = self._consumer(project, name)
-        rid = self.cx.execute(
-            "SELECT id FROM consumers WHERE project=? AND lower(name)=lower(?)",
-            (project, stored)).fetchone()[0]
-        return int(rid), stored
+    # The fields each entity accepts, per action. Written once and read by both
+    # the door and the ladder below: a field the door accepts and the ladder
+    # has never heard of would be a field with no gate.
+    FIELDS = {
+        "project": {"amend": ("brief", "specs", "queue_cap")},
+        "domain": {"create": ("code", "description", "reason"),
+                   "amend": ("description",)},
+        "consumer": {"create": ("name", "kind", "brief", "specs", "secret"),
+                     "amend": ("name", "brief", "specs", "secret")},
+        "group": {"create": ("name", "members"),
+                  "amend": ("name", "members")},
+    }
+
+    # The ONE exception downward, and it is declared rather than deduced:
+    # operational data moves on the reference code. `brief` is identity and
+    # does not — a chat holding only the reference code must not be able to
+    # rewrite its own mandate.
+    SPECS_ONLY = {("project", "specs"), ("consumer", "specs")}
+
+    @classmethod
+    def port_for(cls, entity: str, action: str, fields=None) -> str:
+        """WHICH GATE this gesture needs: 'project', 'admin' or 'auth'.
+
+        The ladder lives HERE, in one classmethod, and the surface asks it
+        rather than repeating it: a rule written at each door is a rule with
+        one door out of step. It is FLAT, and it fits in a line — creating
+        takes the admin code, modifying anything that already exists takes the
+        admin code AND a one-time auth code. A criterion with a case list grows
+        exceptions that rot; this one has exactly one, and it is above.
+
+        A mixed `fields` answers with the HIGHEST port it contains, which is
+        what makes 'refuse the call whole' possible: the caller is told the
+        field that needs the higher gate instead of getting the authorised
+        subset written and the rest dropped."""
+        entity = (entity or "").strip().lower()
+        action = (action or "").strip().lower()
+        if action != "amend":
+            return "admin" if action == "create" else "auth"
+        keys = [k for k in (fields or {})]
+        if keys and all((entity, k) in cls.SPECS_ONLY for k in keys):
+            return "project"
+        return "auth"
+
+    def amend_project(self, entity: str, name: str, action: str, fields=None,
+                      reason: str = "", actor: str = "") -> dict:
+        """The project itself and its STRUCTURE — profile, domains, consumers,
+        groups. Rules and tasks are the project's OBJECTS and have tools of
+        their own; the prefix says which level a call works on.
+
+        Every refusal in here repeats a guarantee that lives in the schema,
+        because the schema's message is about a table and this one can be about
+        the gesture. Where a guarantee CANNOT live in the schema — the empty
+        perimeter, which needs groups expanded and retirements subtracted — it
+        lives here and nowhere else, and it names the rules it is protecting."""
+        entity = (entity or "").strip().lower()
+        action = (action or "").strip().lower()
+        fields = dict(fields or {})
+        actor = (actor or "").strip() or None
+        if entity not in self.ENTITIES:
+            raise RulesError(f"entity {entity!r}: one of {', '.join(self.ENTITIES)}. "
+                             "Rules and tasks have their own tools.")
+        if action not in self.ACTIONS:
+            raise RulesError(f"action {action!r}: one of {', '.join(self.ACTIONS)}.")
+        # The order of these two matters: on a retirement EVERY field is
+        # unknown, and "not a field" would send the caller looking for the
+        # right spelling of something that has no business being there.
+        if action in ("retire", "revive") and fields:
+            raise RulesError(f"{action} takes no fields: it is one gesture, and mixing a "
+                             "change into it would hide the change — retire it, then "
+                             "amend it, and the history keeps the two apart.")
+        allowed = self.FIELDS.get(entity, {}).get(action, ())
+        unknown = [k for k in fields if k not in allowed]
+        if unknown:
+            raise RulesError(
+                f"{', '.join(sorted(unknown))}: not a field of {entity} on {action}. "
+                f"What this takes: {', '.join(allowed) or 'nothing but a reason'}.")
+        if action == "retire" and not (reason or "").strip():
+            raise RulesError("retiring anything costs a reason: it is the sentence "
+                             "whoever finds the dead row six months later will read.")
+        if action == "amend" and not fields:
+            raise RulesError("nothing to amend: `fields` carries only what changes, and "
+                             "an empty one is a gesture with no content.")
+        handler = getattr(self, f"_amend_{entity}")
+        return handler(name, action, fields, (reason or "").strip(), actor)
+
+    # ---------- the profile ----------
+
+    def _amend_project(self, name, action, fields, reason, actor) -> dict:
+        if action != "amend":
+            raise RulesError(
+                "the project is not created, retired or revived from here: it is a line "
+                "in projects.txt and a folder on disk, and both are Unraid's. What is "
+                "catastrophic has no tool.")
+        row = self._profile_row()
+        brief = fields.get("brief", row["brief"] if row else None)
+        specs = fields.get("specs", row["specs"] if row else None)
+        cap = fields.get("queue_cap", row["queue_cap"] if row else None)
+        if "queue_cap" in fields and cap is not None:
+            cap = int(cap)
+            if cap < 0:
+                raise RulesError("queue_cap: null is unlimited, 0 closes the queue, N is "
+                                 "N. A negative ceiling is none of the three.")
+        if "brief" in fields:
+            brief = self._prose("brief", brief)
+        if "specs" in fields:
+            specs = self._prose("specs", specs)
+        with self._transaction():
+            if row is None:
+                self.cx.execute(
+                    "INSERT INTO project_profile (profile_id, brief, specs, queue_cap, "
+                    "updated_at, actor) VALUES (1,?,?,?,?,?)",
+                    (brief, specs, cap, _now(), actor))
+            else:
+                self.cx.execute(
+                    "UPDATE project_profile SET brief=?, specs=?, queue_cap=?, "
+                    "updated_at=?, actor=? WHERE profile_id=1",
+                    (brief, specs, cap, _now(), actor))
+        return {"entity": "project", "action": "amended",
+                "changed": sorted(fields), "profile": self.profile()}
+
+    # ---------- domains ----------
+
+    def _amend_domain(self, name, action, fields, reason, actor) -> dict:
+        if action == "create":
+            # ONE door for the letter-pair, wherever it is declared: the
+            # reservation of TK holds here and at every use, because a row put
+            # in by hand never passed this one.
+            code = _valid_domain((fields.get("code") or name or "").strip().upper())
+            if self.cx.execute("SELECT 1 FROM domain WHERE lower(code)=?",
+                               (code.lower(),)).fetchone():
+                raise RulesError(f"domain {code} is already declared.")
+            why = self._prose("reason", fields.get("reason") or reason)
+            if not why.strip():
+                raise RulesError("a domain needs a reason to exist: one nobody can justify "
+                                 "is a drawer, and drawers fill up.")
+            desc = self._prose("description", fields.get("description") or "")
+            with self._transaction():
+                self.cx.execute(
+                    "INSERT INTO domain (code, description, reason, created_at, actor) "
+                    "VALUES (?,?,?,?,?)", (code, desc or None, why, _now(), actor))
+            return {"entity": "domain", "action": "created", "code": code}
+
+        row = self._domain_row(name, live=False)
+        if action == "amend":
+            desc = self._prose("description", fields.get("description") or "")
+            with self._transaction():
+                self.cx.execute("UPDATE domain SET description=?, actor=? WHERE domain_id=?",
+                                (desc or None, actor, row["domain_id"]))
+            return {"entity": "domain", "action": "amended", "code": row["code"],
+                    "note": "the CODE is not amendable: it is printed inside every ID this "
+                            "domain ever handed out, and changing it would relabel history."}
+        if action == "retire":
+            if row["retired_at"]:
+                raise RulesError(f"domain {row['code']} was already retired on "
+                                 f"{row['retired_at']}.")
+            # The trigger refuses this too, and it is the guarantee; here the
+            # message can name the rules instead of naming the table.
+            live = [f"{r[0]} — {r[1]}" for r in self.cx.execute(
+                "SELECT display_id, title FROM v_rule WHERE domain_id=? AND status='active' "
+                "ORDER BY seq", (row["domain_id"],))]
+            if live:
+                raise RulesError(
+                    f"domain {row['code']} still has rules in force: "
+                    f"{'; '.join(live)}. Retire or supersede them first — a rule whose "
+                    "domain is dead carries a label nobody can look up.")
+            with self._transaction():
+                self.cx.execute("UPDATE domain SET retired_at=?, retired_reason=?, actor=? "
+                                "WHERE domain_id=?", (_now(), reason, actor,
+                                                      row["domain_id"]))
+            return {"entity": "domain", "action": "retired", "code": row["code"],
+                    "note": "its numbers stay readable for ever; nothing new is filed "
+                            "under it."}
+        if not row["retired_at"]:
+            raise RulesError(f"domain {row['code']} is not retired: there is nothing to "
+                             "revive.")
+        with self._transaction():
+            self.cx.execute("UPDATE domain SET retired_at=NULL, retired_reason=NULL, "
+                            "actor=? WHERE domain_id=?", (actor, row["domain_id"]))
+        return {"entity": "domain", "action": "revived", "code": row["code"]}
+
+    # ---------- consumers ----------
+
+    def _amend_consumer(self, name, action, fields, reason, actor) -> dict:
+        if action == "create":
+            who = _valid_name(fields.get("name") or name, "consumer")
+            if self.cx.execute("SELECT 1 FROM consumer WHERE lower(name)=?",
+                               (_fold(who),)).fetchone():
+                raise RulesError(f"{who}: this project already has a consumer by that "
+                                 "name — identity is the casefolded name.")
+            kind = (fields.get("kind") or "").strip().lower()
+            if kind not in KINDS:
+                raise RulesError(
+                    f"kind {kind!r}: one of {', '.join(KINDS)}. A human calls no tool but "
+                    "owns tasks; it is not guessed from the name, because a wrong guess "
+                    "would be written in silence.")
+            with self._transaction():
+                self.cx.execute(
+                    "INSERT INTO consumer (name, kind, brief, specs, secret, created_at, "
+                    "actor) VALUES (?,?,?,?,?,?,?)",
+                    (who, kind, self._prose("brief", fields.get("brief") or "") or None,
+                     self._prose("specs", fields.get("specs") or "") or None,
+                     (fields.get("secret") or "").strip() or None, _now(), actor))
+            return {"entity": "consumer", "action": "created", "name": who, "kind": kind}
+
+        row = self._consumer_row(name, live=False)
+        if action == "amend":
+            new_name = row["name"]
+            if "name" in fields:
+                new_name = _valid_name(fields["name"], "consumer")
+                clash = self.cx.execute(
+                    "SELECT name FROM consumer WHERE lower(name)=? AND consumer_id<>?",
+                    (_fold(new_name), row["consumer_id"])).fetchone()
+                if clash:
+                    raise RulesError(f"{clash[0]} already carries that name.")
+            brief = (self._prose("brief", fields["brief"]) if "brief" in fields
+                     else row["brief"])
+            specs = (self._prose("specs", fields["specs"]) if "specs" in fields
+                     else row["specs"])
+            secret = row["secret"]
+            if "secret" in fields:
+                secret = (fields["secret"] or "").strip() or None
+            with self._transaction():
+                self.cx.execute(
+                    "UPDATE consumer SET name=?, brief=?, specs=?, secret=?, actor=? "
+                    "WHERE consumer_id=?",
+                    (new_name, brief, specs, secret, actor, row["consumer_id"]))
+            out = {"entity": "consumer", "action": "amended", "name": new_name,
+                   "changed": sorted(fields)}
+            if new_name != row["name"]:
+                out["renamed_from"] = row["name"]
+                out["note"] = self._rename_note(row["name"], new_name)
+            return out
+        if action == "retire":
+            if row["retired_at"]:
+                raise RulesError(f"{row['name']} ended on {row['retired_at']} already.")
+            open_tasks = self.cx.execute(
+                "SELECT COUNT(*) FROM task WHERE consumer_id=? AND status='pending'",
+                (row["consumer_id"],)).fetchone()[0]
+            if open_tasks:
+                raise RulesError(
+                    f"{row['name']} still has {open_tasks} open "
+                    f"{'task' if open_tasks == 1 else 'tasks'}: close them or hand them to "
+                    "whoever takes the work over. A desk that ends with post on it loses "
+                    "the post.")
+            stuck = self._orphaned_by({row["consumer_id"]})
+            if stuck:
+                raise RulesError(
+                    f"{row['name']} is the last consumer these rules in force reach: "
+                    f"{'; '.join(stuck)}. Sort them out first — retire them properly, or "
+                    "give them a perimeter that still means something. A rule left binding "
+                    "nobody is a retirement nobody decided and nobody can find.")
+            with self._transaction():
+                # MARKED, and not one junction row deleted: `ba7dde8` paid for
+                # that sentence. Deleting from the audience tables would change
+                # the perimeter of LIVE RULES as the side effect of a gesture
+                # aimed at somebody else. The reads exclude the retired by
+                # themselves.
+                self.cx.execute("UPDATE consumer SET retired_at=?, retired_reason=?, "
+                                "actor=? WHERE consumer_id=?",
+                                (_now(), reason, actor, row["consumer_id"]))
+            return {"entity": "consumer", "action": "retired", "name": row["name"],
+                    "note": "the row stays and every pointer with it: the history reads. "
+                            "Nothing reaches it any more."}
+        if not row["retired_at"]:
+            raise RulesError(f"{row['name']} is not retired: there is nothing to revive.")
+        with self._transaction():
+            self.cx.execute("UPDATE consumer SET retired_at=NULL, retired_reason=NULL, "
+                            "actor=? WHERE consumer_id=?", (actor, row["consumer_id"]))
+        return {"entity": "consumer", "action": "revived", "name": row["name"],
+                "note": "it is back in every perimeter it was named in: nothing had been "
+                        "deleted."}
+
+    @staticmethod
+    def _rename_note(old: str, new: str) -> str:
+        """A rename is a gesture in TWO TIMES, and the second one is not the
+        registry's. The old name stops resolving — one name for one thing — so
+        the verdict has to say out loud what lives outside and now points at
+        nothing. Without this the scheduled task fails at 03:00 and nobody sees
+        it until morning."""
+        return (f"{old!r} STOPS RESOLVING from now on: one name, one thing. What lives "
+                f"outside this registry and still says {old!r} has to be updated by hand "
+                f"— the skill's file, the chat's instructions, the prompt of any "
+                f"scheduled task. Nothing out there is going to tell you.")
+
+    # ---------- groups ----------
+
+    def _amend_group(self, name, action, fields, reason, actor) -> dict:
+        if action == "create":
+            gname = _valid_name(fields.get("name") or name, "group")
+            if self.cx.execute("SELECT 1 FROM consumer_group WHERE lower(name)=?",
+                               (_fold(gname),)).fetchone():
+                raise RulesError(f"{gname}: this project already has a group by that name.")
+            members = [self._consumer_row(m)["consumer_id"]
+                       for m in (fields.get("members") or [])]
+            if not members:
+                raise RulesError("a group with no members is a name: give it at least one "
+                                 "consumer, or do not create it yet.")
+            self._no_mirror(set(members), gname)
+            with self._transaction():
+                self.cx.execute("INSERT INTO consumer_group (name, created_at, actor) "
+                                "VALUES (?,?,?)", (gname, _now(), actor))
+                gid = self.cx.execute("SELECT last_insert_rowid()").fetchone()[0]
+                for cid in dict.fromkeys(members):
+                    self.cx.execute("INSERT INTO consumer_group_member (group_id, "
+                                    "consumer_id) VALUES (?,?)", (gid, cid))
+            return {"entity": "group", "action": "created", "name": gname,
+                    "members": len(set(members))}
+
+        row = self._group_row(name, live=False)
+        if action == "amend":
+            new_name = row["name"]
+            if "name" in fields:
+                new_name = _valid_name(fields["name"], "group")
+                clash = self.cx.execute(
+                    "SELECT name FROM consumer_group WHERE lower(name)=? AND group_id<>?",
+                    (_fold(new_name), row["group_id"])).fetchone()
+                if clash:
+                    raise RulesError(f"{clash[0]} already carries that name.")
+            out = {"entity": "group", "action": "amended", "name": new_name,
+                   "changed": sorted(fields)}
+            before = self._members_of([row["group_id"]])
+            after = before
+            if "members" in fields:
+                after = {self._consumer_row(m)["consumer_id"]
+                         for m in (fields.get("members") or [])}
+                if not after:
+                    raise RulesError(
+                        "a group emptied of its members is a name pointing at nobody: if "
+                        "the group is finished, retire it — that costs a reason and says "
+                        "so in the history.")
+                gone = before - after
+                if gone:
+                    # THE EMPTY GUARD, the twin of the one on a consumer's
+                    # retirement: pulling people out of a group can leave a rule
+                    # in force reaching nobody, and that damage is silent.
+                    stuck = self._orphaned_by(gone)
+                    if stuck:
+                        names = ", ".join(sorted(
+                            self.cx.execute("SELECT name FROM consumer WHERE consumer_id=?",
+                                            (c,)).fetchone()[0] for c in gone))
+                        raise RulesError(
+                            f"taking {names} out of {row['name']} would leave these rules "
+                            f"in force reaching nobody: {'; '.join(stuck)}. Sort the rules "
+                            "out first.")
+                # An ADDITION passes even when it covers a rule's exception: the
+                # anagrafica does not pay for a defect that sits in the rule.
+                # The overlap goes to project_status's report, and the next
+                # write on that rule refuses it. Blocking the irreparable,
+                # reporting the repairable.
+                out["joined"] = sorted(self.cx.execute(
+                    "SELECT name FROM consumer WHERE consumer_id=?", (c,)).fetchone()[0]
+                    for c in (after - before))
+                out["left"] = sorted(self.cx.execute(
+                    "SELECT name FROM consumer WHERE consumer_id=?", (c,)).fetchone()[0]
+                    for c in gone)
+            with self._transaction():
+                self.cx.execute("UPDATE consumer_group SET name=?, actor=? WHERE group_id=?",
+                                (new_name, actor, row["group_id"]))
+                if "members" in fields:
+                    self.cx.execute("DELETE FROM consumer_group_member WHERE group_id=?",
+                                    (row["group_id"],))
+                    for cid in after:
+                        self.cx.execute("INSERT INTO consumer_group_member (group_id, "
+                                        "consumer_id) VALUES (?,?)", (row["group_id"], cid))
+            if new_name != row["name"]:
+                out["renamed_from"] = row["name"]
+                out["note"] = self._rename_note(row["name"], new_name)
+            return out
+        if action == "retire":
+            if row["retired_at"]:
+                raise RulesError(f"group {row['name']} was already retired on "
+                                 f"{row['retired_at']}.")
+            stuck = self._orphaned_by(self._members_of([row["group_id"]]))
+            if stuck:
+                raise RulesError(
+                    f"retiring {row['name']} would leave these rules in force reaching "
+                    f"nobody: {'; '.join(stuck)}. Sort them out first.")
+            with self._transaction():
+                self.cx.execute("UPDATE consumer_group SET retired_at=?, retired_reason=?, "
+                                "actor=? WHERE group_id=?",
+                                (_now(), reason, actor, row["group_id"]))
+            return {"entity": "group", "action": "retired", "name": row["name"]}
+        if not row["retired_at"]:
+            raise RulesError(f"group {row['name']} is not retired: nothing to revive.")
+        with self._transaction():
+            self.cx.execute("UPDATE consumer_group SET retired_at=NULL, "
+                            "retired_reason=NULL, actor=? WHERE group_id=?",
+                            (actor, row["group_id"]))
+        return {"entity": "group", "action": "revived", "name": row["name"]}
+
+    def _no_mirror(self, members: set, gname: str) -> None:
+        """A group CREATED to mirror the exceptions of a rule in force is
+        refused, naming the rule.
+
+        It is the third door of the containment invariant, and it is the one
+        that looks like a kindness rather than a guard: somebody sees three
+        exceptions on a rule, makes a group of exactly those three, and now the
+        same three people are reached twice by two mechanisms that will drift
+        apart. The two other doors are the write of a rule and the write of its
+        perimeter."""
+        if not members:
+            return
+        for row in self.cx.execute("SELECT * FROM v_rule WHERE status='active' "
+                                   "AND reach='targeted'"):
+            exc = {r[0] for r in self.cx.execute(
+                "SELECT consumer_id FROM rule_audience_exception WHERE rule_id=?",
+                (row["rule_id"],))}
+            if exc and exc == members:
+                raise RulesError(
+                    f"{gname} would be exactly the exceptions of {row['display_id']} — "
+                    f"{row['title']!r}. Two ways to reach the same people drift apart: "
+                    f"create the group, then narrow that rule onto it with rules_amend — "
+                    "or give this group a different membership.")
+
+    # =================================================================
+    # The report
+    # =================================================================
+
+    def status(self) -> dict:
+        """THE PROJECT'S HEALTH, in one call, and it REPORTS: it does not
+        correct. What it finds is sorted out by whoever has the context, not by
+        whoever happens to be running an audit.
+
+        Half of the old `rules_check` died with the schema — a structural
+        pointer that points nowhere is impossible now, because it is a foreign
+        key. What is left is the half a database cannot see: citations inside
+        PROSE, and the overlaps that formed after the fact."""
+        now = _now()
+        rules = list(self.cx.execute("SELECT * FROM v_rule ORDER BY domain_id, seq"))
+        in_force = [r for r in rules if self._in_force(r, now)]
+
+        expiring = []
+        for r in in_force:
+            if r["permanence"] == "permanent" or not r["expires_at"]:
+                continue
+            days = (datetime.strptime(r["expires_at"], "%Y-%m-%dT%H:%M:%SZ")
+                    - datetime.strptime(now, "%Y-%m-%dT%H:%M:%SZ")).days
+            if days <= 30:
+                expiring.append({"id": r["display_id"], "title": r["title"],
+                                 "expires_at": r["expires_at"], "in_days": days,
+                                 "reason": r["reason"]})
+
+        # Citations in PROSE, towards a rule that is retired or was never
+        # defined. The body of a rule is only one of the fields it can hide in.
+        dangling = []
+        seen_fields = (("title", "title"), ("body", "body"), ("reason", "reason"),
+                       ("source", "source"))
+        for r in rules:
+            for col, label in seen_fields:
+                for m in RE_CITE.finditer(r[col] or ""):
+                    try:
+                        dst = _norm_id(m.group(1))
+                    except RulesError:
+                        continue
+                    target = self._rule_row(dst)
+                    if target is None:
+                        dangling.append({"in": r["display_id"], "field": label,
+                                         "cites": dst, "state": "never defined"})
+                    elif target["status"] in ("retired", "denied"):
+                        dangling.append({"in": r["display_id"], "field": label,
+                                         "cites": dst, "state": target["status"]})
+
+        # The overlaps that formed AFTER the rule was written: a consumer that
+        # joined a group which the rule already reaches, while it also sits in
+        # that rule's exceptions. Not blocked when it happens — the anagrafica
+        # does not pay for a defect in a rule — so this is where it surfaces.
+        overlaps = []
+        for r in in_force:
+            if r["reach"] != "targeted":
+                continue
+            gids = [x[0] for x in self.cx.execute(
+                "SELECT group_id FROM rule_audience_group WHERE rule_id=?",
+                (r["rule_id"],))]
+            covered = self._members_of(gids)
+            for x in self.cx.execute(
+                    "SELECT c.consumer_id, c.name FROM rule_audience_exception e "
+                    "JOIN consumer c ON c.consumer_id = e.consumer_id "
+                    "WHERE e.rule_id=?", (r["rule_id"],)):
+                if x[0] in covered:
+                    overlaps.append({"rule": r["display_id"], "consumer": x[1],
+                                     "note": "now inside a group this rule already "
+                                             "reaches: the exception has become a "
+                                             "duplicate, and the next write on this rule "
+                                             "will refuse it"})
+
+        # The price of dropping the two BEFORE INSERT guards, paid where it was
+        # promised: an audience row sitting next to a universal rule. It is
+        # inert — the photograph reads those tables only when reach is targeted
+        # — but the next write on that rule will be refused for it, and the
+        # gesture refused will belong to somebody else.
+        strays = []
+        for r in rules:
+            if r["reach"] != "all":
+                continue
+            n = (self.cx.execute("SELECT COUNT(*) FROM rule_audience_group WHERE rule_id=?",
+                                 (r["rule_id"],)).fetchone()[0]
+                 + self.cx.execute("SELECT COUNT(*) FROM rule_audience_exception "
+                                   "WHERE rule_id=?", (r["rule_id"],)).fetchone()[0])
+            if n:
+                strays.append({"rule": r["display_id"], "rows": n,
+                               "note": "audience rows next to a rule declared universal. "
+                                       "They reach nobody — the snapshot ignores them — "
+                                       "but the next write on this rule is refused until "
+                                       "they go. Nothing here put them in."})
+
+        orphan_domains = [d[0] for d in self.cx.execute(
+            "SELECT code FROM domain WHERE retired_at IS NULL AND domain_id NOT IN "
+            "(SELECT DISTINCT domain_id FROM rule) ORDER BY code")]
+        unreached = []
+        for c in self.cx.execute("SELECT consumer_id, name, kind FROM consumer "
+                                 "WHERE retired_at IS NULL ORDER BY name"):
+            if c["kind"] == "human":
+                continue
+            if not self._reaching(c["consumer_id"]):
+                unreached.append(c["name"])
+
+        return {
+            "project": self.name,
+            "counted": {"rules": len(rules), "in_force": len(in_force),
+                        "proposed": sum(1 for r in rules if r["status"] == "proposed"),
+                        "retired": sum(1 for r in rules if r["status"] == "retired"),
+                        "denied": sum(1 for r in rules if r["status"] == "denied"),
+                        "consumers": self.cx.execute(
+                            "SELECT COUNT(*) FROM consumer WHERE retired_at IS NULL"
+                        ).fetchone()[0],
+                        "groups": self.cx.execute(
+                            "SELECT COUNT(*) FROM consumer_group WHERE retired_at IS NULL"
+                        ).fetchone()[0],
+                        "tasks_open": self.cx.execute(
+                            "SELECT COUNT(*) FROM task WHERE status='pending'"
+                        ).fetchone()[0]},
+            "queue_cap": self.queue_cap(),
+            "expiring": expiring,
+            "dangling_citations": dangling,
+            "overlaps": overlaps,
+            "stray_audience_rows": strays,
+            "domains_with_no_rules": orphan_domains,
+            "consumers_no_rule_reaches": unreached,
+            "note": "counted on read, never stored. Structural pointers are not checked "
+                    "because they cannot break: the schema refuses them at write time.",
+        }
+
+    def export(self, consumer: str = "", expand: bool = False) -> dict:
+        """The corpus in one call, for a migration or for reading off-site.
+        `consumer` narrows to one perimeter; `expand` inlines the cited titles.
+
+        Mind the client's result ceiling: this is the tool that meets it
+        first, and the answer says how many bytes it is so the next call can
+        be aimed."""
+        if consumer:
+            c = self._consumer_row(consumer)
+            rows = [t[0] for t in sorted(self._reaching(c["consumer_id"]).values(),
+                                         key=lambda t: t[0]["display_id"])]
+        else:
+            rows = [r for r in self.cx.execute(
+                "SELECT * FROM v_rule WHERE status='active' ORDER BY domain_id, seq")
+                if self._in_force(r)]
+        lines = [f"# {self.name} — rules in force", ""]
+        prof = self.profile()
+        if prof["brief"]:
+            lines += ["## The project", "", prof["brief"], ""]
+        if prof["specs"]:
+            lines += ["### Specs", "", prof["specs"], ""]
+        for r in rows:
+            aud = self._audience(r["rule_id"])
+            perimeter = ("everyone" if r["reach"] == "all" else
+                         ", ".join(aud["groups"] + [f"{e} (by name)"
+                                                    for e in aud["exceptions"]]))
+            lines += [f"## {r['display_id']} — {r['title']}",
+                      "",
+                      f"*{r['type']} · {r['permanence']} · reaches: {perimeter}*"
+                      + (f" · expires {r['expires_at']}" if r["expires_at"] else ""),
+                      "",
+                      self._expand(r["body"]) if expand else r["body"],
+                      "",
+                      f"> why: {r['reason']}",
+                      ""]
+        md = "\n".join(lines)
+        return {"project": self.name, "consumer": consumer or None,
+                "rules": len(rows), "markdown": md, "bytes": len(md.encode())}
+
+    # =================================================================
+    # The task log: work, not law
+    # =================================================================
 
     @staticmethod
     def _norm_task_id(tid: str) -> str:
-        """A task ID goes through the same door as a rule ID — brackets and a
-        short number tolerated — and then has to BE one. `VA-0002` handed to a
-        task reader is not a task that is missing, it is a rule: saying so is
-        the difference between a broken citation and a wrong tool."""
-        norm = _norm_id(tid)
-        if not norm.startswith(TASK_PREFIX + "-"):
-            raise RulesError(
-                f"{norm} is not a task ID: tasks are {TASK_PREFIX}-NNNN. That looks like "
-                "a RULE — read it with rules_get.")
-        return norm
+        t = (tid or "").strip().upper()
+        m = RE_ID_IN.match(t)
+        if not m or m.group(1) != TASK_PREFIX:
+            raise RulesError(f"malformed task ID {tid!r}: it is "
+                             f"{TASK_PREFIX}-{'N' * ID_DIGITS}, e.g. {TASK_PREFIX}-0012")
+        return f"{TASK_PREFIX}-{int(m.group(2)):0{ID_DIGITS}d}"
 
-    def _next_task_seq(self, p: str) -> int:
-        """The LAST NUMBER EVER MINTED, plus one — read from the high-water
-        row, not from the rows that survive. Both are consulted and the larger
-        wins: the counter is maintained by a trigger, and if somebody drops
-        that trigger the surviving rows are still a floor. What must never
-        happen is a number coming back."""
-        alive = int(self.cx.execute(
-            "SELECT IFNULL(MAX(seq), 0) FROM tasks WHERE project=?", (p,)).fetchone()[0])
-        row = self.cx.execute("SELECT last FROM task_counter WHERE project=?",
-                              (p,)).fetchone()
-        n = max(alive, int(row[0]) if row else 0) + 1
+    def _task_row(self, tid: str):
+        return self.cx.execute("SELECT * FROM v_task WHERE display_id=?",
+                               (self._norm_task_id(tid),)).fetchone()
+
+    def _next_task_seq(self) -> int:
+        """MAX(seq)+1, and it can be trusted because the prune ARCHIVES instead
+        of deleting: every number ever handed out is still a row. In 3.1.0 the
+        prune deleted, MAX went backwards, and TK-0004 came back after
+        TK-0007."""
+        last = self.cx.execute("SELECT IFNULL(MAX(seq),0) FROM task").fetchone()[0]
+        n = int(last) + 1
         if n > MAX_SEQ:
-            raise RulesError(f"the task log has burned all {MAX_SEQ} numbers, and IDs are "
-                             "never reused: this needs a decision, not a retry")
+            raise RulesError(f"the task log has burned all {MAX_SEQ} numbers.")
         return n
-
-    def _task_row(self, p: str, tid: str):
-        return self.cx.execute("SELECT * FROM tasks WHERE project=? AND id=?",
-                               (p, tid)).fetchone()
 
     @staticmethod
     def _age_days(stamp: str, now: str) -> int:
         try:
-            a = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")
-            b = datetime.strptime(now, "%Y-%m-%dT%H:%M:%SZ")
+            return (datetime.strptime(now, "%Y-%m-%dT%H:%M:%SZ")
+                    - datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")).days
         except (TypeError, ValueError):
             return 0
-        return max(0, (b - a).days)
 
     def _task_brief(self, row, now: str) -> dict:
-        """THE SHORT FORM, and it is the default of every list: id, title,
-        urgent, age, status. The body is read separately, by codes — a list
-        that carried the bodies would make "what is open for me?" the most
-        expensive question in the chat instead of the cheapest.
-
-        `stale` appears only when it is true. It is a LABEL on a reading and
-        never a lifecycle: a task does not expire, because an automatic expiry
-        would be a `dropped` with no reason, written by the clock."""
-        age = self._age_days(row["created_at"], now)
-        out = {"id": row["id"], "title": row["title"],
-               "urgent": bool(row["urgent"]),
-               "consumer": row["consumer"] if "consumer" in row.keys() else None,
-               "created_by": row["created_by"],
-               "status": row["status"], "age_days": age}
-        if out["consumer"] is None:
-            out.pop("consumer")
-        if row["status"] == "pending" and age >= TASKS_STALE_DAYS:
-            out["stale"] = True
-        if row["closed_at"]:
-            out["closed_at"] = row["closed_at"]
-        return out
-
-    _TASK_SELECT = ("SELECT t.*, (SELECT c.name FROM consumers c WHERE c.id = t.consumer_id) "
-                    "AS consumer FROM tasks t")
-
-    def _order_and_cap(self, rows, now: str) -> tuple[list, int, bool]:
-        """ORDERED BY THE SERVER, then cut. When the cap bites, the ORDER is
-        what decides which work is lost — so the cut has to fall on the fresh
-        work, which is still in mind, and never on what has gone stale, which
-        is the reason the list exists at all. The client may reorder what it
-        already holds; it cannot get back what was never sent.
-
-        The truncation is always DECLARED, with the real total: without it a
-        chat reads fifty and concludes it has fifty when it has a hundred and
-        thirty — the incident already lived through with the vault's search."""
-        total = len(rows)
-        cut = rows[:TASKS_LIST_CAP]
-        return [self._task_brief(r, now) for r in cut], total, total > TASKS_LIST_CAP
-
-    def task_add(self, code: str, consumer: str, title: str, body: str,
-                 created_by: str, urgent: bool = False, idem_key: str = "") -> dict:
-        """Open a task for a consumer. ANYBODY in the project may open one for
-        ANYBODY: that is how a coherence audit hands each correction to the
-        role that owns it. `created_by` is mandatory — the lesson of
-        proposed_by: omitted, the task would be orphaned in silence."""
-        p = self._project(code)
-        cid, owner = self._consumer_id(p, consumer)
-        if not (created_by or "").strip():
-            raise RulesError(
-                "created_by is mandatory: it is your own consumer name, and it is what "
-                "makes the task attributable. A task nobody signed is a task nobody "
-                "can be asked about.")
-        _, author = self._consumer_id(p, created_by)
-        title = (title or "").strip()
-        body = (body or "").strip()
-        if not title:
-            raise RulesError("the task needs a title")
-        if not body:
-            raise RulesError("the task needs a body: what has to be done, and enough of "
-                             "the why to act on it in three weeks")
-        if len(body.encode()) > MAX_BODY_BYTES:
-            raise RulesError(f"the body is over {MAX_BODY_BYTES} bytes: split the task — "
-                             "same discipline as a rule's body")
-        title = self._task_prose(p, "title", title)
-        body = self._task_prose(p, "body", body)
-        key = (idem_key or "").strip()
-        if key:
-            # The MECHANICAL cure for duplicates, chosen over discipline
-            # because discipline depends on how each skill happens to be
-            # written: a recurring audit that finds the same discrepancy three
-            # times must not produce three tasks. Partial on `pending`, so
-            # after the task closes the same key opens a new one — finding it
-            # AGAIN is a new report, not a repetition.
-            row = self.cx.execute(
-                "SELECT id FROM tasks WHERE project=? AND consumer_id=? AND idem_key=? "
-                "AND status='pending'", (p, cid, key)).fetchone()
-            if row is not None:
-                return {"project": p, "id": row[0], "consumer": owner, "created": False,
-                        "note": f"idempotency key {key!r} already has an OPEN task on "
-                                f"{owner}: this is that task, not a second one. Once it "
-                                "closes, the same key opens a new one."}
-        seq = self._next_task_seq(p)
-        tid = f"{TASK_PREFIX}-{seq:0{ID_DIGITS}d}"
-        now = _now()
-        self.cx.execute(
-            "INSERT INTO tasks (project,id,seq,title,body,consumer_id,created_by,urgent,"
-            "status,idem_key,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?, 'pending', ?,?,?)",
-            (p, tid, seq, title, body, cid, author, 1 if urgent else 0,
-             key or None, now, now))
-        return {"project": p, "id": tid, "consumer": owner, "created_by": author,
-                "urgent": bool(urgent), "created": True,
-                "note": "cite it in prose the way rules are cited, between round "
-                        f"brackets: ({tid})"}
-
-    def task_list(self, code: str, consumer: str) -> dict:
-        """What is open for you, and what you closed lately — the two halves of
-        the same question. The closed half is the CHANGELOG this log replaced:
-        it is there because every completion cost an outcome."""
-        p = self._project(code)
-        cid, owner = self._consumer_id(p, consumer)
-        now = _now()
-        pend = self.cx.execute(
-            self._TASK_SELECT + " WHERE t.project=? AND t.consumer_id=? AND t.status='pending' "
-            "ORDER BY t.urgent DESC, t.created_at ASC, t.seq ASC", (p, cid)).fetchall()
-        since = _plus_days(-TASKS_RECENT_DAYS)
-        closed = self.cx.execute(
-            self._TASK_SELECT + " WHERE t.project=? AND t.consumer_id=? AND t.status<>'pending' "
-            "AND t.closed_at >= ? ORDER BY t.closed_at DESC", (p, cid, since)).fetchall()
-        p_items, p_total, p_cut = self._order_and_cap(pend, now)
-        c_items, c_total, c_cut = self._order_and_cap(closed, now)
-        return {"project": p, "consumer": owner,
-                "pending": p_items, "pending_total": p_total, "pending_truncated": p_cut,
-                "recently_closed": c_items, "recently_closed_total": c_total,
-                "recently_closed_truncated": c_cut,
-                "window_days": TASKS_RECENT_DAYS, "stale_after_days": TASKS_STALE_DAYS,
-                "cap": TASKS_LIST_CAP,
-                "note": "short form: the bodies are read by code with tasks_get, up to "
-                        f"{TASKS_GET_IDS} at a time. Older closed tasks are not gone — "
-                        "ask for them by date with tasks_range."}
-
-    def task_search(self, code: str, consumer: str, query: str) -> dict:
-        """Search your tasks, every state included: finding what you already
-        did is the same question as finding what is open.
-
-        Each hit carries THE FRAGMENT THAT MATCHED, because a code with no
-        fragment tells you that something matched and not why — and then the
-        only way on is a second call for every hit. The fragment is cut from
-        what is STORED, so it shows the text as it was written; citations are
-        expanded when the body is read whole, not here, where expanding would
-        move the very offsets the fragment was measured on."""
-        p = self._project(code)
-        cid, owner = self._consumer_id(p, consumer)
-        q = (query or "").strip()
-        if not q:
-            raise RulesError("search for what? The query is empty.")
-        now = _now()
-        like = f"%{q}%"
-        rows = self.cx.execute(
-            self._TASK_SELECT + " WHERE t.project=? AND t.consumer_id=? "
-            "AND (t.title LIKE ? OR t.body LIKE ? OR IFNULL(t.outcome,'') LIKE ? "
-            "OR IFNULL(t.reason,'') LIKE ?) "
-            "ORDER BY t.urgent DESC, t.created_at ASC, t.seq ASC",
-            (p, cid, like, like, like, like)).fetchall()
-        items, total, cut = self._order_and_cap(rows, now)
-        for item, row in zip(items, rows):
-            item["match"] = self._fragment(q, row)
-        return {"project": p, "consumer": owner, "query": q,
-                "hits": items, "total": total, "truncated": cut,
-                "cap": TASKS_LIST_CAP}
-
-    @staticmethod
-    def _fragment(q: str, row, width: int = 60) -> str:
-        """The window around the match, whitespace collapsed, with an ellipsis
-        on whichever side was cut. Searched over the fields in the order a
-        reader would want them: what it is, then what came of it, then the
-        body."""
-        for field in ("title", "outcome", "reason", "body"):
-            text = row[field] or ""
-            i = text.lower().find(q.lower())
-            if i < 0:
-                continue
-            a, b = max(0, i - width), min(len(text), i + len(q) + width)
-            frag = " ".join(text[a:b].split())
-            return ("…" if a > 0 else "") + frag + ("…" if b < len(text) else "")
-        return ""
-
-    def task_range(self, code: str, consumer: str, since: str, until: str,
-                   on: str) -> dict:
-        """The tasks of a stretch of days. `on` says WHICH DATE it filters —
-        `created_at` or `closed_at` — and it has NO DEFAULT, on purpose:
-        "opened in July" and "closed in July" are two different questions, and
-        the changelog wants the second one. A default would answer one of them
-        while the caller believed the other."""
-        p = self._project(code)
-        cid, owner = self._consumer_id(p, consumer)
-        col = (on or "").strip().lower()
-        if col not in ("created_at", "closed_at"):
-            raise RulesError(
-                "`on` must say which date to filter: 'created_at' (opened in that "
-                "stretch) or 'closed_at' (closed in it). There is no default, because "
-                "the two are different questions and the wrong one answers silently.")
-        lo, hi = _day_start(since, "since"), _day_end(until, "until")
-        if lo > hi:
-            raise RulesError(f"the range runs backwards: {lo} is after {hi}")
-        now = _now()
-        rows = self.cx.execute(
-            self._TASK_SELECT + f" WHERE t.project=? AND t.consumer_id=? "
-            f"AND t.{col} IS NOT NULL AND t.{col} >= ? AND t.{col} <= ? "
-            "ORDER BY t.urgent DESC, t.created_at ASC, t.seq ASC",
-            (p, cid, lo, hi)).fetchall()
-        items, total, cut = self._order_and_cap(rows, now)
-        return {"project": p, "consumer": owner, "on": col, "since": lo, "until": hi,
-                "tasks": items, "total": total, "truncated": cut,
-                "cap": TASKS_LIST_CAP}
-
-    def task_get(self, code: str, ids) -> dict:
-        """The bodies, in a BATCH — the round trip per body is what would make
-        the short form in the lists a false economy.
-
-        TWO ceilings, and they are not the same one. The COUNT stops at
-        TASKS_GET_IDS and REFUSES above it rather than truncating: a caller who
-        asked for fifteen and silently got ten would act on ten. The BYTE
-        ceiling is the one that actually bounds the answer — ten bodies at the
-        body ceiling is 640,000 characters, far over any client's result cap —
-        and there truncation is the right answer, declared, because the
-        alternative is a result the client parks in a file.
-
-        Bodies come back with their citations EXPANDED: a task that says
-        `(VA-0002)` reads with that rule's current title beside it. Nothing is
-        REFUSED here, unlike a rule's body — a task is prose about work, and a
-        pointer that does not resolve is reported in the text, not at the
-        door."""
-        p = self._project(code)
-        if isinstance(ids, str):
-            ids = [ids]
-        ids = list(ids or [])
-        if not ids:
-            raise RulesError("no IDs: tasks_get reads bodies by code")
-        if len(ids) > TASKS_GET_IDS:
-            raise RulesError(
-                f"{len(ids)} IDs for a ceiling of {TASKS_GET_IDS}: the batch is refused, "
-                "not trimmed — a caller who asked for more and quietly got fewer would "
-                "act on the fewer. Split the call.")
-        found, missing, budget, truncated = [], [], TASKS_GET_BYTES, False
-        for raw in ids:
-            tid = self._norm_task_id(raw)
-            row = self._task_row(p, tid)
-            if row is None:
-                missing.append(tid)
-                continue
-            body = self._expand(p, row["body"])
-            cost = len(body.encode())
-            if found and cost > budget:
-                truncated = True
-                break
-            budget -= cost
-            item = self._task_brief(row, _now())
-            item["consumer"] = self.cx.execute(
-                "SELECT name FROM consumers WHERE id=?", (row["consumer_id"],)).fetchone()[0]
-            item["body"] = body
-            item["created_at"] = row["created_at"]
-            if row["outcome"]:
-                item["outcome"] = row["outcome"]
-            if row["reason"]:
-                item["reason"] = row["reason"]
-            if row["actor"]:
-                item["last_written_by"] = row["actor"]
-            item["versions"] = self.cx.execute(
-                "SELECT COUNT(*) FROM task_versions WHERE project=? AND task_id=?",
-                (p, tid)).fetchone()[0]
-            found.append(item)
-        out = {"project": p, "found": found, "never_defined": missing,
-               "requested": len(ids), "returned": len(found), "truncated": truncated,
-               "byte_ceiling": TASKS_GET_BYTES}
-        if truncated:
-            out["note"] = ("the batch stopped at the byte ceiling: ask for the rest by "
-                           "code. Truncated is DECLARED — a short answer that did not "
-                           "say so would read as a complete one.")
-        return out
-
-    def _close_task(self, code: str, tid: str, by: str, status: str,
-                    outcome: str = "", reason: str = "") -> dict:
-        p = self._project(code)
-        tid = self._norm_task_id(tid)
-        row = self._task_row(p, tid)
-        if row is None:
-            raise RulesError(f"{tid}: never defined in this project")
-        if row["status"] != "pending":
-            raise RulesError(
-                f"{tid} is already {row['status']}: a closed task is not re-closed and "
-                "not reopened. Its outcome is what the log is quoted for — open a new "
-                "task instead.")
-        _, actor = self._consumer_id(p, by)
-        outcome = self._task_prose(p, "outcome", outcome)
-        reason = self._task_prose(p, "reason", reason)
-        now = _now()
-        self.cx.execute(
-            "UPDATE tasks SET status=?, outcome=?, reason=?, actor=?, closed_at=?, "
-            "updated_at=? WHERE project=? AND id=?",
-            (status, outcome or None, reason or None, actor, now, now, p, tid))
-        return {"project": p, "id": tid, "status": status, "by": actor, "closed_at": now}
-
-    def task_complete(self, code: str, tid: str, outcome: str, by: str) -> dict:
-        """Close a task WITH ITS OUTCOME. The outcome is mandatory and that is
-        the whole design: the completed tasks with their outcomes ARE the
-        consumer's changelog, and one closed without a word is an entry the
-        changelog lost. Keep it short and queryable — the long story goes in
-        the project's Storia, written by the same hand in the same moment."""
-        if not (outcome or "").strip():
-            raise RulesError(
-                "outcome is mandatory on a completion: the completed tasks with their "
-                "outcomes ARE the changelog of this consumer, and one closed in silence "
-                "is an entry nobody can read back. One or two sentences: what came of it.")
-        return self._close_task(code, tid, by, "completed", outcome=outcome.strip())
-
-    def task_drop(self, code: str, tid: str, reason: str, by: str) -> dict:
-        """Close a task WITHOUT doing it, with the reason why. Twin of denying
-        a proposal: deciding not to do something is a decision, and a decision
-        that leaves no reason gets re-taken from scratch the next time."""
-        if not (reason or "").strip():
-            raise RulesError(
-                "reason is mandatory on a drop: closing without doing is a DECISION, and "
-                "one with no reason will be taken again from scratch. Say why it will "
-                "not be done.")
-        return self._close_task(code, tid, by, "dropped", reason=reason.strip())
-
-    def task_amend(self, code: str, tid: str, by: str, title: str = "",
-                   body: str = "", consumer: str = "") -> dict:
-        """Amend a task that is still OPEN: its title, its body, or its OWNER.
-
-        Reassigning is here because a misdirected task is an ordinary event and
-        not an incident: without it the only way out would be drop-and-recreate,
-        which breaks the thread between the work and the request. What cannot
-        move is `urgent` — the creator set it, and whoever receives it has an
-        interest in clearing it."""
-        p = self._project(code)
-        tid = self._norm_task_id(tid)
-        row = self._task_row(p, tid)
-        if row is None:
-            raise RulesError(f"{tid}: never defined in this project")
-        if row["status"] != "pending":
-            raise RulesError(
-                f"{tid} is {row['status']}: a closed task is not amended. What was "
-                "written when it closed is what the log is read for.")
-        _, actor = self._consumer_id(p, by)
-        sets, args, changed = [], [], []
-        if (title or "").strip():
-            sets.append("title=?")
-            args.append(self._task_prose(p, "title", title.strip()))
-            changed.append("title")
-        if (body or "").strip():
-            b = body.strip()
-            if len(b.encode()) > MAX_BODY_BYTES:
-                raise RulesError(f"the body is over {MAX_BODY_BYTES} bytes: split the task")
-            sets.append("body=?")
-            args.append(self._task_prose(p, "body", b))
-            changed.append("body")
-        moved_to = ""
-        if (consumer or "").strip():
-            cid, moved_to = self._consumer_id(p, consumer)
-            sets.append("consumer_id=?"); args.append(cid); changed.append("consumer")
-        if not sets:
-            raise RulesError("nothing to amend: pass a title, a body or a consumer. "
-                             "`urgent` is not amendable — it is the creator's.")
-        now = _now()
-        sets += ["actor=?", "updated_at=?"]
-        args += [actor, now, p, tid]
-        self.cx.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE project=? AND id=?",
-                        args)
-        out = {"project": p, "id": tid, "amended": changed, "by": actor}
-        if moved_to:
-            out["consumer"] = moved_to
-        return out
-
-    def task_overview(self, code: str) -> dict:
-        """MAINTENANCE. The log across every consumer at once, which is the one
-        reading a working chat has no business doing: it is how you see that a
-        role is buried, or that one skill marks everything urgent.
-
-        The urgent count is BY CREATOR on purpose. `urgent` has no ceiling and
-        no levels — intermediate levels inflate and stop ordering anything —
-        so the guard against inflation is visibility: if one creator's column
-        is all urgent, the skill gets corrected, not the tasks.
-
-        It also DECLARES the ceilings in force, because the day a ceiling is
-        exported to the template there will be two places a number can live,
-        and this says which one is commanding."""
-        p = self._project(code)
-        now = _now()
-        per_consumer = {}
-        for cid, name in self.cx.execute(
-                "SELECT id, name FROM consumers WHERE project=? AND retired_at IS NULL "
-                "ORDER BY name", (p,)):
-            row = self.cx.execute(
-                "SELECT SUM(status='pending'), SUM(status='completed'), "
-                "SUM(status='dropped'), SUM(status='pending' AND urgent=1) "
-                "FROM tasks WHERE project=? AND consumer_id=?", (p, cid)).fetchone()
-            stale = 0
-            for r in self.cx.execute("SELECT created_at FROM tasks WHERE project=? "
-                                     "AND consumer_id=? AND status='pending'", (p, cid)):
-                if self._age_days(r[0], now) >= TASKS_STALE_DAYS:
-                    stale += 1
-            per_consumer[name] = {"pending": row[0] or 0, "completed": row[1] or 0,
-                                  "dropped": row[2] or 0, "urgent_open": row[3] or 0,
-                                  "stale": stale}
-        urgent_by_creator = {r[0]: r[1] for r in self.cx.execute(
-            "SELECT created_by, COUNT(*) FROM tasks WHERE project=? AND urgent=1 "
-            "GROUP BY created_by ORDER BY COUNT(*) DESC, created_by", (p,))}
-        oldest = self.cx.execute(
-            self._TASK_SELECT + " WHERE t.project=? AND t.status='pending' "
-            "ORDER BY t.created_at ASC LIMIT 5", (p,)).fetchall()
-        return {
-            "project": p,
-            "by_consumer": per_consumer,
-            "urgent_created_by": urgent_by_creator,
-            "oldest_open": [self._task_brief(r, now) for r in oldest],
-            "caps_in_force": {"list": TASKS_LIST_CAP, "get_ids": TASKS_GET_IDS,
-                              "get_bytes": TASKS_GET_BYTES,
-                              "recent_window_days": TASKS_RECENT_DAYS,
-                              "stale_after_days": TASKS_STALE_DAYS},
-            "note": "the urgent count is by CREATOR because urgency is the creator's: an "
-                    "inflated column is a skill to correct, not a set of tasks to "
-                    "downgrade.",
-        }
-
-    def prune_tasks(self, code: str, before: str) -> dict:
-        """MAINTENANCE. Remove CLOSED tasks older than a date, and only those.
-
-        It REFUSES anything still pending, and the refusal is the point rather
-        than a safety net: deleting open work by seniority is the hard expiry
-        this design threw out, wearing the clothes of housekeeping. A task that
-        has gone stale is closed by a person, with a reason.
-
-        The counter is NOT rewound — the numbers stay burnt, because an ID that
-        came back would make an old citation point at somebody else's work."""
-        p = self._project(code)
-        cutoff = _day_end(before, "before")
-        open_ones = self.cx.execute(
-            "SELECT COUNT(*) FROM tasks WHERE project=? AND status='pending' "
-            "AND created_at <= ?", (p, cutoff)).fetchone()[0]
-        rows = [r[0] for r in self.cx.execute(
-            "SELECT id FROM tasks WHERE project=? AND status<>'pending' AND closed_at <= ? "
-            "ORDER BY seq", (p, cutoff))]
-        # The task first, then its history — in that order, because deleting
-        # the task WRITES one last version (the safety net that records a hand
-        # deletion), so clearing the history first would leave that row
-        # behind. The counter is not touched by either: it is the one thing
-        # here that only ever goes up.
-        for tid in rows:
-            self.cx.execute("DELETE FROM tasks WHERE project=? AND id=?", (p, tid))
-            self.cx.execute("DELETE FROM task_versions WHERE project=? AND task_id=?",
-                            (p, tid))
-        return {"project": p, "before": cutoff, "pruned": rows,
-                "left_open_untouched": open_ones,
-                "note": "closed tasks only. Open ones are never pruned by age — that "
-                        "would be an expiry with no reason, written by the clock — and "
-                        "the counter is not rewound: the numbers stay burnt."}
-
-    # ---------- derivatives ----------
-
-    def export(self, code: str, consumer: str = "", expand: bool = False) -> dict:
-        """A Markdown snapshot. It is a DERIVATIVE: the truth stays in the
-        database and this regenerates. With a consumer it is the block to paste
-        into that chat's memory; without one, the whole project.
-
-        This is the ONLY reader that gets a choice about the citations, because
-        it is read by a person: compact by default, `expand` to have every
-        pointer carry the current title of what it points at.
-
-        Every rule carries its `reason`, and the whole-project export the last
-        `event` too: this is a MAINTENANCE reading, and the why is what a
-        person maintaining the corpus decides on."""
-        p = self._project(code)
-        lines = [f"# {p} — rules", "",
-                 f"> Generated {_now()} by codifier-mcp {VERSION}. This file is a "
-                 f"DERIVATIVE: the truth is the registry, and this regenerates.", ""]
-        if consumer:
-            c = self._consumer(p, consumer)
-            data = self._rules_for(p, c, expand)
-            lines[0] = f"# {p} — rules for {c}"
-            legend = self._legend(p, [r["id"] for r in data["rules"]])
-            if legend:
-                lines += [f"Domains: {self._legend_line(legend)}", ""]
-            lines += [f"{len(data['rules'])} rules in force, widest first. "
-                      f"{data['outside']} are outside your perimeter.", ""]
-            groups: dict[int, list] = {}
-            for r in data["rules"]:
-                groups.setdefault(r["breadth"], []).append(r)
-            for breadth in sorted(groups, reverse=True):
-                block = groups[breadth]
-                via = sorted({v for r in block for v in r["via"]})
-                lines += [f"## Reaching {breadth} consumer(s) — via {', '.join(via)}", ""]
-                for r in block:
-                    lines += [f"### {r['id']} · {r['title']}  `{r['type']}`", "",
-                              f"*why: {r['reason']}*", "", r["body"], ""]
+        d = {"id": row["display_id"], "title": row["title"],
+             "owner": self.cx.execute("SELECT name FROM consumer WHERE consumer_id=?",
+                                      (row["consumer_id"],)).fetchone()[0],
+             "created_by": row["created_by"], "status": row["status"],
+             "urgent": bool(row["urgent"]), "created_at": row["created_at"]}
+        if row["status"] == "pending":
+            age = self._age_days(row["created_at"], now)
+            if age >= TASKS_STALE_DAYS:
+                # A LABEL on a reading, never a lifecycle: a task does not
+                # expire, because an automatic expiry would be a `dropped` with
+                # no reason, written by the clock.
+                d["stale"] = f"open for {age} days"
         else:
-            now = _now()
-            rows = self.cx.execute("SELECT * FROM rules WHERE project=? ORDER BY domain, seq",
-                                   (p,)).fetchall()
-            legend = self._legend(p, [r["id"] for r in rows])
-            if legend:
-                lines += [f"Domains: {self._legend_line(legend)}", ""]
-            for d in self._domains(p):
-                block = [r for r in rows if r["domain"] == d]
-                if not block:
-                    continue
-                lines += [f"## {d}", ""]
-                for r in block:
-                    mark = "" if r["status"] == "active" else f"  _{r['status']}_"
-                    lines += [f"### {r['id']} · {r['title']}  `{r['type']}`{mark}", "",
-                              f"*scopes: {', '.join(self._scopes_of(p, r['id'])) or 'none'} · "
-                              f"{r['permanence']}"
-                              + (f" · expires {r['expires_at'][:10]}" if r["expires_at"] else "")
-                              + "*", "",
-                              f"*why: {r['reason']}*"
-                              + (f" — *last event: {r['event']}*" if r["event"] else ""),
-                              "",
-                              self._expand(p, r["body"]) if expand else r["body"], ""]
-        md = "\n".join(lines)
-        return {"project": p, "consumer": consumer or None,
-                "markdown": md, "bytes": len(md.encode())}
+            d["closed_at"] = row["closed_at"]
+            d["outcome"] = row["outcome"]
+            d["reason_dropped"] = row["reason_dropped"]
+        return d
+
+    def _order_and_cap(self, rows, now: str) -> tuple:
+        """Urgent first, then the oldest. When the cap cuts, it cuts the FRESH
+        work — what has been waiting longest is what a desk needs to see."""
+        ordered = sorted(rows, key=lambda r: (0 if r["urgent"] else 1, r["created_at"]))
+        return [self._task_brief(r, now) for r in ordered[:TASKS_LIST_CAP]], len(ordered)
+
+    def task_add(self, consumer: str, title: str, body: str, created_by: str,
+                 urgent: bool = False, idem_key: str = "",
+                 consumer_key: str = "", admin: bool = False) -> dict:
+        """Open a task on a desk — yours or anybody's. Opening for others is
+        the POINT of the log: the audit that finds something routes it to the
+        owner who can fix it, instead of carrying it.
+
+        Opening one for a HUMAN does not notify them. A human calls no tool;
+        their post is seen by whoever reads the overview or the page. Tasks are
+        not a notification channel to the owner, and the manual says so next to
+        this call."""
+        owner = self._consumer_row(consumer)
+        who = (created_by or "").strip()
+        if not who:
+            raise RulesError("created_by is required: it is a signature, and a task whose "
+                             "sender is unknown is a task the owner cannot answer.")
+        signer = self.cx.execute("SELECT * FROM consumer WHERE lower(name)=?",
+                                 (_fold(who),)).fetchone()
+        if signer is not None:
+            self._check_consumer_key(signer, consumer_key, admin=admin)
+        if not (title or "").strip():
+            raise RulesError("the task needs a title")
+        if not (body or "").strip():
+            raise RulesError("the task needs a body: a title alone is a reminder to "
+                             "whoever wrote it, not work anybody else can pick up.")
+        title = self._task_prose("title", title)
+        body = self._task_prose("body", body)
+        if len(body.encode()) > MAX_BODY_BYTES:
+            raise RulesError(f"the body is {len(body.encode())} bytes, ceiling "
+                             f"{MAX_BODY_BYTES}.")
+        key = (idem_key or "").strip() or None
+        if key:
+            twin = self.cx.execute(
+                "SELECT * FROM v_task WHERE consumer_id=? AND idem_key=? "
+                "AND status='pending'", (owner["consumer_id"], key)).fetchone()
+            if twin is not None:
+                # It does not PUNISH the repeat, it absorbs it: a recurring
+                # audit that finds the same thing again is reporting it again.
+                return {"id": twin["display_id"], "owner": owner["name"],
+                        "already_open": True,
+                        "note": "same idem_key, same desk, still open: this is the task "
+                                "that was already there, not a twin."}
+        with self._transaction():
+            self.cx.execute(
+                "INSERT INTO task (seq, title, body, consumer_id, created_by, urgent, "
+                "status, actor, idem_key, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?, 'pending', ?,?,?,?)",
+                (self._next_task_seq(), title, body, owner["consumer_id"], who,
+                 1 if urgent else 0, who, key, _now(), _now()))
+            tid = self.cx.execute("SELECT display_id FROM v_task WHERE task_id="
+                                  "last_insert_rowid()").fetchone()[0]
+        out = {"id": tid, "owner": owner["name"], "urgent": bool(urgent)}
+        if owner["kind"] == "human":
+            out["note"] = (f"{owner['name']} is a human: this does NOT notify them. Their "
+                           "post is read from the overview or from the web page.")
+        return out
+
+    def task_list(self, consumer: str, query: str = "", since: str = "",
+                  until: str = "", authored: bool = False) -> dict:
+        """One desk, short form, ordered by the server.
+
+        `authored=True` turns the view round: the tasks THIS consumer opened on
+        OTHER desks, with status and outcome. A task for somebody else is also
+        a message, and a sender who cannot see it close sends it again."""
+        c = self._consumer_row(consumer, live=False)
+        now = _now()
+        if authored:
+            rows = [r for r in self.cx.execute(
+                "SELECT * FROM v_task WHERE lower(created_by)=? AND consumer_id<>? "
+                "AND archived_at IS NULL", (_fold(c["name"]), c["consumer_id"]))]
+        else:
+            rows = [r for r in self.cx.execute(
+                "SELECT * FROM v_task WHERE consumer_id=? AND archived_at IS NULL",
+                (c["consumer_id"],))]
+        q = (query or "").strip()
+        if q:
+            rows = [r for r in rows
+                    if q.lower() in (r["title"] or "").lower()
+                    or q.lower() in (r["body"] or "").lower()]
+        if since or until:
+            lo = _day_start(since, "since") if since else ""
+            hi = _day_end(until, "until") if until else ""
+            rows = [r for r in rows if r["closed_at"]
+                    and (not lo or r["closed_at"] >= lo)
+                    and (not hi or r["closed_at"] <= hi)]
+        else:
+            # Closed tasks trail the list for a month and then stop showing up.
+            # They are not gone: they are asked for by date.
+            rows = [r for r in rows if r["status"] == "pending"
+                    or self._age_days(r["closed_at"] or now, now) <= TASKS_RECENT_DAYS]
+        pending = [r for r in rows if r["status"] == "pending"]
+        closed = [r for r in rows if r["status"] != "pending"]
+        out, total = self._order_and_cap(pending, now)
+        closed_out = sorted((self._task_brief(r, now) for r in closed),
+                            key=lambda d: d["closed_at"] or "", reverse=True)
+        res = {"project": self.name, "consumer": c["name"],
+               "view": "authored" if authored else "desk",
+               "open": out, "open_count": total,
+               "closed_recent": closed_out[:TASKS_LIST_CAP]}
+        if total > len(out):
+            res["truncated"] = True
+            res["note"] = (f"{total} open and the first {TASKS_LIST_CAP} are here: the cut "
+                           "falls on the FRESH work, because the oldest is what the desk "
+                           "owes.")
+        if q:
+            res["query"] = q
+            for d, r in zip(out, sorted(pending, key=lambda r: (0 if r["urgent"] else 1,
+                                                                r["created_at"]))):
+                frag = self._fragment(q, r["title"]) or self._fragment(q, r["body"])
+                if frag:
+                    d["fragment"] = frag
+        return res
+
+    def task_get(self, ids) -> dict:
+        """Full bodies, citations expanded, up to GET_IDS at a time. It reads
+        ANY task of the project on purpose: reads are project-wide and the
+        boundary is the reference code."""
+        if isinstance(ids, str):
+            ids = [i.strip() for i in ids.replace(",", " ").split() if i.strip()]
+        ids = [str(i).strip() for i in (ids or []) if str(i).strip()]
+        if not ids:
+            raise RulesError("no ID given: tasks_get takes the IDs of the tasks to read.")
+        if len(ids) > GET_IDS:
+            raise RulesError(
+                f"{len(ids)} IDs asked for and the ceiling is {GET_IDS}: REFUSED, not "
+                "trimmed. A silent cut answers a question you did not ask.")
+        now, out, missing, size, cut = _now(), [], [], 0, False
+        for tid in ids:
+            try:
+                row = self._task_row(tid)
+            except RulesError:
+                # An ID of the RIGHT shape but the wrong family — a rule read as
+                # a task — is NAMED rather than reported missing: the caller
+                # went to the wrong tool, and "not found" would send them
+                # looking for a row that is sitting right there.
+                rule = self._rule_row(tid)
+                if rule is not None:
+                    raise RulesError(
+                        f"{rule['display_id']} is a RULE, not a task: read it with "
+                        "rules_get. Tasks are TK-NNNN.") from None
+                raise
+            if row is None:
+                missing.append(self._norm_task_id(tid))
+                continue
+            if cut:
+                continue
+            d = {"id": row["display_id"], "title": row["title"],
+                 "body": self._expand(row["body"]),
+                 "owner": self.cx.execute("SELECT name FROM consumer WHERE consumer_id=?",
+                                          (row["consumer_id"],)).fetchone()[0],
+                 "created_by": row["created_by"], "urgent": bool(row["urgent"]),
+                 "status": row["status"], "outcome": row["outcome"],
+                 "reason_dropped": row["reason_dropped"],
+                 "created_at": row["created_at"], "closed_at": row["closed_at"]}
+            if row["status"] == "pending":
+                age = self._age_days(row["created_at"], now)
+                if age >= TASKS_STALE_DAYS:
+                    d["stale"] = f"open for {age} days"
+            size += len(str(d).encode())
+            if size > GET_BYTES and out:
+                cut = True
+                continue
+            out.append(d)
+        res = {"project": self.name, "tasks": out, "count": len(out)}
+        if missing:
+            res["not_found"] = missing
+        if cut:
+            res["truncated"] = True
+            res["note"] = f"cut at {GET_BYTES} bytes: {len(out)} of {len(ids)} read."
+        return res
+
+    def task_close(self, tid: str, by: str, outcome: str = "", reason: str = "",
+                   consumer_key: str = "", admin: bool = False) -> dict:
+        """Close a task: ONE gesture, two verdicts. `outcome` completes it,
+        `reason` drops it, exactly one of the two — and the guarantee is the
+        schema's CHECK, not this method.
+
+        Closing a task you do not own takes the admin code, and it is the ONE
+        declared exception to the flat ladder: it stays at one factor because a
+        task closed wrong reopens as a new task, while a rule retired wrong
+        loses its ID and its continuity."""
+        row = self._task_row(tid)
+        if row is None:
+            raise RulesError(f"{self._norm_task_id(tid)}: no such task in this project.")
+        owner = self.cx.execute("SELECT * FROM consumer WHERE consumer_id=?",
+                                (row["consumer_id"],)).fetchone()
+        who = (by or "").strip()
+        if not who:
+            raise RulesError("`by` is required: a closure is signed.")
+        if row["status"] != "pending":
+            raise RulesError(
+                f"{row['display_id']} is already {row['status']} since {row['closed_at']}: "
+                "closed is closed — no amend, no reopen. If the work came back, open a new "
+                "task and cite this one.")
+        if not admin and _fold(who) != _fold(owner["name"]):
+            raise RulesError(
+                f"{row['display_id']} belongs to {owner['name']}: closing somebody else's "
+                "task takes the admin code in `key`. Opening one for another desk is free; "
+                "closing it is not, because only the owner knows how it went.")
+        signer = self.cx.execute("SELECT * FROM consumer WHERE lower(name)=?",
+                                 (_fold(who),)).fetchone()
+        if signer is not None:
+            self._check_consumer_key(signer, consumer_key, admin=admin)
+        has_out, has_why = bool((outcome or "").strip()), bool((reason or "").strip())
+        if has_out == has_why:
+            raise RulesError(
+                "exactly one of the two: `outcome` completes the task — what came of it —"
+                " and `reason` drops it — why it will not be done. Both is a task that was"
+                " and was not done; neither is a closure nobody can read." )
+        outcome = self._task_prose("outcome", outcome) if has_out else None
+        reason = self._task_prose("reason", reason) if has_why else None
+        with self._transaction():
+            self.cx.execute(
+                "UPDATE task SET status=?, outcome=?, reason_dropped=?, closed_at=?, "
+                "actor=?, updated_at=? WHERE task_id=?",
+                ("completed" if has_out else "dropped", outcome, reason, _now(), who,
+                 _now(), row["task_id"]))
+        return {"id": row["display_id"],
+                "status": "completed" if has_out else "dropped",
+                "by": who, "outcome": outcome, "reason": reason}
+
+    def task_amend(self, tid: str, by: str, title: str = "", body: str = "",
+                   consumer: str = "", consumer_key: str = "",
+                   admin: bool = False) -> dict:
+        """Amend an OPEN task: title, body, or `consumer` to reassign — the
+        reassignment is named in the story, which keeps both owners.
+
+        `urgent` has no parameter here, and that is not an oversight: urgency
+        belongs to whoever created the task, and a door that let the receiver
+        clear it would put the lever in the hand of whoever has an interest in
+        postponing. It is not a closed door, it is a door that does not
+        exist."""
+        row = self._task_row(tid)
+        if row is None:
+            raise RulesError(f"{self._norm_task_id(tid)}: no such task in this project.")
+        owner = self.cx.execute("SELECT * FROM consumer WHERE consumer_id=?",
+                                (row["consumer_id"],)).fetchone()
+        who = (by or "").strip()
+        if not who:
+            raise RulesError("`by` is required: an amendment is signed.")
+        if row["status"] != "pending":
+            raise RulesError(f"{row['display_id']} is {row['status']}: closed is closed.")
+        if not admin and _fold(who) != _fold(owner["name"]):
+            raise RulesError(
+                f"{row['display_id']} belongs to {owner['name']}: amending somebody else's "
+                "task takes the admin code in `key`.")
+        signer = self.cx.execute("SELECT * FROM consumer WHERE lower(name)=?",
+                                 (_fold(who),)).fetchone()
+        if signer is not None:
+            self._check_consumer_key(signer, consumer_key, admin=admin)
+        new_owner = owner
+        if (consumer or "").strip():
+            new_owner = self._consumer_row(consumer)
+        new_title = self._task_prose("title", title) if (title or "").strip() \
+            else row["title"]
+        new_body = self._task_prose("body", body) if (body or "").strip() else row["body"]
+        if (new_title == row["title"] and new_body == row["body"]
+                and new_owner["consumer_id"] == owner["consumer_id"]):
+            raise RulesError("nothing to amend: only what you pass changes, and nothing "
+                             "passed is different from what is there.")
+        with self._transaction():
+            self.cx.execute(
+                "UPDATE task SET title=?, body=?, consumer_id=?, actor=?, updated_at=? "
+                "WHERE task_id=?",
+                (new_title, new_body, new_owner["consumer_id"], who, _now(),
+                 row["task_id"]))
+        out = {"id": row["display_id"], "owner": new_owner["name"], "by": who}
+        if new_owner["consumer_id"] != owner["consumer_id"]:
+            out["reassigned_from"] = owner["name"]
+        return out
+
+    def task_overview(self) -> dict:
+        """Every desk at once, short form, ceilings declared — the cross view
+        that lets an audit route work to the owner who can do it. Reading it
+        moves nothing: no counter, no timestamp."""
+        now = _now()
+        desks = []
+        for c in self.cx.execute("SELECT * FROM consumer ORDER BY name"):
+            rows = list(self.cx.execute(
+                "SELECT * FROM v_task WHERE consumer_id=? AND status='pending' "
+                "AND archived_at IS NULL", (c["consumer_id"],)))
+            if not rows and c["retired_at"]:
+                continue
+            out, total = self._order_and_cap(rows, now)
+            desks.append({"consumer": c["name"], "kind": c["kind"],
+                          "retired": bool(c["retired_at"]),
+                          "open": total,
+                          "urgent": sum(1 for r in rows if r["urgent"]),
+                          "stale": sum(1 for r in rows
+                                       if self._age_days(r["created_at"], now)
+                                       >= TASKS_STALE_DAYS),
+                          "tasks": out})
+        return {"project": self.name, "desks": desks,
+                "caps": {"list": TASKS_LIST_CAP, "get_ids": GET_IDS,
+                         "get_bytes": GET_BYTES, "stale_days": TASKS_STALE_DAYS},
+                "note": "humans appear here too: it is where their post is read, because "
+                        "a human calls no tool."}
+
+    def prune_tasks(self, before: str, actor: str = "web ui") -> dict:
+        """ARCHIVE what is finished and older than a date. It marks, it does
+        not delete — which is what lets MAX(seq) be trusted — and it REFUSES
+        the open ones, saying how many it left alone: an open task is not
+        clutter, it is work, and hiding it from the desk that owes it is the
+        one thing this must never do."""
+        cut = _day_start(before, "before")
+        rows = list(self.cx.execute(
+            "SELECT * FROM v_task WHERE status<>'pending' AND archived_at IS NULL "
+            "AND closed_at < ?", (cut,)))
+        still_open = self.cx.execute(
+            "SELECT COUNT(*) FROM task WHERE status='pending' AND created_at < ?",
+            (cut,)).fetchone()[0]
+        with self._transaction():
+            for r in rows:
+                self.cx.execute("UPDATE task SET archived_at=?, actor=?, updated_at=? "
+                                "WHERE task_id=?", (_now(), actor, _now(), r["task_id"]))
+        return {"archived": [r["display_id"] for r in rows], "count": len(rows),
+                "left_open": still_open,
+                "note": f"{still_open} open tasks older than {cut} were left where they "
+                        "are: the prune is for what is finished."}
+
+    # =================================================================
+    # Backup
+    # =================================================================
 
     def backup(self, dest_dir: str) -> dict:
-        """A quiescent copy of the WHOLE database (VACUUM INTO): it opens without
-        recovery. In WAL the database is THREE files, so copying one is a
-        corrupt backup."""
+        """A quiescent copy of this project's database (VACUUM INTO): it opens
+        without recovery, which a copy of a live WAL file does not.
+
+        PER PROJECT, because in this world a project is a folder: the file, its
+        -wal and its -shm. Copying one of the three is a corrupt backup, and
+        VACUUM INTO is how you get one file that is all three."""
         os.makedirs(dest_dir, exist_ok=True)
         try:
             os.chmod(dest_dir, DIR_MODE)
         except OSError:
             pass
-        name = f"codifier-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.db"
-        dest = os.path.join(dest_dir, name)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        dest = os.path.join(dest_dir, f"{self.slug}-{stamp}.db")
         self.cx.execute("VACUUM INTO ?", (dest,))
         try:
             os.chmod(dest, FILE_MODE)
         except OSError:
             pass
-        return {"backup": dest, "bytes": os.path.getsize(dest),
-                "note": "quiescent copy: opens without recovery, and it is the one to take "
-                        "off-site. ZFS snapshots stay the main net."}
+        return {"project": self.name, "backup": dest,
+                "bytes": os.path.getsize(dest),
+                "note": "quiescent copy of THIS project: opens without recovery, and it is "
+                        "the one to take off-site. ZFS snapshots stay the main net."}

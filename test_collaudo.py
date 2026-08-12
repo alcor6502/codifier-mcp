@@ -1,3262 +1,664 @@
 #!/usr/bin/env python3
+"""The engine suite: what the ENGINE refuses, and what it must let through.
+
+The division of labour with `test_schema.py` is deliberate and worth keeping:
+that file writes raw SQL and proves what the DATABASE refuses, because the file
+is readable from the share. This one goes through the methods and proves what
+only the engine can know — a perimeter expanded and compared, a queue counted,
+a name resolved, a ladder answered.
+
+If a case in here could be made to fail with sqlite3 alone, it belongs in
+test_schema.py. If a case in there needs a method to fail, it belongs here.
+
+Every refusal has to NAME the culprit, so each case declares the words it
+expects. And every section carries `allowed` cases as well as `refused` ones:
+a suite made only of refusals gets greener with every new guard, and the day a
+guard blocks something legitimate nothing goes red — which is exactly how
+`all -> targeted` stayed unreachable through forty green cases.
+
+Runs on the standard library alone: no network, no FastMCP, no web stack.
 """
-test_collaudo.py — the whole engine, refusals included.
 
-One suite, deliberately: two suites over the same engine are two numbers that
-drift apart, and the drift is never noticed until it matters. This absorbs the
-smoke run and the v4.0 cases, and adds the ones the consumers/scopes model
-brought with it.
-
-No network, no FastMCP, no Docker: this is the layer where the real bugs live.
-Run it with `python3 test_collaudo.py`. Exit code 0 means green.
-
-The four proofs that carry the model, if you only read four:
-  · history written BEFORE a scope changes still reports the consumers of that
-    day (a version is a photograph, not a pointer);
-  · _ALL_ reaches a consumer created AFTER the rule;
-  · a managed scope refuses a second member, and the refusal comes from the
-    DATABASE, not from tool code;
-  · add a consumer and the reading order stays right with nobody touching
-    anything — which is what "the order is computed" means.
-"""
-from __future__ import annotations
-
+import atexit
 import os
-import sqlite3
+import shutil
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rules
 
-import rules as _rules                  # for the two constants the suite SHIFTS
-from rules import (ALL, FILE_MODE, GLOSS_SEP, MAX_BODY_BYTES, MAX_GET_IDS,
-                   Registry, RulesError, RulesFault, VERSION, _plus_days,
-                   TASKS_GET_BYTES, TASKS_GET_IDS, TASKS_LIST_CAP,
-                   TASKS_RECENT_DAYS, TASKS_STALE_DAYS)
-
-# =====================================================================
-# Harness
-# =====================================================================
-
-OK = FAIL = 0
-FAILURES: list[str] = []
+_passed = 0
+_failed: list[str] = []
+_ROOTS: list[str] = []
+_finished = False
 
 
-def head(title: str) -> None:
-    print(f"\n== {title} ==")
+@atexit.register
+def _summary():
+    """Printed WHATEVER happens, including a crash halfway.
+
+    A suite that dies on an unguarded setup call prints its green sections and
+    then a traceback, and the eye reads the green. This says out loud that the
+    run stopped early, and it still exits non-zero."""
+    for r in _ROOTS:
+        shutil.rmtree(r, ignore_errors=True)
+    if not _finished:
+        _failed.append("THE RUN WAS CUT SHORT: a call outside a case raised, so "
+                       "everything after it measured nothing")
+        print("\n  FAIL  the run was CUT SHORT — a setup call raised")
+    print(f"\n{_passed} cases, {len(_failed)} failed")
+    for f in _failed:
+        print("  -", f)
+    # FLUSHED, and then the hard exit. os._exit skips the interpreter's own
+    # flush, so without this line the summary is written into a buffer nobody
+    # empties and the run ends with its last `ok` on screen — a suite whose
+    # verdict can disappear is a suite that reports success by omission.
+    sys.stdout.flush()
+    os._exit(1 if _failed else 0)
 
 
-def ok(cond, label: str, extra="") -> None:
-    """One assertion, one line. `extra` is printed only when it fails, so a
-    green run stays readable and a red one says enough to act."""
-    global OK, FAIL
-    if cond:
-        OK += 1
-        print(f"  PASS  {label}")
+def project(**profile):
+    """A fresh project with a little anagrafica already in it.
+
+    Two groups sharing a member on purpose — `advisory` is in `deliberativi`
+    and in `automatismi` — because group-with-group overlap is ALLOWED and
+    everything downstream has to survive it.
+    """
+    root = tempfile.mkdtemp(prefix="codifier-collaudo-")
+    _ROOTS.append(root)
+    p = rules.Project("Financial Portfolio", root,
+                      reference_code="r" * 16, admin_code="k" * 16)
+    p.amend_project("domain", "VA", "create",
+                    {"reason": "the house doctrine", "description": "values"},
+                    actor="architect")
+    p.amend_project("domain", "ST", "create", {"reason": "strategy"}, actor="architect")
+    for name, kind in (("architect", "chat"), ("advisory", "chat"),
+                       ("news", "skill"), ("Alfredo", "human")):
+        p.amend_project("consumer", name, "create", {"kind": kind}, actor="architect")
+    p.amend_project("group", "deliberativi", "create",
+                    {"members": ["architect", "advisory"]}, actor="architect")
+    p.amend_project("group", "automatismi", "create",
+                    {"members": ["advisory", "news"]}, actor="architect")
+    if profile:
+        p.amend_project("project", "", "amend", profile, actor="architect")
+    return p
+
+
+def rule(p, reach="all", groups=(), exceptions=(), domain="VA", title="a title",
+         body="a body", approve=True, **kw):
+    """Propose and, unless told otherwise, take it through the page."""
+    out = p.propose(domain, kw.pop("rtype", "R"), title, body,
+                    kw.pop("reason", "because it was decided"), reach, "architect",
+                    groups=list(groups), exceptions=list(exceptions), **kw)
+    if approve:
+        b = p.batch()
+        p.decide(b["digest"], [x["id"] for x in b["pending"]], {})
+    return out["id"]
+
+
+def refused(name, gesture, expect):
+    global _passed
+    try:
+        gesture()
+        _failed.append(f"{name}: NOT REFUSED — the engine let it through")
+        print(f"  FAIL  {name}: not refused")
+    except rules.RulesError as exc:
+        msg = str(exc)
+        if expect.lower() in msg.lower():
+            _passed += 1
+            print(f"  ok    {name}")
+        else:
+            _failed.append(f"{name}: refused, but never says {expect!r} — {msg}")
+            print(f"  FAIL  {name}: refusal does not name it — {msg[:70]}")
+    except Exception as exc:                       # noqa: BLE001
+        # A traceback is not a refusal. A suite that accepted one would be
+        # counting a crash as a guarantee — and a crash stops the run, so the
+        # cases after it stop measuring anything at all.
+        _failed.append(f"{name}: TRACEBACK instead of a named refusal — "
+                       f"{type(exc).__name__}: {exc}")
+        print(f"  FAIL  {name}: traceback — {type(exc).__name__}: {str(exc)[:60]}")
+
+
+def allowed(name, gesture):
+    """The gesture must go THROUGH, and its value comes back to the caller."""
+    global _passed
+    try:
+        out = gesture()
+        _passed += 1
+        print(f"  ok    {name}")
+        return out
+    except Exception as exc:                       # noqa: BLE001
+        _failed.append(f"{name}: REFUSED, and it should not have been — {exc}")
+        print(f"  FAIL  {name}: refused — {str(exc)[:70]}")
+        return None
+
+
+def equals(name, got, want):
+    global _passed
+    if got == want:
+        _passed += 1
+        print(f"  ok    {name}")
     else:
-        FAIL += 1
-        FAILURES.append(label)
-        print(f"  FAIL  {label}  {extra}")
+        _failed.append(f"{name}: got {got!r}, wanted {want!r}")
+        print(f"  FAIL  {name}: got {got!r}, wanted {want!r}")
 
 
-def case(label: str, fn) -> None:
-    """For a block of assertions: any exception is the failure."""
-    global OK, FAIL
+def yields(name, gesture, want):
+    """A value that arrives from a call which MIGHT refuse. Without this the
+    refusal escapes as a traceback, the run dies at case nine and every case
+    after it measures nothing."""
     try:
-        fn()
-        OK += 1
-        print(f"  PASS  {label}")
-    except Exception as e:
-        import traceback
-        FAIL += 1
-        FAILURES.append(label)
-        line = traceback.extract_tb(e.__traceback__)[-1]
-        print(f"  FAIL  {label}: {type(e).__name__}: {e}")
-        print(f"        at line {line.lineno}: {line.line}")
-
-
-def refuses(label: str, fn, fragment: str = "", kind=Exception) -> None:
-    """A refusal is a feature: it must happen, and it must SAY the right thing.
-    Checking the message matters — a talking error that stops talking is a
-    regression the caller pays for, not us."""
-    global OK, FAIL
-    try:
-        fn()
-    except kind as e:
-        if fragment and fragment.lower() not in str(e).lower():
-            FAIL += 1
-            FAILURES.append(label)
-            print(f"  FAIL  {label}: refused, but said {str(e)[:90]!r}")
-            return
-        OK += 1
-        print(f"  PASS  {label}  ({str(e).splitlines()[0][:58]})")
-        return
-    FAIL += 1
-    FAILURES.append(label)
-    print(f"  FAIL  {label}: did NOT refuse")
-
-
-D = tempfile.mkdtemp(prefix="collaudo-")
-DB = os.path.join(D, "rules.db")
-R = Registry(DB, provisional_days=90, pending_cap=100)
-
-NAME_FP, NAME_HT, NAME_CASA = "Financial Portfolio", "Health Tracking", "Casa"
-
-# =====================================================================
-head("projects: the code is the only door")
-# =====================================================================
-
-refuses("missing code: a blind error",
-        lambda: R.list_rules("", "architect"), "project not specified", RulesError)
-refuses("invented code: the SAME error, no hint",
-        lambda: R.list_rules("Invented99", "architect"), "project not specified", RulesError)
-
-# The code and the architect key are GENERATED by the registry and returned
-# ONCE, on the receipt: nothing here invents a credential any more.
-_FP_OUT = R.create_project(
-    NAME_FP,
-    [("architect", "chat"), ("advisory", "chat"), ("alt-funds", "chat"),
-     ("tax", "chat"), ("market-news", "chat"), ("update-tax", "skill")],
-    {"VA": "vault and files", "ST": "structure", "RL": "roles",
-     "VE": "verification", "FI": "tax", "PE": "perimeter"},
-    "the historical project")
-FP, FP_KEY = _FP_OUT["code"], _FP_OUT["architect_key"]
-ok(len(FP) == 16 and FP.isalnum(), "the code is generated: 16 alphanumerics", FP)
-ok(len(FP_KEY) == 24 and FP_KEY.isalnum(),
-   "the architect key is generated: 24 alphanumerics, on the receipt and only there",
-   FP_KEY)
-ok(R.cx.execute("SELECT architect_key_hash FROM projects WHERE name=?",
-                (NAME_FP,)).fetchone()[0] != FP_KEY,
-   "what the row holds is the HASH, never the key")
-
-_HT_OUT = R.create_project(NAME_HT, [("architect", "chat"), ("coach", "chat")],
-                           {"VA": "vault", "MS": "measures"})
-HT, HT_KEY = _HT_OUT["code"], _HT_OUT["architect_key"]
-
-
-def the_maintenance_gate_is_per_project():
-    """check_architect resolves the project FIRST, then the hash — and every
-    failure gets ONE message: a wrong key must not confirm a valid code."""
-    assert R.check_architect(FP, FP_KEY) == NAME_FP
-    for code, key in ((FP, HT_KEY), (FP, "wrong"), ("Invented99", FP_KEY), ("", "")):
-        try:
-            R.check_architect(code, key)
-            raise AssertionError(f"({code!r}, {key!r}) opened maintenance")
-        except RulesError as e:
-            assert "maintenance refused" in str(e), e
-            assert "architect key" in str(e), e
-
-
-case("the maintenance gate is per project, one message for every failure",
-     the_maintenance_gate_is_per_project)
-
-refuses("the NAME is not an access key",
-        lambda: R.list_rules(NAME_FP, "architect"), "project not specified", RulesError)
-refuses("one project's code, another's consumer",
-        lambda: R.list_rules(FP, "coach"), "unknown consumer", RulesError)
-refuses("duplicate project name",
-        lambda: R.create_project(NAME_FP, ["x"], {"AA": ""}),
-        "already exists", RulesError)
-refuses("malformed domain",
-        lambda: R.create_project("Other", ["a"], {"vault": ""}),
-        "two uppercase", RulesError)
-refuses("'*' is not a consumer name",
-        lambda: R.create_project("Other", ["*"], {"AA": ""}),
-        "invalid consumer name", RulesError)
-refuses("'_ALL_' is not a consumer name",
-        lambda: R.create_project("Other", [ALL], {"AA": ""}),
-        "invalid consumer name", RulesError)
-refuses("unknown kind refused",
-        lambda: R.create_project("Other", [("a", "person")], {"AA": ""}),
-        "it must be one of", RulesError)
-
-
-def a_project_may_be_born_empty():
-    """No consumers, no domains: seeding them is the Architect's first job,
-    done with the key the receipt hands out. The refusals that used to sit
-    here guarded a world where the UI could not add them afterwards."""
-    global BORN
-    out = R.create_project("Born Empty")
-    BORN = out["code"]
-    info = R.project_info(out["code"])
-    assert info["consumers"] == [] and info["domains"] == {}, info
-    assert [s["name"] for s in info["scopes"]] == [ALL], info["scopes"]
-
-
-case("a project may be born empty: seeding it is the Architect's job",
-     a_project_may_be_born_empty)
-
-
-def project_info_says_enough_and_no_more():
-    i = R.project_info(FP)
-    assert i["project"] == NAME_FP
-    names = {c["name"] for c in i["consumers"]}
-    assert "tax" in names and "update-tax" in names
-    assert {c["kind"] for c in i["consumers"]} == {"chat", "skill"}
-    assert "VA" in i["domains"]
-    assert i["registry_version"] == VERSION
-    assert "code" not in i, "the code is not echoed back"
-    assert "Health" not in repr(i), "it must not name another project"
-
-
-case("project_info: consumers, scopes, domains — and no other project",
-     project_info_says_enough_and_no_more)
-
-# =====================================================================
-head("the database makes the singletons, and defends them")
-# =====================================================================
-
-
-def singletons_exist():
-    scopes = {s["name"]: s for s in R.project_info(FP)["scopes"]}
-    assert set(scopes) == {ALL, "architect", "advisory", "alt-funds", "tax",
-                           "market-news", "update-tax"}, sorted(scopes)
-    assert all(s["managed"] for s in scopes.values()), "every scope born so far is managed"
-    assert scopes["tax"]["members"] == ["tax"]
-
-
-case("a trigger gives every consumer a scope of its own", singletons_exist)
-
-ok(R._breadth(NAME_FP, ALL) == 6, "_ALL_ is worth 6 consumers", R._breadth(NAME_FP, ALL))
-case("a group scope is created by hand",
-     lambda: R.create_scope(FP, "deliberativi", ["architect", "advisory", "alt-funds", "tax"]))
-ok(R._breadth(NAME_FP, "deliberativi") == 4, "deliberativi is worth 4")
-
-# The hand-written INSERTs below address the SURROGATE ids, because that is
-# what the schema crosses now: the names live in one place each.
-SID_TAX = R.cx.execute("SELECT id FROM scopes WHERE project=? AND name='tax'",
-                       (NAME_FP,)).fetchone()[0]
-CID_ADV = R.cx.execute("SELECT id FROM consumers WHERE project=? AND name='advisory'",
-                       (NAME_FP,)).fetchone()[0]
-refuses("managed scope refuses a second member — FROM THE DATABASE",
-        lambda: R.cx.execute("INSERT INTO scope_members (scope_id, consumer_id) "
-                             "VALUES (?,?)", (SID_TAX, CID_ADV)),
-        "managed scope", sqlite3.IntegrityError)
-refuses("a managed scope is not renamed — FROM THE DATABASE",
-        lambda: R.cx.execute("UPDATE scopes SET name='x' WHERE id=?", (SID_TAX,)),
-        "managed scope", sqlite3.IntegrityError)
-refuses("a managed scope's membership is not moved — FROM THE DATABASE",
-        lambda: R.cx.execute("UPDATE scope_members SET consumer_id=? WHERE scope_id=?",
-                             (CID_ADV, SID_TAX)),
-        "managed scope", sqlite3.IntegrityError)
-refuses("a consumer is not renamed — FROM THE DATABASE",
-        lambda: R.cx.execute("UPDATE consumers SET name='x' WHERE project=? AND name='tax'",
-                             (NAME_FP,)), "not renamed", sqlite3.IntegrityError)
-refuses("a scope with one member adds nothing",
-        lambda: R.create_scope(FP, "alone", ["tax"]), "fewer than two", RulesError)
-refuses("a scope cannot take a consumer's name",
-        lambda: R.create_scope(FP, "tax", ["architect", "advisory"]),
-        "already exists", RulesError)
-refuses("a duplicate group scope",
-        lambda: R.create_scope(FP, "deliberativi", ["architect", "tax"]),
-        "already exists", RulesError)
-refuses("a group cannot hold a consumer of another project",
-        lambda: R.create_scope(FP, "mixed", ["architect", "coach"]),
-        "unknown consumer", RulesError)
-refuses("edit_scope refuses a managed scope",
-        lambda: R.edit_scope(FP, "tax", add=["advisory"]), "managed scope", RulesError)
-refuses("edit_scope on a scope that is not there",
-        lambda: R.edit_scope(FP, "ghosts", add=["tax"]), "no scope named", RulesError)
-
-# =====================================================================
-head("spelling is data: stored as given, folded for identity")
-# =====================================================================
-
-# A project of its own, so nothing here moves the counts the rest of the
-# suite relies on (breadth of _ALL_, consumers per project, and so on).
-SPELL = R.create_project("Spelling Lab",
-                         [("Architect", "chat"), ("FP-Update-Tax", "skill")],
-                         {"VA": "vault"})["code"]
-
-
-def spelling_survives_whole():
-    """A name comes back EXACTLY as it was first given — byte for byte. The
-    old engine lowercased in silence, which rewrote what the owner typed;
-    that rewriting is extinct, and this is the case that notices if it
-    creeps back."""
-    stored = [c["name"] for c in R.project_info(SPELL)["consumers"]]
-    assert "Architect" in stored and "FP-Update-Tax" in stored, stored
-    assert "architect" not in stored and "fp-update-tax" not in stored, stored
-    scopes = [s["name"] for s in R.project_info(SPELL)["scopes"]]
-    assert "FP-Update-Tax" in scopes, scopes
-
-
-case("a mixed-case name is stored as given, singleton included", spelling_survives_whole)
-
-
-def identity_is_folded():
-    """`ARCHITECT` and `Architect` are ONE consumer: any spelling resolves,
-    and every answer carries the STORED spelling, not the caller's."""
-    lst = R.list_rules(SPELL, "ARCHITECT")
-    assert lst["consumer"] == "Architect", lst["consumer"]
-    out = R.add_consumers(SPELL, [("architect", "chat")])
-    assert out["added"] == [], out
-    assert out["already_there"] == ["Architect"], out
-
-
-case("identity is casefolded, the stored spelling answers", identity_is_folded)
-
-refuses("the fold index refuses a duplicate spelling — FROM THE DATABASE",
-        lambda: R.cx.execute("INSERT INTO consumers (project, name, kind, created) "
-                             "VALUES (?,?,?,?)", ("Spelling Lab", "ARCHITECT", "chat", "now")),
-        "", sqlite3.IntegrityError)
-
-# =====================================================================
-head("proposing: a proposal reaches nobody, and the NUMBER is not yours")
-# =====================================================================
-
-# Nothing below hard-codes an ID: every one of them is what the registry HANDED
-# BACK. That is not tidiness, it is the point — a suite that typed the numbers
-# in would still pass with the counter removed.
-VA1 = R.propose(
-    FP, "VA", "R", "Re-read the sources",
-    "SOURCE data is re-read right before writing the derivative.",
-    ["*"], "initial import", "architect")["id"]
-PE1 = R.propose(
-    FP, "PE", "M", "The method of the four", "The four deliberative chats agree first.",
-    ["deliberativi"], "initial import", "architect")["id"]
-FI1 = R.propose(
-    FP, "FI", "M", "Estimating the bracket",
-    "The bracket is estimated from the rollup by character.",
-    ["tax"], "initial import", "tax")["id"]
-ST1 = R.propose(
-    FP, "ST", "F", "Where the vault lives", "The vault root is read, never assumed.",
-    ["update-tax"], "initial import", "architect")["id"]
-
-ok([VA1, PE1, FI1, ST1] == ["VA-0001", "PE-0001", "FI-0001", "ST-0001"],
-   "the database assigns the number: four digits, one counter per domain",
-   [VA1, PE1, FI1, ST1])
-ok(R.list_rules(FP, "tax")["count"] == 0, "a proposal reaches nobody before approval")
-ok(R.pending(FP, "tax")["waiting"][0]["id"] == FI1,
-   "the noticeboard shows the consumer's own proposal")
-ok(len(R.pending(FP)["waiting"]) == 4, "without a consumer the noticeboard shows them all")
-
-
-def the_number_cannot_be_asked_for():
-    """The guarantee is an ABSENCE, so it is worth proving from the outside:
-    there is no parameter that carries a number, under any name."""
-    import inspect
-    params = list(inspect.signature(R.propose).parameters)
-    assert "rid" not in params and "id" not in params and "seq" not in params, params
-    assert params[1] == "domain", params
-
-
-case("propose() has no way to receive a number", the_number_cannot_be_asked_for)
-
-
-refuses("an undeclared domain",
-        lambda: R.propose(FP, "ZZ", "R", "x", "y", ["*"], "m", "architect"), "not declared", RulesError)
-refuses("another project's domain",
-        lambda: R.propose(FP, "MS", "R", "x", "y", ["*"], "m", "architect"), "not declared", RulesError)
-refuses("no domain at all",
-        lambda: R.propose(FP, "", "R", "x", "y", ["*"], "m", "architect"), "needs a DOMAIN", RulesError)
-refuses("a whole ID passed where the domain goes",
-        lambda: R.propose(FP, "VA-0003", "R", "x", "y", ["*"], "m", "architect"), "not declared", RulesError)
-refuses("another project's consumer as a scope",
-        lambda: R.propose(FP, "VA", "R", "x", "y", ["coach"], "m", "architect"),
-        "neither a consumer nor a scope", RulesError)
-refuses("type X",
-        lambda: R.propose(FP, "VA", "X", "x", "y", ["*"], "m", "architect"),
-        "R binding, M method", RulesError)
-refuses("no reason",
-        lambda: R.propose(FP, "VA", "R", "x", "y", ["*"], "", "architect"), "reason is mandatory", RulesError)
-refuses("no title",
-        lambda: R.propose(FP, "VA", "R", "", "y", ["*"], "m", "architect"), "needs a title", RulesError)
-refuses("no body",
-        lambda: R.propose(FP, "VA", "R", "x", "", ["*"], "m", "architect"), "needs a body", RulesError)
-refuses("empty perimeter",
-        lambda: R.propose(FP, "VA", "R", "x", "y", [], "m", "architect"), "reaches nobody", RulesError)
-refuses("a body over the ceiling",
-        lambda: R.propose(FP, "VA", "R", "x", "z" * (MAX_BODY_BYTES + 1), ["*"], "m", "architect"),
-        "split the rule", RulesError)
-
-
-refuses("proposed_by must be a consumer",
-        lambda: R.propose(FP, "VA", "R", "x", "y", ["*"], "m", "alfredo"),
-        "unknown consumer", RulesError)
-
-
-# A project of its own for the counter, so that proving how numbers are spent
-# does not litter the one the rest of the suite reasons about.
-
-CNT = R.create_project("Counter", [("architect", "chat")],
-                       {"VA": "vault", "ZZ": "other"})["code"]
-
-
-def the_counter_does_not_skip_and_does_not_go_back():
-    a = R.propose(CNT, "VA", "R", "One", "Body one.", ["*"], "m", "architect")["id"]
-    assert a == "VA-0001", a
-    # A refusal happens BEFORE the insert, so the counter does not move: if it
-    # did, the numbering would carry a scar for every typo.
-    try:
-        R.propose(CNT, "VA", "X", "Bad type", "Body.", ["*"], "m", "architect")
-    except RulesError:
-        pass
-    b = R.propose(CNT, "VA", "R", "Two", "Body two.", ["*"], "m", "architect")["id"]
-    assert b == "VA-0002", b
-    # Denying is different from refusing: the row STAYS, the number is spent,
-    # and the counter carries on past it. That is what "never reused" means.
-    R.deny(CNT, [b], "spent on purpose")
-    c = R.propose(CNT, "VA", "R", "Three", "Body three.", ["*"], "m", "architect")["id"]
-    assert c == "VA-0003", c
-    R.approve(CNT, R.batch(CNT)["digest"])
-    R.retire(CNT, c, reason="retired to spend the number")
-    d = R.propose(CNT, "VA", "R", "Four", "Body four.", ["*"], "m", "architect")["id"]
-    assert d == "VA-0004", d
-    # And the domains count separately.
-    assert R.propose(CNT, "ZZ", "R", "Elsewhere", "Body.", ["*"], "m", "architect")["id"] == "ZZ-0001"
-
-
-case("the counter: no skips, no reuse, one per domain",
-     the_counter_does_not_skip_and_does_not_go_back)
-
-
-def a_full_domain_says_so():
-    """Four digits is a ceiling, not infinity. When a domain reaches it the
-    answer is a NEW DOMAIN, never a reused number — said out loud, because the
-    day it happens there is no remedy left to invent."""
-    R.cx.execute("UPDATE rules SET seq=9999 WHERE project='Counter' AND domain='ZZ'")
-    try:
-        R.propose(CNT, "ZZ", "R", "One too many", "Body.", ["*"], "m", "architect")
-        raise AssertionError("it should have refused")
-    except RulesError as e:
-        assert "burned all" in str(e), e
-
-
-case("a domain that has burned all its numbers asks for a new domain",
-     a_full_domain_says_so)
-
-
-def deferred_fk_photographs_a_full_perimeter():
-    """The engine writes rule_scopes BEFORE the rule, inside one transaction, so
-    the AFTER INSERT trigger sees a complete perimeter. If the FK were not
-    DEFERRED this would not be possible — and version 1 would say 'no scope'."""
-    v1 = R.history(FP, "PE-0001")["versions"][0]
-    assert v1["action"] == "created"
-    assert v1["scopes"] == "deliberativi", v1["scopes"]
-    assert set(v1["consumers"].split(",")) == {"architect", "advisory", "alt-funds", "tax"}
-
-
-case("version 1 already carries the perimeter (deferred FK)",
-     deferred_fk_photographs_a_full_perimeter)
-
-# =====================================================================
-head("the batch, and the digest on it")
-# =====================================================================
-
-B = R.batch(FP)
-ok(B["count"] == 4, "the batch holds the four proposals", B["ids"])
-ok(B["digest"] == R.batch(FP)["digest"], "the digest is stable while the batch is")
-refuses("a digest that is not the current one",
-        lambda: R.approve(FP, "deadbeef"), "not the current one", RulesError)
-
-A = R.approve(FP, B["digest"])
-ok(A["count"] == 4, "batch approved against its digest")
-ok(R.batch(FP)["count"] == 0, "the batch is empty afterwards")
-refuses("nothing to approve on an empty batch",
-        lambda: R.approve(FP, R.batch(FP)["digest"]),
-        "batch is empty", RulesError)
-
-
-def approved_means_provisional():
-    row = R._row(NAME_FP, "VA-0001")
-    assert row["status"] == "active" and row["permanence"] == "provisional"
-    assert row["expires_at"], "an approved rule expires: staying costs a decision"
-
-
-case("approved is ACTIVE and PROVISIONAL, with an expiry", approved_means_provisional)
-
-
-def the_batch_changes_under_you():
-    late = R.propose(FP, "VE", "R", "Late arrival", "Proposed after you read the batch.",
-                     ["*"], "test", "architect")["id"]
-    assert late == "VE-0001", late
-    b2 = R.batch(FP)
-    assert b2["digest"] != B["digest"], "one more proposal must move the digest"
-    R.deny(FP, [late], "only here to move the digest")
-
-
-case("a proposal arriving later changes the digest", the_batch_changes_under_you)
-
-# =====================================================================
-head("the order IS the breadth")
-# =====================================================================
-
-L = R.list_rules(FP, "tax")
-ok([x["id"] for x in L["rules"]] == ["VA-0001", "PE-0001", "FI-0001"],
-   "order: _ALL_, then the group, then the singleton", [x["id"] for x in L["rules"]])
-ok(set(L["rules"][0]) == {"id", "body"},
-   "the consumer reading carries no via and no breadth", sorted(L["rules"][0]))
-FULL = R._rules_for(NAME_FP, "tax")
-ok(FULL["rules"][0]["via"] == [ALL] and FULL["rules"][0]["breadth"] == 6,
-   "the maintenance reading still reports via and breadth")
-ok(L["outside_your_scope"] == 1, "it declares how many stay outside", L["outside_your_scope"])
-ok(R.list_rules(FP, "market-news")["count"] == 1,
-   "market-news only sees the rule that binds everyone")
-ok(R.list_rules(FP, "update-tax")["count"] == 2,
-   "a SKILL downloads its own rules exactly like a chat")
-
-BEFORE = [x["id"] for x in R.list_rules(FP, "tax")["rules"]]
-case("a new consumer is born", lambda: R.add_consumers(FP, [("genera-dashboard", "skill")]))
-ok([x["id"] for x in R.list_rules(FP, "tax")["rules"]] == BEFORE,
-   "add a consumer and the order stays right on its own")
-ok(R._breadth(NAME_FP, ALL) == 7, "_ALL_ widened by itself")
-ok(R.list_rules(FP, "genera-dashboard")["count"] == 1,
-   "_ALL_ reaches a consumer created AFTER the rule")
-refuses("a consumer cannot take an existing scope's name",
-        lambda: R.add_consumers(FP, ["deliberativi"]), "a scope named", RulesError)
-ok(R.add_consumers(FP, [("tax", "chat")])["added"] == [],
-   "adding a consumer twice is quiet, not an error")
-
-# =====================================================================
-head("widening a rule does not touch the group")
-# =====================================================================
-
-V_BEFORE = R.history(FP, "PE-0001")["count"]
-W = R.widen(FP, "PE-0001", ["market-news"])
-ok("market-news" in W["reaches"], "PE-0001 now reaches market-news too")
-ok(R.history(FP, "PE-0001")["count"] == V_BEFORE + 1, "widening writes a version")
-ok(R._members(NAME_FP, "deliberativi") == ["advisory", "alt-funds", "architect", "tax"],
-   "the group is untouched", R._members(NAME_FP, "deliberativi"))
-
-
-def via_differs_by_consumer():
-    # `via` moved to the maintenance reading: the engine under it is shared
-    # with list_rules, so what is measured here is the same reaching logic.
-    for r in R._rules_for(NAME_FP, "market-news")["rules"]:
-        if r["id"] == "PE-0001":
-            assert r["via"] == ["market-news"], r["via"]
-    for r in R._rules_for(NAME_FP, "architect")["rules"]:
-        if r["id"] == "PE-0001":
-            assert r["via"] == ["deliberativi"], r["via"]
-
-
-case("`via` says where the rule reaches you FROM", via_differs_by_consumer)
-
-
-def widest_scope_decides_the_position():
-    ids = [x["id"] for x in R.list_rules(FP, "architect")["rules"]]
-    assert ids.index("VA-0001") < ids.index("PE-0001"), ids
-    r = [x for x in R._rules_for(NAME_FP, "architect")["rules"] if x["id"] == "PE-0001"][0]
-    assert r["breadth"] == 4
-
-
-case("a rule appears ONCE, positioned by its widest scope",
-     widest_scope_decides_the_position)
-
-ok(R.widen(FP, "PE-0001", ["market-news"])["added"] == [], "widening twice adds nothing")
-refuses("widening onto something that is not a scope",
-        lambda: R.widen(FP, "PE-0001", ["nobody"]), "neither a consumer nor a scope", RulesError)
-refuses("widening a rule that was never defined",
-        lambda: R.widen(FP, "VE-0099", ["tax"]), "never defined", RulesError)
-
-# =====================================================================
-head("history is a photograph, not a pointer")
-# =====================================================================
-
-
-def history_keeps_the_consumers_of_that_day():
-    before = [v for v in R.history(FP, "PE-0001")["versions"] if v["action"] == "created"][0]
-    assert "alt-funds" in before["consumers"]
-    R.edit_scope(FP, "deliberativi", remove=["alt-funds"])
-    after = [v for v in R.history(FP, "PE-0001")["versions"] if v["action"] == "created"][0]
-    assert after["consumers"] == before["consumers"], \
-        f"the past was rewritten: {before['consumers']} -> {after['consumers']}"
-    assert "alt-funds" in after["consumers"]
-    # and the present did move
-    assert "alt-funds" not in R._members(NAME_FP, "deliberativi")
-    assert "PE-0001" not in [x["id"] for x in R.list_rules(FP, "alt-funds")["rules"]]
-
-
-case("a version written BEFORE a scope changed still reports the consumers of then",
-     history_keeps_the_consumers_of_that_day)
-
-case("alt-funds goes back into the group",
-     lambda: R.edit_scope(FP, "deliberativi", add=["alt-funds"]))
-ok(R._breadth(NAME_FP, "deliberativi") == 4, "the group is back to four")
-
-
-def history_separates_intention_from_effect():
-    v = R.history(FP, "PE-0001")["versions"][-1]
-    assert "deliberativi" in v["scopes"], v["scopes"]
-    assert "market-news" in v["consumers"], v["consumers"]
-
-
-case("scopes says the intention, consumers says the effect",
-     history_separates_intention_from_effect)
-
-refuses("history of an ID never defined",
-        lambda: R.history(FP, "VE-98"), "never defined", RulesError)
-
-# =====================================================================
-head("citations: marked, validated, expanded")
-# =====================================================================
-
-
-def a_citation_must_be_marked():
-    """A citation is what is MARKED as one. The old pattern caught anything that
-    looked like an acronym, so prose that merely NAMED one became a reference
-    nobody wanted."""
-    body = f"This one leans on ({PE1}) and nothing else."
-    rid = R.propose(FP, "VE", "R", "Cites the method", body, ["*"], "test", "architect")["id"]
-    assert R.cx.execute("SELECT dst FROM rule_refs WHERE project=? AND src=?",
-                        (NAME_FP, rid)).fetchall()[0][0] == PE1
-    R.deny(FP, [rid], "it existed only to be parsed")
-
-
-case("a marked citation is recorded", a_citation_must_be_marked)
-
-refuses("a bare ID outside the brackets is a forgotten bracket",
-        lambda: R.propose(FP, "VE", "R", "x", f"See {PE1} for the method.", ["*"], "m", "architect"),
-        "bare ID", RulesError)
-refuses("and there is no escape hatch, not even backticks",
-        lambda: R.propose(FP, "VE", "R", "x", f"An ID looks like `{PE1}`.", ["*"], "m", "architect"),
-        "no exception", RulesError)
-
-
-def an_ordinary_parenthesis_is_ordinary_prose():
-    """This is what round brackets buy. The check hangs on the SHAPE XX-NNNN,
-    not on the bracket, so a parenthesis that holds no ID is just punctuation —
-    and the vault's own [[wiki links]] are left free for whatever they may be
-    wanted for later."""
-    body = ("Prose with (an aside), a [[vault note]], a (nested (one)) and "
-            f"a real citation ({PE1}).")
-    rid = R.propose(FP, "VE", "R", "Brackets everywhere", body, ["*"], "test", "architect")["id"]
-    assert R.cx.execute("SELECT body FROM rules WHERE project=? AND id=?",
-                        (NAME_FP, rid)).fetchone()[0] == body, "prose is left alone"
-    got = [r[0] for r in R.cx.execute(
-        "SELECT dst FROM rule_refs WHERE project=? AND src=?", (NAME_FP, rid))]
-    assert got == [PE1], got
-    R.deny(FP, [rid], "parsed, done")
-
-
-case("an ordinary parenthesis is prose, and wiki links stay free",
-     an_ordinary_parenthesis_is_ordinary_prose)
-
-
-def the_registry_never_loses_a_word():
-    """The worst thing this check could do is not refuse too much — it is to
-    accept and quietly delete. A wide gloss slot did exactly that: everything
-    after the separator was swallowed before the bare-ID scan could look at it,
-    so a body lost a pointer AND the author's sentence without a word. Now the
-    odd shapes fall through the pattern and are refused out loud."""
-    for label, body in (
-            ("a second ID smuggled into the gloss", f"Vedi ({PE1} | {VA1}) e poi altro."),
-            ("a hand-written note", f"Vedi ({PE1} — nota mia che sparirebbe)."),
-            ("an unbalanced bracket eating a paragraph",
-             f"Vedi ({PE1} — la regola\n\nSecondo paragrafo) fine."),
-            ("a closing bracket inside the gloss", f"Vedi ({PE1} — a) trappola) fine.")):
-        try:
-            R.propose(FP, "VE", "R", "x", body, ["*"], "m", "architect")
-            raise AssertionError(f"accepted, and would have eaten text: {label}")
-        except RulesError:
-            pass
-
-
-case("nothing is ever swallowed in silence", the_registry_never_loses_a_word)
-
-
-def only_the_project_s_own_domains_are_hunted():
-    """The bare-ID scan looks only for domains this project DECLARED. Chasing
-    every two-letters-and-digits token caught a URL path, a locale and a ticket
-    number — things no rewriting of the sentence can fix — and caught nothing
-    extra, because a forgotten bracket is always around a domain that exists."""
-    body = (f"Guida [qui](https://example.com/en-2024/x), ticket PR-1234, "
-            f"norma ISO-9001. Vedi ({PE1}).")
-    rid = R.propose(FP, "VE", "R", "Prose that is not a citation", body,
-                    ["*"], "test", "architect")["id"]
-    assert R.cx.execute("SELECT body FROM rules WHERE project=? AND id=?",
-                        (NAME_FP, rid)).fetchone()[0] == body
-    R.deny(FP, [rid], "parsed, done")
-
-
-case("a URL, a ticket and a standard are not IDs of this project",
-     only_the_project_s_own_domains_are_hunted)
-
-refuses("a mistyped ID of a real domain is still caught",
-        lambda: R.propose(FP, "VE", "R", "x", "Vedi VA-0001 in prosa.", ["*"], "m", "architect"),
-        "bare ID", RulesError)
-# THE ONLY ACCEPTED FORM IS FOUR DIGITS, and every other count is a relic of
-# the old Markdown corpus. One digit used to fall below the bare-ID floor and
-# five above what the citation pattern will match, so BOTH walked straight
-# through — in a bracket the five-digit one was not a citation at all and the
-# short one was silently padded onto a different rule.
-for _bad in ("VA-1", "VA-01", "VA-001", "VA-00001", "(VA-01)", "(VA-00001)"):
-    refuses(f"{_bad}: not four digits, so it is a relic",
-            lambda b=_bad: R.propose(FP, "VE", "R", "x", f"Vedi {b} qui.", ["*"],
-                                     "m", "architect"),
-            "reference sanitisation failed", RulesError)
-refuses("a citation that does not resolve: a chat cannot invent a pointer",
-        lambda: R.propose(FP, "VE", "R", "x", "See (VE-0099).", ["*"], "m", "architect"),
-        "does not resolve", RulesError)
-refuses("a lower-cased bare ID is the same forgotten bracket",
-        lambda: R.propose(FP, "VE", "R", "x", f"See {PE1.lower()} for the method.",
-                          ["*"], "m", "architect"),
-        "bare ID", RulesError)
-refuses("and so is a half-cased one",
-        lambda: R.propose(FP, "VE", "R", "x", "See Pe-0001 for the method.", ["*"], "m", "architect"),
-        "bare ID", RulesError)
-refuses("brackets around a SENTENCE are not a citation",
-        lambda: R.propose(FP, "VE", "R", "x", f"(see {PE1} for the method)", ["*"], "m", "architect"),
-        "ALONE inside round brackets", RulesError)
-
-
-def the_two_doors_agree_on_what_an_ID_looks_like():
-    """The type suffix and the case are tolerated at BOTH doors — a tolerance
-    documented in one place must not be a refusal in another. What the two
-    doors deliberately do NOT share any more is the short form: see the case
-    below."""
-    rid = R.propose(FP, "VE", "R", "Suffixed citation",
-                    f"Leans on ({PE1}-M) and on (va-0001).", ["*"], "test", "architect")["id"]
-    got = {r[0] for r in R.cx.execute(
-        "SELECT dst FROM rule_refs WHERE project=? AND src=?", (NAME_FP, rid))}
-    assert got == {PE1, "VA-0001"}, got
-    R.deny(FP, [rid], "parsed, done")
-
-
-case("the citation parser and rules_get read an ID the same way",
-     the_two_doors_agree_on_what_an_ID_looks_like)
-
-
-def you_may_only_cite_a_rule_ALREADY_APPROVED():
-    """The load-bearing refusal, and it is a decision about how the corpus is
-    built. Citing something still in the batch looks convenient and is a trap:
-    the number of a proposal is not final until it is in, so a batch whose
-    members cite each other can be approved into a state where the pointers were
-    right only while they were being written.
-
-    So the order of work is forced — file the cited rule, get it approved, then
-    file the one that cites it — and a rule that needs one that does not exist
-    yet simply waits. Nobody is writing twelve thousand rules here."""
-    pending = R.propose(FP, "VE", "R", "Not approved yet", "Body.", ["*"], "test", "architect")["id"]
-    for label, target in (("still proposed", pending),):
-        try:
-            R.propose(FP, "VE", "R", "Leaning on it", f"Builds on ({target}).", ["*"], "m", "architect")
-            raise AssertionError(f"it should have refused: {label}")
-        except RulesError as e:
-            assert "not in force yet" in str(e) and "ALREADY been approved" in str(e), e
-    # Denied is the same answer: the row is kept so the refusal stays readable,
-    # not so a later rule can build on it.
-    R.deny(FP, [pending], "the idea was refused")
-    try:
-        R.propose(FP, "VE", "R", "Leaning on it", f"Builds on ({pending}).", ["*"], "m", "architect")
-        raise AssertionError("it should have refused: denied")
-    except RulesError as e:
-        assert "not in force yet" in str(e), e
-    # And once the cited rule IS approved, the citing one goes in.
-    ok_target = R.propose(FP, "VE", "R", "Approved first", "Body.", ["*"], "test", "architect")["id"]
-    R.approve(FP, R.batch(FP)["digest"])
-    citer = R.propose(FP, "VE", "R", "Leans on an approved one",
-                      f"Builds on ({ok_target}).", ["*"], "test", "architect")["id"]
-    assert R.cx.execute("SELECT dst FROM rule_refs WHERE project=? AND src=?",
-                        (NAME_FP, citer)).fetchall()[0][0] == ok_target
-    R.deny(FP, [citer], "done")
-    R.retire(FP, ok_target, reason="done too")
-
-
-case("you may only cite a rule that is already approved",
-     you_may_only_cite_a_rule_ALREADY_APPROVED)
-
-
-def the_audit_watches_what_the_door_cannot():
-    """The door now refuses a citation towards anything not yet approved, so
-    this state can only be reached the way everything else bypasses the door: a
-    write made by hand. It still has to be REPORTED — a rule in force pointing
-    at something that never came into force is exactly the kind of defect that
-    is invisible until it blocks somebody.
-
-    And the buckets count the SOURCE only when it is in force, or a batch would
-    report the project as incoherent for citing rules that are on their way
-    in."""
-    target = R.propose(FP, "VE", "R", "Never approved", "Body.", ["*"], "test", "architect")["id"]
-    citer = R.propose(FP, "VE", "R", "Points at it", "Body without a citation.",
-                      ["*"], "test", "architect")["id"]
-    R.cx.execute("INSERT INTO rule_refs (project, src, dst) VALUES (?,?,?)",
-                 (NAME_FP, citer, target))
-    # Both are proposals: a batch on its way in is not a defect.
-    assert R.check(FP)["citations_to_proposed"] == [], R.check(FP)["citations_to_proposed"]
-    # Put only the citing one in force, by hand, and the picture changes.
-    R.cx.execute("UPDATE rules SET status='active', expires_at=? WHERE project=? AND id=?",
-                 (_plus_days(90), NAME_FP, citer))
-    v = R.check(FP)
-    assert {"from": citer, "cites": target} in v["citations_to_proposed"], v
-    assert not v["coherent"]
-    R.deny(FP, [target], "and now it is refused outright")
-    v2 = R.check(FP)
-    assert {"from": citer, "cites": target} in v2["citations_to_denied"], v2
-    assert v2["citations_to_proposed"] == []
-    R.retire(FP, citer, reason="tidy up after the audit case")
-    R.cx.execute("DELETE FROM rule_refs WHERE project=? AND src=?", (NAME_FP, citer))
-
-
-case("the audit reports what the door could not have known",
-     the_audit_watches_what_the_door_cannot)
-
-
-def reading_forgives_a_short_ID_and_writing_does_not():
-    """THE ASYMMETRY, and it is the point rather than an inconsistency.
-
-    Reading `VA-01` identifies a row that EXISTS: a person quoting from memory
-    is not putting anything into the corpus, and the padding costs nothing.
-    Writing `VA-01` into prose is the opposite — in this registry every number
-    is four digits, so a shorter one is an identifier of the old Markdown by
-    construction, and padding it used to make it point SILENTLY at a different
-    rule. The tolerance that was a kindness while the two-digit era's own
-    bodies had to keep resolving became, on a wiped registry seeded by hand,
-    the most effective way to smuggle a relic in."""
-    assert R.get_rules(FP, ["VA-01"], "architect")["found"][0]["id"] == "VA-0001"
-    assert R.get_rules(FP, ["va-001"], "architect")["found"][0]["id"] == "VA-0001"
-    try:
-        R.propose(FP, "VE", "R", "Short form", "See (VA-01).", ["*"], "test", "architect")
-        raise AssertionError("a short form went into a body")
-    except RulesError as e:
-        assert "reference sanitisation failed" in str(e), e
-    # And it is refused in the fields that are NOT a body, which is where the
-    # relics were actually living.
-    try:
-        R.propose(FP, "VE", "R", "x", "Clean body.", ["*"], "absorbs VE-05", "architect")
-        raise AssertionError("a relic went into a reason")
-    except RulesError as e:
-        assert "reference sanitisation failed in `reason`" in str(e), e
-
-
-case("reading forgives a short ID; prose never does",
-     reading_forgives_a_short_ID_and_writing_does_not)
-
-
-def a_refusal_costs_nothing_at_all():
-    """THE SANITISATION STOPS BEFORE THE DATABASE, and that is not a detail:
-    it corrects nothing, it stores nothing, and it must not spend anything
-    either. A refusal that burnt a number would make a typo permanent — the ID
-    is never reused — and one that ate a slot in the pending queue would make
-    a bad reference cost a good proposal.
-
-    Measured, not asserted: the counter and the queue are read before and
-    after, and a botched proposal moves neither."""
-    before_q = len(R.pending(FP)["waiting"])
-    before_n = R.cx.execute("SELECT IFNULL(MAX(seq), 0) FROM rules WHERE project=? "
-                            "AND domain='VE'", (NAME_FP,)).fetchone()[0]
-    for bad in (dict(body="Vedi VE-05 qui."),          # relic in the body
-                dict(reason="assorbe ST-16"),           # relic in the reason
-                dict(changelog="nato da RL-04"),        # relic in the changelog
-                dict(source="la vecchia FI-19"),        # relic in the source
-                dict(title="Fusioni (VE-03)")):         # relic in the title
-        kw = dict(title="Clean", body="Clean body.", reason="clean why",
-                  changelog="", source="")
-        kw.update(bad)
-        try:
-            R.propose(FP, "VE", "R", kw["title"], kw["body"], ["*"], kw["reason"],
-                      "architect", kw["changelog"], kw["source"])
-            raise AssertionError(f"it went in: {bad}")
-        except RulesError as e:
-            assert "reference sanitisation failed" in str(e), (bad, e)
-    after_q = len(R.pending(FP)["waiting"])
-    after_n = R.cx.execute("SELECT IFNULL(MAX(seq), 0) FROM rules WHERE project=? "
-                           "AND domain='VE'", (NAME_FP,)).fetchone()[0]
-    assert (before_q, before_n) == (after_q, after_n), \
-        f"a refusal spent something: queue {before_q}->{after_q}, counter {before_n}->{after_n}"
-
-
-case("a refused reference spends no number and no slot in the queue",
-     a_refusal_costs_nothing_at_all)
-
-
-def the_sanitisation_reaches_every_door():
-    """ANYWHERE means anywhere. Each of these was a door a relic could walk
-    through while the body-only check stood at the front. Found by injection:
-    taking the sanitisation off the briefs and off the task log left the whole
-    suite green, which is the definition of a guarantee nobody was measuring."""
-    # A consumer's BRIEF — read at the head of every rules_list that consumer
-    # makes, so a relic there is the first thing a role reads all session.
-    try:
-        R.add_consumers(FP, [{"name": "architect", "brief": "vedi VE-05 per il resto"}])
-        raise AssertionError("a relic went into a brief")
-    except RulesError as e:
-        assert "reference sanitisation failed in `brief of" in str(e), e
-    # A DOMAIN's gloss.
-    try:
-        R.add_domains(FP, {"VA": "vault, come da ST-16"})
-        raise AssertionError("a relic went into a domain gloss")
-    except RulesError as e:
-        assert "reference sanitisation failed in `gloss of VA`" in str(e), e
-    # A PROJECT being born: no domain is declared yet and no rule can resolve,
-    # so only the short-form half can fire — and it does.
-    try:
-        R.create_project("Relic bench", [{"name": "a", "brief": "vedi VE-05"}], {})
-        raise AssertionError("a relic went in at creation")
-    except RulesError as e:
-        assert "reference sanitisation failed" in str(e), e
-case("the sanitisation reaches the briefs, the glosses and a project being born",
-     the_sanitisation_reaches_every_door)
-
-
-def a_kind_is_declared_repaired_and_never_written_in_silence():
-    """THE FIELD NEXT DOOR TO THE GLOSS, and it had the same defect: on a
-    consumer that already existed the kind was dropped without a word. A skill
-    entered as a chat could then only be repaired by creating a new consumer
-    and abandoning the old — which orphans every rule aimed at it, so a typo
-    cost a piece of the corpus.
-
-    Three properties, and the third is the one that makes the fix safe."""
-    out = R.add_consumers(FP, ["Plain One", {"name": "A Skill", "kind": "SKILL"}])
-    assert out["added_kinds"] == {"Plain One": "chat", "A Skill": "skill"}, out
-    # A bare name is a chat, and the case of the KIND is not data: a closed
-    # set of two written three ways is one value, unlike a NAME, which is the
-    # author's and comes back byte for byte.
-    assert "A Skill" in out["added"], out
-    # THE REPAIR: an explicit kind on an existing consumer corrects it, says
-    # so, and the trigger versions it.
-    out = R.add_consumers(FP, [{"name": "plain one", "kind": "skill"}])
-    assert out["kind_set"] == ["Plain One: chat -> skill"], out
-    assert out["already_there"] == [], out
-    v = [r[0] for r in R.cx.execute(
-        "SELECT kind FROM consumer_versions WHERE project=? AND consumer='Plain One' "
-        "ORDER BY version", (NAME_FP,))]
-    assert v == ["chat", "skill"], v
-    # AND THE SILENT WRITE, INVERTED: a bare name says NOTHING about the kind,
-    # so naming an existing skill in a plain list must not demote it back.
-    out = R.add_consumers(FP, ["Plain One"])
-    assert out["kind_set"] == [] and out["already_there"] == ["Plain One"], out
-    assert R.cx.execute("SELECT kind FROM consumers WHERE project=? AND name='Plain One'",
-                        (NAME_FP,)).fetchone()[0] == "skill", "a bare name demoted a skill"
-    for bad in ("robot", "Chat "):
-        try:
-            R.add_consumers(FP, [{"name": "Plain One", "kind": bad}])
-            if bad.strip().lower() not in ("chat", "skill"):
-                raise AssertionError(f"kind {bad!r} was accepted")
-        except RulesError as e:
-            assert "it must be one of" in str(e) and "chat" in str(e) and "skill" in str(e), e
-
-
-case("a kind is declared on creation, repairable after it, and never written "
-     "in silence", a_kind_is_declared_repaired_and_never_written_in_silence)
-
-
-
-
-def reading_expands_the_citation():
-    """The gloss is GENERATED, never stored: it cannot go stale, and it carries
-    the STATE of what it points at."""
-    body = f"Leans on ({PE1})."
-    rid = R.propose(FP, "VE", "R", "Reads expanded", body, ["*"], "test", "architect")["id"]
-    stored = R.cx.execute("SELECT body FROM rules WHERE project=? AND id=?",
-                          (NAME_FP, rid)).fetchone()[0]
-    assert stored == body, "only the pointer is stored"
-    shown = [x for x in R.pending(FP)["waiting"] if x["id"] == rid][0]["body"]
-    assert shown == f"Leans on ({PE1} — The method of the four).", shown
-    # A title carrying a bracket would otherwise produce a citation the parser
-    # cannot take back — and the refusal would blame the author for text the
-    # registry generated. The brackets are neutralised inside the gloss.
-    v = R._version(NAME_FP, PE1)
-    R.amend(FP, PE1, v, reason="a title with brackets in it",
-            title="The method of the four (as amended)")
-    risky = [x for x in R.pending(FP)["waiting"] if x["id"] == rid][0]["body"]
-    assert "(as amended)" not in risky and "[as amended]" in risky, risky
-    R.amend(FP, rid, R._version(NAME_FP, rid), reason="paste back a bracketed gloss",
-            body=risky)
-    assert R.cx.execute("SELECT dst FROM rule_refs WHERE project=? AND src=?",
-                        (NAME_FP, rid)).fetchall()[0][0] == PE1
-    R.amend(FP, PE1, R._version(NAME_FP, PE1), reason="put the title back",
-            title="The method of the four")
-    # And it comes straight back in: the expanded form is accepted, and what is
-    # STORED is the bare pointer again. Storing the gloss would be the whole
-    # point thrown away — a title changed tomorrow would leave a stale copy of
-    # itself inside somebody else's rule, which is the staleness of an export
-    # but inside the authoritative source.
-    R.approve(FP, R.batch(FP)["digest"])
-    R.amend(FP, rid, R._version(NAME_FP, rid), reason="pasted back as read", body=shown)
-    assert R.cx.execute("SELECT body FROM rules WHERE project=? AND id=?",
-                        (NAME_FP, rid)).fetchone()[0] == body, "the gloss is NOT stored"
-    assert R.cx.execute("SELECT dst FROM rule_refs WHERE project=? AND src=?",
-                        (NAME_FP, rid)).fetchall()[0][0] == PE1
-    # Pasting back what you read is therefore a no-op on the text, which is why
-    # amend does not treat it as a body change at all.
-    assert R.amend(FP, rid, R._version(NAME_FP, rid), reason="same text again",
-                   body=shown)["cites"] == "unchanged"
-    R.retire(FP, rid, reason="it had done its job")
-    # A pointer at a retired rule arrives already marked as such, in the text.
-    other = R.propose(FP, "VE", "R", "Points at the retired one",
-                      f"Still points at ({rid}).", ["*"], "test", "architect")["id"]
-    seen = [x for x in R.pending(FP)["waiting"] if x["id"] == other][0]["body"]
-    assert "· retired" in seen, seen
-    R.deny(FP, [other], "done")
-
-
-case("reading expands with the current title, and marks the state",
-     reading_expands_the_citation)
-
-
-def the_ceiling_is_measured_on_WHAT_IS_STORED():
-    """Dropping a gloss makes a body SMALLER, so a body that arrives over the
-    ceiling can be under it once stored. Measuring the text as it arrived would
-    refuse a rule that fits — the same rule answered two ways depending on
-    which form you happened to paste.
-
-    ⚠ It used to cut the other way too: a short citation was padded, so the
-    stored form could be BIGGER than what arrived. That half died with the
-    sanitisation — a short form is refused now, not padded — and the guarantee
-    is the same one either way: the ceiling is about what goes into the
-    database."""
-    # The gloss has to be the REAL one: anything else is refused by the door
-    # that stops a registry losing an author's words.
-    gloss = f"({VA1}{GLOSS_SEP}{R._gloss(R._row(NAME_FP, VA1))}) "
-    unit = f"({VA1}) "
-    n = (MAX_BODY_BYTES // len(unit)) - 10
-    fat = gloss * n
-    assert len(fat.encode()) > MAX_BODY_BYTES > len(R._compact(fat).encode()), \
-        "the bench body must arrive over the ceiling and store under it"
-    out = R.propose(FP, "VA", "R", "Thin once compacted", fat, ["*"], "m", "architect")
-    stored = R.cx.execute("SELECT body FROM rules WHERE project=? AND id=?",
-                          (NAME_FP, out["id"])).fetchone()[0]
-    assert len(stored.encode()) <= MAX_BODY_BYTES
-    assert GLOSS_SEP not in stored, "the gloss was stored instead of dropped"
-    R.deny(FP, [out["id"]], "parsed, done")
-
-
-case("the body ceiling is measured after compaction, not before",
-     the_ceiling_is_measured_on_WHAT_IS_STORED)
-
-# =====================================================================
-head("amending: same ID, a defect fixed")
-# =====================================================================
-
-
-def a_broken_pointer_can_only_get_in_BY_HAND():
-    """The door refuses an unresolved citation, so the only way one exists is a
-    write made with sqlite3 as root — which is the documented exception, and the
-    reason rules_check still has to look. This is that write."""
-    R.cx.execute("UPDATE rules SET body=? WHERE project=? AND id=?",
-                 ("SOURCE data is re-read right before writing the derivative. "
-                  "See (ST-0007).", NAME_FP, "VA-0001"))
-    R.cx.execute("INSERT OR IGNORE INTO rule_refs (project, src, dst) VALUES (?,?,?)",
-                 (NAME_FP, "VA-0001", "ST-0007"))
-    R.cx.execute("UPDATE rules SET body=? WHERE project=? AND id=?",
-                 ("The bracket is estimated from the rollup by character. "
-                  "Cross-check with (VE-0090).", NAME_FP, "FI-0001"))
-    R.cx.execute("INSERT OR IGNORE INTO rule_refs (project, src, dst) VALUES (?,?,?)",
-                 (NAME_FP, "FI-0001", "VE-0090"))
-
-
-case("two dangling pointers written by hand, bypassing the door",
-     a_broken_pointer_can_only_get_in_BY_HAND)
-
-BROKEN_AT = R._version(NAME_FP, "VA-0001")
-
-
-def check_finds_the_broken_pointer():
-    v = R.check(FP)
-    assert {"from": "VA-0001", "cites": "ST-0007"} in v["broken_pointers"], v["broken_pointers"]
-    assert not v["coherent"]
-    assert R.check(HT)["broken_pointers"] == [], "references do not spill between projects"
-
-
-case("check finds ST-0007 broken, and stays inside the project",
-     check_finds_the_broken_pointer)
-
-
-def the_expansion_does_not_blow_up_on_a_dangling_pointer():
-    """A reading path that can fail is a reading path that will. The expansion
-    marks it and carries on."""
-    shown = R.get_rules(FP, "VA-0001", "tax")["found"][0]["body"]
-    assert "never defined" in shown, shown
-
-
-case("a dangling pointer is MARKED on reading, not raised",
-     the_expansion_does_not_blow_up_on_a_dangling_pointer)
-
-
-def amend_rewrites_the_refs():
-    # The version number is administration now: a consumer reading has no
-    # `version` field, so the maintainer reads it where maintenance reads.
-    v = R._version(NAME_FP, "VA-0001")
-    R.amend(FP, "VA-0001", v, reason="dropped the broken pointer",
-            body="SOURCE data is re-read right before writing the derivative.")
-    assert R._version(NAME_FP, "VA-0001") == v + 1
-    broken = R.check(FP)["broken_pointers"]
-    assert {"from": "VA-0001", "cites": "ST-0007"} not in broken
-    assert {"from": "FI-0001", "cites": "VE-0090"} in broken, "the others stay"
-
-
-case("amend: a new version, and the citations recomputed", amend_rewrites_the_refs)
-
-refuses("rules_fix cannot let in what propose refuses",
-        lambda: R.amend(FP, "VA-0001", R._version(NAME_FP, "VA-0001"),
-                        reason="m", body="See (VE-0099)."),
-        "does not resolve", RulesError)
-
-refuses("a stale version is refused (compare-and-swap)",
-        lambda: R.amend(FP, "VA-0001", 1, reason="m", body="z"), "someone wrote", RulesError)
-refuses("amend without a reason",
-        lambda: R.amend(FP, "VA-0001", R._version(NAME_FP, "VA-0001"), reason=""),
-        "reason is mandatory", RulesError)
-refuses("amend an ID never defined",
-        lambda: R.amend(FP, "VE-97", 1, reason="m"), "never defined", RulesError)
-
-
-def history_reads_like_a_story():
-    s = R.history(FP, "VA-0001")
-    actions = [x["action"] for x in s["versions"]]
-    assert actions[0] == "created" and "amended" in actions, actions
-    assert s["versions"][-1]["reason"] == "dropped the broken pointer"
-
-
-case("history: the actions and the reasons are the right ones", history_reads_like_a_story)
-
-
-def compare_shows_what_changed():
-    n = R.history(FP, "VA-0001")["count"]
-    c = R.compare(FP, "VA-0001", BROKEN_AT, n)
-    assert "ST-0007" in c["diff"] and not c["identical"]
-    assert R.compare(FP, "VA-0001", n, n)["identical"]
-
-
-case("compare: the diff shows what moved", compare_shows_what_changed)
-
-refuses("comparing against a version that does not exist",
-        lambda: R.compare(FP, "VA-0001", 1, 99), "does not exist", RulesError)
-
-# =====================================================================
-head("reading: three different answers, and no oracle")
-# =====================================================================
-
-ok(R.get_rules(FP, "FI-0001", "tax")["found"][0]["id"] == "FI-0001", "your own rule: you read it")
-ok(R.get_rules(FP, "FI-0001-M", "tax")["found"][0]["id"] == "FI-0001",
-   "a citation carrying the type suffix is tolerated")
-
-
-def three_answers_kept_apart():
-    g = R.get_rules(FP, ["VA-0001", "FI-0001", "VE-0099"], "market-news")
-    assert [x["id"] for x in g["found"]] == ["VA-0001"]
-    assert g["not_yours"][0]["id"] == "FI-0001" and "tax" in g["not_yours"][0]["held_by"]
-    assert g["never_defined"] == ["VE-0099"]
-    assert "BROKEN CITATION" in g["warning"]
-
-
-case("found · not_yours · never_defined, one call", three_answers_kept_apart)
-
-
-def no_oracle_across_projects():
-    g = R.get_rules(HT, ["FI-0001"], "coach")      # FI-0001 exists, but in the other project
-    assert g["never_defined"] == ["FI-0001"]
-    assert "Financial" not in repr(g), f"ORACLE: {g}"
-
-
-case("an ID that exists in ANOTHER project is not revealed", no_oracle_across_projects)
-
-refuses("asking for no ID at all",
-        lambda: R.get_rules(FP, [], "tax"), "no ID asked for", RulesError)
-refuses("more IDs than the ceiling",
-        lambda: R.get_rules(FP, [f"VA-{i:03d}" for i in range(MAX_GET_IDS + 1)], "tax"),
-        "the ceiling is", RulesError)
-refuses("a consumer left blank",
-        lambda: R.list_rules(FP, ""), "consumer not specified", RulesError)
-
-
-def search_stays_inside_perimeter_and_project():
-    s = R.search(FP, "bracket", "tax")
-    assert s["count"] == 1 and s["hits"][0]["id"] == "FI-0001"
-    s2 = R.search(FP, "bracket", "market-news")
-    assert s2["count"] == 0 and s2["outside_your_scope"] == 1, s2
-    assert R.search(HT, "bracket", "coach")["count"] == 0, "no spill between projects"
-
-
-case("search stays inside the perimeter AND the project",
-     search_stays_inside_perimeter_and_project)
-
-refuses("a one-character search",
-        lambda: R.search(FP, "a", "tax"), "at least two characters", RulesError)
-
-# =====================================================================
-head("denial: the registry remembers the refusals")
-# =====================================================================
-
-DUP = R.propose(FP, "FI", "R", "Duplicate", f"Says the same as ({FI1}).",
-                ["tax"], "worth a try", "tax")["id"]
-ok(DUP == "FI-0002", "the duplicate takes the next number of its domain", DUP)
-case("denial needs no signature — refusing cannot do harm",
-     lambda: R.deny(FP, [DUP], "single case, not a pattern"))
-
-
-def the_guard_on_denied_IDs_is_gone_and_that_is_the_deal():
-    """It used to be impossible to re-file a denied ID. That guard worked
-    BECAUSE the ID was yours to choose: with the counter, the same text filed
-    again simply takes a new number and goes through. Accepted with eyes open —
-    the risk is not bad faith but a chat that does not KNOW, and it already has
-    the information: rules_pending shows its own refusals with the reason. The
-    guard went from an obligation to a reminder."""
-    again = R.propose(FP, "FI", "R", "Duplicate", "Filed again, knowingly.",
-                      ["tax"], "proving the guard is gone", "tax")["id"]
-    assert again == "FI-0003", again
-    mine = R.pending(FP, "tax")
-    assert [d["id"] for d in mine["denied"]] == [DUP], mine["denied"]
-    assert mine["denied"][0]["denied_reason"].startswith("single case")
-    R.deny(FP, [again], "and denied again, on purpose")
-
-
-case("the denied-ID guard is gone, and the noticeboard carries the weight",
-     the_guard_on_denied_IDs_is_gone_and_that_is_the_deal)
-
-refuses("denying without a reason",
-        lambda: R.deny(FP, ["VA-0001"], ""), "say why", RulesError)
-refuses("denying something that is not a proposal",
-        lambda: R.deny(FP, ["VA-0001"], "because"), "not a pending proposal", RulesError)
-refuses("denying an ID that does not exist",
-        lambda: R.deny(FP, ["VE-96"], "because"), "no such proposal", RulesError)
-
-
-def the_noticeboard_replaces_the_chat_memory():
-    p = R.pending(FP, "tax")
-    assert len(p["denied"]) == 2, p["denied"]
-    assert any(d["denied_reason"].startswith("single case") for d in p["denied"])
-    assert p["waiting"] == []
-
-
-case("the noticeboard shows the denial WITH its reason",
-     the_noticeboard_replaces_the_chat_memory)
-
-# =====================================================================
-head("expiry, renewal, promotion")
-# =====================================================================
-
-
-def an_expired_provisional_leaves_by_itself():
-    R.cx.execute("UPDATE rules SET expires_at=? WHERE project=? AND id='FI-0001'",
-                 ("2020-01-01T00:00:00Z", NAME_FP))
-    assert "FI-0001" not in [x["id"] for x in R.list_rules(FP, "tax")["rules"]]
-    assert R.status(FP)["rules"]["expired_not_retired"] == 1
-
-
-case("an expired provisional leaves the lists on its own",
-     an_expired_provisional_leaves_by_itself)
-
-
-def renewal_brings_it_back():
-    out = R.renew(FP, ["FI-0001"])
-    assert out["renewed"] == ["FI-0001"] and out["expires_at"]
-    assert "FI-0001" in [x["id"] for x in R.list_rules(FP, "tax")["rules"]]
-
-
-case("renew brings it back, with a fresh expiry", renewal_brings_it_back)
-
-refuses("renewing a rule that is not active",
-        lambda: R.renew(FP, ["FI-0002"]),
-        "not an active rule", RulesError)
-refuses("renewing nothing", lambda: R.renew(FP, []), "no ID to renew", RulesError)
-
-
-def promotion_makes_it_permanent():
-    out = R.promote(FP, ["VA-0001"])
-    row = R._row(NAME_FP, "VA-0001")
-    assert out["promoted"] == ["VA-0001"]
-    assert row["permanence"] == "permanent" and row["expires_at"] is None
-
-
-case("promote: permanent, no expiry", promotion_makes_it_permanent)
-
-refuses("promoting a rule that is not active",
-        lambda: R.promote(FP, ["FI-0002"]), "not an active rule", RulesError)
-
-
-def expiry_is_readable_for_one_rule():
-    """Born in C5: the UI's detail page used to DECLARE that no method handed
-    out the expiry of a rule chosen at will. Now one does — a reading, while
-    the deciding stays on the expiring queue."""
-    e = R.expiry(FP, "VA-0001")
-    assert e["permanence"] == "permanent" and e["expires_at"] is None
-    assert e["in_force"] is True
-    e2 = R.expiry(FP, "PE-0001")
-    assert e2["expires_at"], e2
-    assert e2["status"] == "active"
-
-
-case("the expiry of ONE rule is readable, at last", expiry_is_readable_for_one_rule)
-
-refuses("expiry of a rule never defined",
-        lambda: R.expiry(FP, "VA-0099"), "never defined", RulesError)
-
-
-def the_noticeboard_warns_before_the_expiry():
-    R.cx.execute("UPDATE rules SET expires_at=? WHERE project=? AND id='PE-0001'",
-                 (_plus_days(10), NAME_FP))
-    p = R.pending(FP, "architect")
-    assert [x["id"] for x in p["expiring_within_30_days"]] == ["PE-0001"], p["expiring_within_30_days"]
-    R.renew(FP, ["PE-0001"])
-    assert R.pending(FP, "architect")["expiring_within_30_days"] == []
-
-
-case("the noticeboard lists what expires within 30 days",
-     the_noticeboard_warns_before_the_expiry)
-
-# =====================================================================
-head("retiring: out of the lists, still resolvable")
-# =====================================================================
-
-
-FI_NEW = R.propose(FP, "FI", "M", "Estimating the bracket (rev)", "New method.",
-                   ["tax"], "superseded decision: the first one underestimated", "architect")["id"]
-ok(FI_NEW == "FI-0004",
-   "the successor takes the next number: the denied ones are spent", FI_NEW)
-
-
-def retire_with_a_successor():
-    b = R.batch(FP)
-    R.approve(FP, b["digest"])
-    # The reason names the heir the ONLY way a reference may be written now:
-    # inside round brackets, four digits. Bare, it is a forgotten bracket and
-    # the sanitisation refuses it — in a `reason`, which is immutable, that
-    # refusal is the last chance anybody gets.
-    out = R.retire(FP, FI1, reason=f"superseded by ({FI_NEW})", superseded_by=FI_NEW)
-    assert out["superseded_by"] == FI_NEW
-    assert FI1 not in [x["id"] for x in R.list_rules(FP, "tax")["rules"]]
-    assert R.get_rules(FP, FI1, "tax")["found"][0]["status"] == "retired", \
-        "by ID it still resolves: citations must keep working"
-
-
-case("retire + superseded_by: out of the active list, still there by ID",
-     retire_with_a_successor)
-
-
-def a_retired_number_is_not_handed_out_again():
-    """The old suite proved this by trying to re-file the ID. There is no such
-    move any more, so the proof moved to where the decision now lives: the
-    counter."""
-    nxt = R.propose(FP, "FI", "R", "After the retirement", "Body.", ["tax"], "m", "architect")["id"]
-    assert nxt == "FI-0005", nxt
-    R.deny(FP, [nxt], "done")
-
-
-case("the counter walks past a retired number, it does not fill it",
-     a_retired_number_is_not_handed_out_again)
-
-refuses("retiring twice",
-        lambda: R.retire(FP, FI1, reason="m"), "already retired", RulesError)
-
-
-def a_successor_must_be_approved_too():
-    """superseded_by is the one pointer the supersede workflow depends on, and
-    it is NOT written to rule_refs — so no audit ever comes back to it. If it
-    could point at a proposal, a retired rule would end up claiming a successor
-    that was later denied, for good and in silence. Same rule as a citation,
-    checked in the only place it can be."""
-    unborn = R.propose(FP, "FI", "M", "Never approved successor", "Body.",
-                       ["tax"], "test", "architect")["id"]
-    victim = R.propose(FP, "FI", "M", "To be retired", "Body.", ["tax"], "test", "architect")["id"]
-    R.approve(FP, R.batch(FP)["digest"])
-    # (the batch above approved both; put one back to 'proposed' by hand so the
-    # case is about the check and not about the batch)
-    R.cx.execute("UPDATE rules SET status='proposed' WHERE project=? AND id=?",
-                 (NAME_FP, unborn))
-    try:
-        R.retire(FP, victim, reason="m", superseded_by=unborn)
-        raise AssertionError("it should have refused")
-    except RulesError as e:
-        assert "has not been approved yet" in str(e), e
-    try:
-        R.retire(FP, victim, reason="m", superseded_by=victim)
-        raise AssertionError("it should have refused")
-    except RulesError as e:
-        assert "cannot supersede itself" in str(e), e
-    R.deny(FP, [unborn], "done")
-    R.retire(FP, victim, reason="retired without a successor")
-
-
-case("a successor must already be approved, and cannot be the rule itself",
-     a_successor_must_be_approved_too)
-refuses("retiring without a reason",
-        lambda: R.retire(FP, "PE-0001", reason=""), "reason is mandatory", RulesError)
-refuses("superseded_by pointing at nothing",
-        lambda: R.retire(FP, "PE-0001", reason="m", superseded_by="FI-0099"),
-        "does not exist", RulesError)
-refuses("retiring an ID never defined",
-        lambda: R.retire(FP, "VE-95", reason="m"), "never defined", RulesError)
-
-
-def check_sees_citations_to_a_retired_rule():
-    v = R.check(FP)
-    assert {"from": FI_NEW, "cites": FI1} not in v["citations_to_retired"], \
-        f"{FI_NEW} does not cite {FI1}"
-    R.amend(FP, FI_NEW, R._version(NAME_FP, FI_NEW), reason="cite the ancestor",
-            body=f"New method. Supersedes ({FI1}).")
-    v2 = R.check(FP)
-    assert {"from": FI_NEW, "cites": FI1} in v2["citations_to_retired"], v2
-
-
-case("check flags an active rule citing a retired one",
-     check_sees_citations_to_a_retired_rule)
-
-# =====================================================================
-head("narrowing, and a rule left with no perimeter")
-# =====================================================================
-
-
-ORPHAN = R.propose(FP, "VE", "R", "Orphan to be", "Only here to be narrowed to nothing.",
-                   ["market-news"], "test", "architect")["id"]
-
-
-def narrow_to_nothing_is_reported():
-    b = R.batch(FP)
-    R.approve(FP, b["digest"])
-    out = R.narrow(FP, ORPHAN, ["market-news"])
-    assert out["scopes"] == [] and "reaches nobody" in out["warning"]
-    assert ORPHAN in R.check(FP)["rules_without_perimeter"]
-    R.widen(FP, ORPHAN, ["market-news"])            # put it back
-    assert R.check(FP)["rules_without_perimeter"] == []
-
-
-case("narrowed to nothing: the tool warns and the audit lists it",
-     narrow_to_nothing_is_reported)
-
-ok(R.narrow(FP, ORPHAN, ["tax"])["removed"] == [],
-   "removing a scope that was not there is quiet")
-
-# =====================================================================
-head("the audit: redundancy candidates, and one report that is GONE")
-# =====================================================================
-
-
-def numbering_gaps_are_gone_for_good():
-    """The report is not fixed, it is DELETED. With the counter a gap cannot
-    happen — it does not skip, and retiring leaves the row in place — so any gap
-    the old code reported would have been a choice, not a loss. A check that
-    cannot tell a fault from a choice is a line you learn to skip, and the day
-    it says something true you have already stopped reading it."""
-    v = R.check(FP)
-    assert "numbering_gaps" not in v, sorted(v)
-    seqs = sorted(r[0] for r in R.cx.execute(
-        "SELECT seq FROM rules WHERE project=? AND domain='VA'", (NAME_FP,)))
-    assert seqs == list(range(1, len(seqs) + 1)), seqs
-
-
-case("numbering_gaps is gone, and the numbering has none to report",
-     numbering_gaps_are_gone_for_good)
-
-TWIN_A = TWIN_B = ""
-
-
-def redundancy_is_a_suspicion_not_a_verdict():
-    global TWIN_A, TWIN_B
-    TWIN_A = R.propose(FP, "ST", "R", "One", f"Body one, see ({VA1}).",
-                       ["market-news"], "test", "architect")["id"]
-    TWIN_B = R.propose(FP, "ST", "R", "Two", f"Body two, see ({VA1}).",
-                       ["market-news"], "test", "architect")["id"]
-    b = R.batch(FP)
-    R.approve(FP, b["digest"])
-    pairs = [c["pair"] for c in R.check(FP)["redundancy_candidates"]]
-    assert [TWIN_A, TWIN_B] in pairs, pairs
-
-
-case("two rules, same perimeter, same citations: a candidate pair",
-     redundancy_is_a_suspicion_not_a_verdict)
-
-# =====================================================================
-head("the triggers hold even against a hand at the sqlite3 prompt")
-# =====================================================================
-
-
-def a_manual_delete_still_lands_in_history():
-    R.cx.execute("DELETE FROM rules WHERE project=? AND id=?", (NAME_FP, TWIN_B))
-    assert R.history(FP, TWIN_B)["versions"][-1]["action"] == "DELETED"
-
-
-case("a DELETE by hand is recorded anyway", a_manual_delete_still_lands_in_history)
-
-
-def a_dropped_trigger_is_rebuilt_AND_declared():
-    """A vanished trigger raises no error: it just stops writing history. So the
-    repair is announced, or nobody would ever learn it happened."""
-    R.close()
-    cx = sqlite3.connect(DB)
-    cx.execute("DROP TRIGGER trg_rules_upd")
-    cx.commit()
-    cx.close()
-    r2 = Registry(DB)
-    assert "trg_rules_upd" in r2.repaired, r2.repaired
-    assert r2.status(FP)["repaired_at_open"] == ["trg_rules_upd"]
-    r2.close()
-
-
-case("a trigger dropped by hand is rebuilt, and the repair is DECLARED",
-     a_dropped_trigger_is_rebuilt_AND_declared)
-
-R = Registry(DB, provisional_days=90, pending_cap=100)
-ok(R.repaired == [], "a clean reopen repairs nothing")
-
-# =====================================================================
-head("projects stay apart")
-# =====================================================================
-
-
-def same_id_two_projects_two_histories():
-    twin = R.propose(HT, "VA", "R", "Namesake but different", "Body of Health Tracking.",
-                     ["*"], "initial import", "architect")["id"]
-    assert twin == VA1, "each project counts on its own, from one"
-    b = R.batch(HT)
-    R.approve(HT, b["digest"])
-    assert R._row(NAME_HT, "VA-0001")["title"] == "Namesake but different"
-    assert R._row(NAME_FP, "VA-0001")["title"] == "Re-read the sources"
-    assert R.history(HT, "VA-0001")["count"] < R.history(FP, "VA-0001")["count"]
-
-
-case("the same ID lives in two projects with two histories",
-     same_id_two_projects_two_histories)
-
-ok(R.project_info(HT)["scopes"][0]["breadth"] == 2, "_ALL_ is counted per project")
-refuses("the other project's consumer does not exist here",
-        lambda: R.list_rules(HT, "tax"), "unknown consumer", RulesError)
-refuses("a wrong code answers like a missing one",
-        lambda: R.project_info("Xxxxxxxxxxx"), "project not specified", RulesError)
-
-
-def new_domain_and_consumer_work_at_once():
-    R.add_domains(HT, {"AL": "food"})
-    R.add_consumers(HT, [("nutritionist", "chat")])
-    fresh = R.propose(HT, "AL", "R", "New domain", "Body.", ["nutritionist"], "test", "architect")["id"]
-    assert fresh == "AL-0001", "a domain born later starts its own counter at one"
-    b = R.batch(HT)
-    R.approve(HT, b["digest"])
-    assert [x["id"] for x in R.list_rules(HT, "nutritionist")["rules"]] == [VA1, fresh]
-
-
-case("a domain and a consumer added later work immediately",
-     new_domain_and_consumer_work_at_once)
-
-ok(R.add_domains(HT, {"AL": "food again"})["added"] == [], "adding a domain twice is quiet")
-refuses("a malformed domain added later",
-        lambda: R.add_domains(HT, {"food": ""}), "two uppercase", RulesError)
-
-
-def all_aliases_all_mean_all():
-    for i, alias in enumerate(["_all_", "*", "all", "tutti", "chiunque"], start=1):
-        rid = R.propose(HT, "MS", "F", f"Universal via {alias}", "Binds everyone.",
-                        [alias], "test", "architect")["id"]
-        assert rid == f"MS-{i:04d}", (alias, rid)
-        assert R._scopes_of(NAME_HT, rid) == [ALL], alias
-    b = R.batch(HT)
-    R.approve(HT, b["digest"])
-
-
-case("_ALL_ and its aliases all land on the same scope", all_aliases_all_mean_all)
-
-
-def rekey_regenerates_the_pair():
-    """Rekey GENERATES — code and key together, one receipt, same format as
-    create. It used to take the new code from the caller: that was the one
-    place left where a credential was a person's invention."""
-    global HT, HT_KEY
-    out = R.rekey_project(HT)
-    assert out["code"] != HT and len(out["code"]) == 16, out["code"]
-    assert len(out["architect_key"]) == 24
-    try:
-        R.list_rules(HT, "coach")
-        raise AssertionError("the old code should be dead")
-    except RulesError as e:
-        assert "project not specified" in str(e)
-    try:
-        R.check_architect(out["code"], HT_KEY)
-        raise AssertionError("the old key should be dead")
-    except RulesError as e:
-        assert "maintenance refused" in str(e)
-    HT, HT_KEY = out["code"], out["architect_key"]
-    assert R.list_rules(HT, "coach")["project"] == NAME_HT
-    assert R.check_architect(HT, HT_KEY) == NAME_HT
-
-
-case("rekey regenerates the PAIR: old code and old key both die, the rules stay",
-     rekey_regenerates_the_pair)
-
-# =====================================================================
-head("a third project, seeded the only way left: one rule at a time")
-# =====================================================================
-
-# There is no bulk door any more. What a migration used to get from
-# import_rules — active rules in a fresh project — now takes the same three
-# calls as any other rule: propose, batch, approve. That is the point, not a
-# regression: the pass over the corpus IS the migration.
-
-
-def a_project_is_seeded_by_proposing():
-    global CASA
-    CASA = R.create_project(NAME_CASA, [("architect", "chat")],
-                            {"CA": "house"})["code"]
-    rid = R.propose(CASA, "CA", "R", "First of the house", "Body of the house.",
-                    ["architect"], "seeded by hand", "architect")["id"]
-    assert rid == "CA-0001", rid
-    R.approve(CASA, R.batch(CASA)["digest"])
-    row = R._row(NAME_CASA, rid)
-    assert row["status"] == "active" and row["permanence"] == "provisional"
-    assert row["expires_at"], "a seeded rule expires like any other: rule five applies"
-    assert R.list_rules(CASA, "architect")["count"] == 1
-
-
-case("a fresh project fills through propose/approve, and rule five applies",
-     a_project_is_seeded_by_proposing)
-
-EMPTY = R.create_project("Empty", [("architect", "chat")], {"CA": "house"})["code"]
-ok(True, "an empty project stays possible, and empty")
-
-# =====================================================================
-head("the signature is gone, and the digest stays")
-# =====================================================================
-
-# The signature was the clumsy way of letting a PERSON in instead of a chat;
-# the admin UI solves that at the root, and keeping it would be ceremony
-# (decided 2026-08-10). THE DIGEST IS NOT THE SIGNATURE'S: it is the check
-# that you approve the batch you READ, and it stays — proved above, where a
-# stale digest is refused. With the signature went the grace window: there is
-# no unsigned state left to record, so there is nothing for a date to permit.
-
-
-def no_write_takes_a_signature():
-    """The guarantee is an ABSENCE, so it is proved from the outside: no
-    lifecycle method has a parameter that could carry a signature."""
-    import inspect
-    for name in ("approve", "renew", "promote"):
-        params = list(inspect.signature(getattr(R, name)).parameters)
-        assert "signature" not in params, f"{name}() still takes a signature: {params}"
-
-
-case("approve, renew and promote have no way to receive a signature",
-     no_write_takes_a_signature)
-
-
-def the_approvals_table_records_no_signature():
-    cols = {r[1] for r in R.cx.execute("PRAGMA table_info(approvals)")}
-    assert "signature" not in cols, f"approvals still records a signature: {sorted(cols)}"
-    assert "signed" not in cols, f"approvals still records signed/unsigned: {sorted(cols)}"
-    # What it DOES record: what was let in and when, one row per approval.
-    rows = R.cx.execute("SELECT n_rules, rule_ids FROM approvals WHERE project=?",
-                        (NAME_FP,)).fetchall()
-    assert rows, "no approval was recorded at all"
-    first = [r for r in rows if "VA-0001" in r["rule_ids"]]
-    assert first and first[0]["n_rules"] == 4, [dict(r) for r in rows]
-
-
-case("the approvals table records what was let in, and no signature",
-     the_approvals_table_records_no_signature)
-
-
-def the_engine_has_no_verifier_and_no_grace():
-    import rules as _r
-    assert not hasattr(_r, "verify_signature"), "verify_signature is still in the engine"
-    assert not hasattr(R, "in_grace"), "in_grace() is still on the Registry"
-    assert not hasattr(R, "_require_signature"), "_require_signature is still on the Registry"
-    import inspect
-    init = list(inspect.signature(Registry.__init__).parameters)
-    assert "public_key" not in init and "grace_until" not in init, init
-
-
-case("no verifier, no grace window, no key on the Registry",
-     the_engine_has_no_verifier_and_no_grace)
-
-# =====================================================================
-head("derivatives: export and backup")
-# =====================================================================
-
-
-def export_full_and_per_consumer():
-    e = R.export(FP)
-    assert VA1 in e["markdown"] and "_retired_" in e["markdown"]
-    assert "Health Tracking" not in e["markdown"], "only its own project"
-    ex = R.export(FP, "tax")
-    assert ex["consumer"] == "tax"
-    assert FI_NEW in ex["markdown"] and VA1 in ex["markdown"]
-    assert "RL-" not in ex["markdown"], "someone else's perimeter leaked in"
-    assert "_retired_" not in ex["markdown"], "a retired rule leaked into a consumer export"
-    headings = [l for l in ex["markdown"].splitlines() if l.startswith("## Reaching")]
-    breadths = [int(h.split()[2]) for h in headings]
-    assert breadths == sorted(breadths, reverse=True), f"blocks out of order: {breadths}"
-    assert "DERIVATIVE" in ex["markdown"], "the export must say it is regenerable"
-
-
-case("export: whole project, and the block for one consumer, widest first",
-     export_full_and_per_consumer)
-
-
-def backup_is_a_quiescent_copy():
-    b = R.backup(os.path.join(D, "bk"))
-    cx = sqlite3.connect(b["backup"])
-    assert cx.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 7
-    assert cx.execute("SELECT COUNT(DISTINCT project) FROM rules").fetchone()[0] == 4
-    assert cx.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-    cx.close()
-    assert (os.stat(b["backup"]).st_mode & 0o777) == FILE_MODE
-
-
-case("backup: VACUUM INTO, all projects, 644", backup_is_a_quiescent_copy)
-
-
-def the_database_is_644():
-    mode = os.stat(R.path).st_mode & 0o777
-    assert mode == FILE_MODE, oct(mode)
-    assert R.status(FP)["database"]["mode"] == oct(FILE_MODE)
-
-
-case("the database is 644: whoever mounts the share reads and does not touch",
-     the_database_is_644)
-
-# =====================================================================
-head("verdicts")
-# =====================================================================
-
-
-def status_counts_agree_with_the_lists():
-    s = R.status(FP)
-    assert s["database"]["integrity"] == "ok"
-    assert s["database"]["journal_mode"] == "wal"
-    # Counted against the OTHER path rather than against a number typed here: a
-    # constant in a suite is a second source of truth, and this project has paid
-    # for those before.
-    assert s["rules"]["denied"] == len(R.pending(FP)["denied"]) > 0, \
-        "a refusal is KEPT, and status and the noticeboard agree on how many"
-    assert s["rules"]["proposed"] == len(R.pending(FP)["waiting"]) == 0
-    assert s["rules"]["retired"] == R.cx.execute(
-        "SELECT COUNT(*) FROM rules WHERE project=? AND status='retired'",
-        (NAME_FP,)).fetchone()[0] > 0
-    assert s["rules"]["permanent"] == 1
-    assert s["approval"]["batches_approved"] > 0
-    assert s["approval"]["provisional_days"] == 90
-    assert s["registry_version"] == VERSION
-    for consumer, n in s["by_consumer"].items():
-        assert n == R.list_rules(FP, consumer)["count"], consumer
-    assert sum(s["by_domain"].values()) == s["rules"]["in_force"], \
-        (s["by_domain"], s["rules"]["in_force"])
-
-
-case("status: two paths to the same number, and they agree",
-     status_counts_agree_with_the_lists)
-
-
-def the_registry_lists_projects_only_here():
-    e = R.projects()
-    assert e["count"] == 7
-    assert {p["code"] for p in e["projects"]} == {FP, HT, CASA, EMPTY, CNT, SPELL, BORN}
-    assert {p["name"]: p["active_rules"] for p in e["projects"]}["Empty"] == 0
-
-
-case("projects(): the only door codes come out of — gated in the server",
-     the_registry_lists_projects_only_here)
-
-# =====================================================================
-head("reopening")
-# =====================================================================
-
-
-def reopen_finds_everything_where_it_was():
-    versions = R.history(FP, "VA-0001")["count"]
-    listed = [x["id"] for x in R.list_rules(FP, "tax")["rules"]]
-    R.close()
-    r3 = Registry(DB)
-    s = r3.status(FP)
-    assert s["database"]["integrity"] == "ok" and s["database"]["journal_mode"] == "wal"
-    assert r3.projects()["count"] == 7
-    assert r3.history(FP, "VA-0001")["count"] == versions
-    assert [x["id"] for x in r3.list_rules(FP, "tax")["rules"]] == listed
-    r3.close()
-
-
-case("reopen: WAL, whole, three projects, history and lists intact",
-     reopen_finds_everything_where_it_was)
-
-# =====================================================================
-head("the upgrade: a database shaped like the versions before this one")
-# =====================================================================
-
-# THERE IS NO MIGRATION, and that is a decision (2026-08-11), not a gap: a
-# schema change means a WIPE, because the corpus goes back in by hand through
-# the same door as any other rule. What the engine owes an old database is a
-# loud refusal — IF NOT EXISTS would otherwise half-apply the new schema over
-# the old and produce a file that is neither.
-
-OLD_DB = os.path.join(D, "legacy.db")
-
-
-def an_earlier_schema_is_refused_not_converted():
-    cx = sqlite3.connect(OLD_DB)
-    cx.executescript("""
-      CREATE TABLE projects (name TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE,
-                             description TEXT, created TEXT NOT NULL);
-      CREATE TABLE consumers (project TEXT NOT NULL, name TEXT NOT NULL,
-                              kind TEXT NOT NULL, brief TEXT, created TEXT NOT NULL,
-                              PRIMARY KEY (project, name));
-      CREATE TABLE rules (project TEXT NOT NULL, id TEXT NOT NULL,
-                          PRIMARY KEY (project, id));
-    """)
-    cx.close()
-    try:
-        Registry(OLD_DB)
-        raise AssertionError("an old-schema database was opened without a word")
-    except RulesFault as e:
-        assert "earlier schema" in str(e), e
-        assert "wipe" in str(e), e
-    # And NOTHING of the new schema was half-applied over it: the file is
-    # exactly as old as it was, so the refusal can fire again next boot.
-    cx = sqlite3.connect(OLD_DB)
-    cols = {r[1] for r in cx.execute("PRAGMA table_info(consumers)")}
-    cx.close()
-    assert "id" not in cols, "the refusal came after a half-upgrade"
-
-
-case("an earlier schema is refused out loud, never converted",
-     an_earlier_schema_is_refused_not_converted)
-
-# =====================================================================
-head("the engine is used from a THREAD POOL, not from here")
-# =====================================================================
-
-# The hole this suite had. Everything above runs on one thread; the server does
-# not. FastMCP hands sync tools to anyio.to_thread.run_sync, so the connection
-# is opened on the import thread and used from a worker — and sqlite3 refuses
-# that outright. The first call that touched the database in production died
-# with "SQLite objects created in a thread can only be used in that same
-# thread", and no test here could have seen it. Now one can.
-
-R = Registry(DB, provisional_days=90, pending_cap=100)    # the reopen test closed the last one
-
-
-def a_worker_thread_can_use_the_engine():
-    import threading
-    errors: list[Exception] = []
-
-    def read():
-        try:
-            R.list_rules(FP, "tax")
-            R.project_info(FP)
-            R.status(FP)
-        except Exception as e:                                  # noqa: BLE001
-            errors.append(e)
-
-    t = threading.Thread(target=read)
-    t.start()
-    t.join(30)
-    assert not t.is_alive(), "the worker hung"
-    assert not errors, f"a worker thread cannot read: {errors[0]}"
-
-
-case("a thread that did not open the connection can still read",
-     a_worker_thread_can_use_the_engine)
-
-
-def many_threads_reading_and_writing():
-    """Writes too, and from several threads at once: the transactions in here
-    are multi-statement with an explicit BEGIN, so two of them interleaving on
-    one connection would COMMIT somebody else's work."""
-    import threading
-    errors: list[Exception] = []
-    done: list[str] = []
-    lock = threading.Lock()
-
-    def worker(n: int):
-        try:
-            # Eight threads asking the SAME counter for a number at the same
-            # time. Nobody passes an ID any more, so a race here would not throw
-            # — it would hand two rules the same number, and UNIQUE(project,
-            # domain, seq) is the last net under that.
-            rid = R.propose(FP, "ST", "F", f"Concurrent {n}", f"Body {n}.",
-                            ["market-news"], "thread safety", "architect")["id"]
-            R.list_rules(FP, "market-news")
-            R.check(FP)
-            R.history(FP, rid)
-            with lock:
-                done.append(rid)
-        except Exception as e:                                  # noqa: BLE001
-            with lock:
-                errors.append(e)
-
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(60)
-    assert not any(t.is_alive() for t in threads), "a worker hung: a deadlock?"
-    assert not errors, f"{len(errors)} failures, first: {errors[0]}"
-    assert len(done) == 8, done
-    assert len(set(done)) == 8, f"two threads got the same number: {sorted(done)}"
-    # And the writes are all there, none lost and none half-written.
-    waiting = {r["id"] for r in R.pending(FP)["waiting"]}
-    assert set(done) <= waiting, sorted(waiting)
-    assert R.status(FP)["database"]["integrity"] == "ok"
-
-
-case("eight threads proposing and reading at once: nothing lost, nothing torn",
-     many_threads_reading_and_writing)
-
-
-def two_connections_asking_the_same_counter():
-    """The RLock only covers ONE process. The preflight opens the database while
-    the server is starting, and a second Registry is one line away — so the
-    counter has to hold across CONNECTIONS too, not just across threads.
-
-    This is what BEGIN IMMEDIATE buys. With the default deferred BEGIN the
-    transaction reads MAX(seq) first and asks for the write lock afterwards, and
-    in WAL that upgrade cannot wait: the loser dies with a raw
-    'database is locked' that no busy timeout can help, and it would reach the
-    chat as a fault rather than as a refusal."""
-    import threading
-    engines = [Registry(DB, provisional_days=90, pending_cap=100) for _ in range(4)]
-    got: list[str] = []
-    errors: list[Exception] = []
-    lock = threading.Lock()
-
-    def worker(e, n):
-        try:
-            rid = e.propose(FP, "RL", "F", f"Across connections {n}", f"Body {n}.",
-                            ["market-news"], "two connections", "architect")["id"]
-            with lock:
-                got.append(rid)
-        except Exception as exc:                                # noqa: BLE001
-            with lock:
-                errors.append(exc)
-
-    ts = [threading.Thread(target=worker, args=(e, i)) for i, e in enumerate(engines)]
-    for t in ts:
-        t.start()
-    for t in ts:
-        t.join(60)
-    for e in engines:
-        e.close()
-    assert not errors, f"a second connection could not file: {errors[0]!r}"
-    assert len(set(got)) == 4, f"two connections got the same number: {sorted(got)}"
-
-
-case("four connections asking the same counter at once get four numbers",
-     two_connections_asking_the_same_counter)
-
-
-def the_lock_is_reentrant():
-    """status() calls list_rules(), import_rules() calls check(). With a plain
-    Lock instead of an RLock this deadlocks instead of failing, which is the
-    worse way to break: the container would hang, not crash."""
-    import threading
-    ok_flag = []
-
-    def call():
-        R.status(FP)
-        ok_flag.append(True)
-
-    t = threading.Thread(target=call)
-    t.start()
-    t.join(15)
-    assert ok_flag, "status() hung — the lock is not re-entrant"
-
-
-case("a public method calling another does not deadlock", the_lock_is_reentrant)
-
-# =====================================================================
-head("the reason is immutable, and the registry has TWO readings")
-# =====================================================================
-
-# The defect measured on 2026-08-10: the `reason` column kept the why of the
-# last EVENT, not the why of the rule — approve rewrote it with 'approved',
-# renew with 'renewed' — and no reading tool returned it at all, so whoever
-# signed a batch was approving reasons they could not see. From here on the
-# column keeps what its name promises, the events land in a column of their
-# own, and the registry has two readings: the consumer's — the ID and the
-# body, and nothing else — and the maintainer's, everything, `reason` first.
-
-C1_NAME = "C1 Reason"
-WHY = "because the aggregator misreports the closing price"
-
-C1 = R.create_project(C1_NAME, [("architect", "chat"), ("advisory", "chat")],
-                      {"VA": "vault", "PE": "perimeter"},
-                      "the immutability bench")["code"]
-ok(True, "create the C1 bench project")
-
-
-def _c1(rid):
-    return R.cx.execute("SELECT * FROM rules WHERE project=? AND id=?",
-                        (C1_NAME, rid)).fetchone()
-
-
-def _c1_versions(rid):
-    return R.cx.execute("SELECT version, action, reason FROM rule_versions "
-                        "WHERE project=? AND rule_id=? ORDER BY version",
-                        (C1_NAME, rid)).fetchall()
-
-
-def reason_survives_every_event():
-    rid = R.propose(C1, "VA", "R", "The immutable guinea pig", "Body.",
-                    ["*"], WHY, "architect")["id"]
-    b = R.batch(C1)
-    R.approve(C1, b["digest"])
-    assert _c1(rid)["reason"] == WHY, \
-        f"approve rewrote reason to {_c1(rid)['reason']!r}"
-    R.renew(C1, [rid])
-    assert _c1(rid)["reason"] == WHY, \
-        f"renew rewrote reason to {_c1(rid)['reason']!r}"
-    R.promote(C1, [rid])
-    assert _c1(rid)["reason"] == WHY, \
-        f"promote rewrote reason to {_c1(rid)['reason']!r}"
-    ver = len(_c1_versions(rid))
-    R.amend(C1, rid, ver, "renamed on the bench", title="The guinea pig, renamed")
-    assert _c1(rid)["reason"] == WHY, \
-        f"amend rewrote reason to {_c1(rid)['reason']!r}"
-
-
-case("no event rewrites the reason: approve, renew, promote, amend",
-     reason_survives_every_event)
-
-
-def the_events_land_in_their_own_column():
-    cols = {r[1] for r in R.cx.execute("PRAGMA table_info(rules)")}
-    assert "event" in cols, \
-        "the rules table has no `event` column: the events still live in `reason`"
-    rid = "VA-0001"
-    assert _c1(rid)["event"] == "renamed on the bench", \
-        f"after the amend the event column says {_c1(rid)['event']!r}"
-    # A denial: the reason stays the author's, the event says what happened,
-    # and denied_reason keeps carrying the maintainer's why as before.
-    rid2 = R.propose(C1, "VA", "R", "To be denied", "Body.", ["*"],
-                     "a why that must survive the denial", "advisory")["id"]
-    R.deny(C1, [rid2], "bench cleanup")
-    assert _c1(rid2)["reason"] == "a why that must survive the denial", \
-        f"deny rewrote reason to {_c1(rid2)['reason']!r}"
-    assert _c1(rid2)["event"] == "denied", _c1(rid2)["event"]
-    assert _c1(rid2)["denied_reason"] == "bench cleanup"
-    # A retirement: same shape, the why of the event is the event.
-    rid3 = R.propose(C1, "PE", "R", "To be retired", "Body.", ["*"],
-                     "born to die on the bench", "architect")["id"]
-    b = R.batch(C1)
-    R.approve(C1, b["digest"])
-    R.retire(C1, rid3, "the bench is done with it")
-    assert _c1(rid3)["reason"] == "born to die on the bench", \
-        f"retire rewrote reason to {_c1(rid3)['reason']!r}"
-    assert _c1(rid3)["event"] == "the bench is done with it"
-
-
-case("the events land in `event`, and denied_reason still works",
-     the_events_land_in_their_own_column)
-
-
-def history_keeps_the_why_at_v1_and_the_event_after():
-    rows = _c1_versions("VA-0001")
-    assert rows[0]["reason"] == WHY, \
-        f"version 1 lost the propose reason: {rows[0]['reason']!r}"
-    by_action = {r["action"]: r["reason"] for r in rows}
-    assert by_action.get("amended") in ("approved", "renewed",
-                                        "promoted to permanent",
-                                        "renamed on the bench"), \
-        f"the update trigger no longer records the event: {dict(by_action)}"
-    assert rows[-1]["reason"] == "renamed on the bench", \
-        f"the last version's reason is {rows[-1]['reason']!r}, not the last event"
-
-
-case("history: version 1 keeps the why, the later versions keep the events",
-     history_keeps_the_why_at_v1_and_the_event_after)
-
-
-def the_consumer_reading_is_the_id_and_the_body():
-    lst = R.list_rules(C1, "advisory")["rules"]
-    assert lst, "no rule in force reached advisory"
-    for d in lst:
-        assert set(d) == {"id", "body"}, \
-            f"rules_list leaks {sorted(set(d) - {'id', 'body'})} to a consumer"
-    got = R.get_rules(C1, [lst[0]["id"]], "advisory")["found"]
-    assert got, "rules_get found nothing"
-    for d in got:
-        assert set(d) == {"id", "body"}, \
-            f"rules_get leaks {sorted(set(d) - {'id', 'body'})} to a consumer"
-    hits = R.search(C1, "guinea", "advisory")["hits"]
-    assert hits, "rules_search found nothing"
-    for d in hits:
-        assert set(d) == {"id", "body"}, \
-            f"rules_search leaks {sorted(set(d) - {'id', 'body'})} to a consumer"
-    assert "(" in got[0]["body"] or got[0]["body"] == "Body.", got[0]["body"]
-
-
-case("the consumer reading is the ID and the body, and nothing else",
-     the_consumer_reading_is_the_id_and_the_body)
-
-
-def the_order_is_still_the_breadth():
-    # One rule through _ALL_ (breadth 2 here), one through a singleton: the
-    # widest must come first even though the fields that said so are gone.
-    rid_narrow = R.propose(C1, "PE", "R", "For the architect alone", "Body.",
-                           ["architect"], "narrow on purpose", "architect")["id"]
-    b = R.batch(C1)
-    R.approve(C1, b["digest"])
-    ids = [d["id"] for d in R.list_rules(C1, "architect")["rules"]]
-    assert ids.index("VA-0001") < ids.index(rid_narrow), \
-        f"the widest rule no longer comes first: {ids}"
-
-
-case("the order is still the breadth, with the fields gone",
-     the_order_is_still_the_breadth)
-
-
-def the_maintenance_reading_carries_the_why():
-    rid = R.propose(C1, "PE", "R", "Waiting for the batch", "Body.", ["*"],
-                    "so the batch shows the why", "architect")["id"]
-    b = R.batch(C1)
-    mine = [p for p in b["proposals"] if p["id"] == rid]
-    assert mine, "the proposal is not in the batch"
-    assert mine[0].get("reason") == "so the batch shows the why", \
-        "rules_batch does not show the reason being approved"
-    R.deny(C1, [rid], "bench cleanup")
-    md = R.export(C1)["markdown"]
-    assert WHY in md, "rules_export does not carry the reason"
-    per_consumer = R.export(C1, "architect")["markdown"]
-    assert WHY in per_consumer, \
-        "the per-consumer export does not carry the reason"
-
-
-case("the maintenance reading carries the why: batch and export",
-     the_maintenance_reading_carries_the_why)
-
-
-
-
-# =====================================================================
-head("the bulk import is gone, and legacy_id with it")
-# =====================================================================
-
-# Decided 2026-08-10, and executed here: an import stamps one reason across
-# the batch, files everything permanent so rule five never starts, and asks
-# no questions — the seeding pass is not the price of the migration, it is
-# its content. The old->new mapping lives in the migration files, outside
-# the registry: relics do not enter the clean system.
-
-
-def the_import_door_is_bricked():
-    import rules as _r
-    assert not hasattr(R, "import_rules"), "import_rules is still on the Registry"
-    assert not hasattr(_r, "MAX_IMPORT"), "MAX_IMPORT is still declared"
-    assert not hasattr(_r, "RE_BARE_LEGACY"), "the legacy citation parser survives"
-    assert not hasattr(_r, "RE_LEGACY"), "the legacy_id validator survives"
-    assert not hasattr(_r.Registry, "_legacy_cites"), "_legacy_cites survives"
-
-
-case("the import door is bricked: no method, no ceiling, no legacy parser",
-     the_import_door_is_bricked)
-
-
-def no_rule_carries_a_legacy_id():
-    import inspect
-    params = list(inspect.signature(R.propose).parameters)
-    assert "legacy_id" not in params, f"propose still takes legacy_id: {params}"
-    cols = {r[1] for r in R.cx.execute("PRAGMA table_info(rules)")}
-    assert "legacy_id" not in cols, f"the rules table still has legacy_id: {sorted(cols)}"
-    idx = {r[0] for r in R.cx.execute(
-        "SELECT name FROM sqlite_master WHERE type='index'")}
-    assert "ux_rules_legacy" not in idx, "the legacy unique index survives"
-
-
-case("no rule carries a legacy identifier: no column, no index, no parameter",
-     no_rule_carries_a_legacy_id)
-
-
-# =====================================================================
-head("the supersede is atomic: propose names the victim, approve does both")
-# =====================================================================
-
-# F6, decided 2026-08-10. A rule has three fates: it holds, it retires, or it
-# gets CHANGED — and the third used to be two separate steps, held together by
-# discipline. Now `supersedes` is a dedicated field on the proposal, never a
-# citation in the body: at approval, in the SAME transaction, the heir goes
-# active and the superseded rule is retired pointing forward. At denial the
-# old rule is not touched.
-
-SUP_NAME = "Supersede bench"
-
-SUP = R.create_project(SUP_NAME, [("architect", "chat"), ("advisory", "chat")],
-                       {"VA": "vault"})["code"]
-ok(True, "create the supersede bench")
-
-OLD_RULE = R.propose(SUP, "VA", "R", "The rule to be replaced", "Old body.",
-                     ["*"], "born to be superseded", "architect")["id"]
-R.approve(SUP, R.batch(SUP)["digest"])
-
-
-def _sup(rid):
-    return R.cx.execute("SELECT * FROM rules WHERE project=? AND id=?",
-                        (SUP_NAME, rid)).fetchone()
-
-
-refuses("supersedes towards a rule that was never defined",
-        lambda: R.propose(SUP, "VA", "R", "x", "y", ["*"], "m", "architect",
-                          supersedes="VA-0099"),
-        "never defined", RulesError)
-
-
-def a_proposal_cannot_supersede_a_proposal():
-    pending = R.propose(SUP, "VA", "R", "Still pending", "Body.", ["*"],
-                        "m", "architect")["id"]
-    try:
-        R.propose(SUP, "VA", "R", "x", "y", ["*"], "m", "architect",
-                  supersedes=pending)
-        raise AssertionError("it should have refused")
-    except RulesError as e:
-        assert "not in force" in str(e).lower(), e
-    R.deny(SUP, [pending], "bench cleanup")
-
-
-case("supersedes towards a rule not in force is refused at the door",
-     a_proposal_cannot_supersede_a_proposal)
-
-
-def the_second_pending_supersede_is_refused_by_the_database():
-    """A partial UNIQUE index, not a Python check: two pending proposals
-    superseding the same rule cannot coexist no matter which door they came
-    through."""
-    idx = {r[0] for r in R.cx.execute(
-        "SELECT name FROM sqlite_master WHERE type='index'")}
-    assert "ux_rules_supersedes" in idx, sorted(idx)
-    first = R.propose(SUP, "VA", "R", "Heir one", "Body one.", ["*"],
-                      "the first heir", "architect", supersedes=OLD_RULE)["id"]
-    try:
-        R.propose(SUP, "VA", "R", "Heir two", "Body two.", ["*"],
-                  "the second heir", "architect", supersedes=OLD_RULE)
-        raise AssertionError("it should have refused")
-    except RulesError as e:
-        assert "already" in str(e).lower(), e
-    # Deny frees the slot: the index watches PENDING proposals only.
-    R.deny(SUP, [first], "make room")
-    assert _sup(OLD_RULE)["status"] == "active", \
-        "denying the heir must not touch the old rule"
-
-
-case("a second pending proposal on the same victim is refused by the database",
-     the_second_pending_supersede_is_refused_by_the_database)
-
-
-def approve_swaps_the_two_in_one_transaction():
-    heir = R.propose(SUP, "VA", "R", "The heir", "New body.", ["advisory"],
-                     "the decision changed", "architect",
-                     supersedes=OLD_RULE)["id"]
-    b = R.batch(SUP)
-    mine = [p for p in b["proposals"] if p["id"] == heir]
-    # The GATE of 2026-08-10 stopped exactly here, from the connector: the
-    # batch is where the approver decides, so the supersede must arrive
-    # EXPANDED — the victim's current title next to the ID, like a citation
-    # in reading — not as a bare pointer to go and look up.
-    assert mine and mine[0].get("supersedes") == \
-        f"{OLD_RULE} — The rule to be replaced", \
-        "the batch does not SHOW the supersede expanded: whoever approves " \
-        f"must READ what they are retiring, got {mine[0].get('supersedes')!r}"
-    out = R.approve(SUP, b["digest"])
-    assert out["superseded"] == [{"retired": OLD_RULE, "by": heir}], out
-    old = _sup(OLD_RULE)
-    assert old["status"] == "retired" and old["superseded_by"] == heir, dict(old)
-    new = _sup(heir)
-    assert new["status"] == "active", dict(new)
-    # The heir DECLARES its scopes: nothing was inherited from the victim.
-    scopes = [r[0] for r in R.cx.execute(
-        "SELECT s.name FROM rule_scopes rs JOIN scopes s ON s.id=rs.scope_id "
-        "WHERE rs.project=? AND rs.rule_id=?", (SUP_NAME, heir))]
-    assert scopes == ["advisory"], scopes
-    # And the reading expands the retired rule pointing forward.
-    probe = R.propose(SUP, "VA", "R", "Probe", f"See ({OLD_RULE}).", ["*"],
-                      "m", "architect")["id"]
-    R.approve(SUP, R.batch(SUP)["digest"])
-    body = [d for d in R.list_rules(SUP, "architect")["rules"]
-            if d["id"] == probe][0]["body"]
-    assert f"superseded by {heir}" in body, body
-
-
-case("approve activates the heir AND retires the victim, one transaction",
-     approve_swaps_the_two_in_one_transaction)
-
-
-def a_victim_retired_in_the_meantime_is_a_declared_noop():
-    target = R.propose(SUP, "VA", "R", "To vanish early", "Body.", ["*"],
-                       "m", "architect")["id"]
-    R.approve(SUP, R.batch(SUP)["digest"])
-    heir = R.propose(SUP, "VA", "R", "Late heir", "Body.", ["*"], "m",
-                     "architect", supersedes=target)["id"]
-    R.retire(SUP, target, reason="retired while the heir was pending")
-    b = R.batch(SUP)
-    # The victim vanished while the proposal was pending: the batch says so
-    # BEFORE the approval, where the decision happens — the no-op verdict
-    # after it is the receipt, not the warning.
-    shown = [p for p in b["proposals"] if p["id"] == heir][0]["supersedes"]
-    assert shown.startswith(f"{target} — ") and "retired" in shown, \
-        f"a dead victim must be marked in the batch, got {shown!r}"
-    out = R.approve(SUP, b["digest"])
-    assert out["supersede_skipped"] == [
-        {"id": heir, "target": target, "why": "no longer in force"}], out
-    assert _sup(target)["superseded_by"] is None, \
-        "a rule somebody else retired is not rewritten behind their back"
-
-
-case("a victim already retired at approval: declared no-op, nothing rewritten",
-     a_victim_retired_in_the_meantime_is_a_declared_noop)
-
-
-# =====================================================================
-head("the consumer brief: identity travels with the rules, versioned")
-# =====================================================================
-
-# F1: the mandate that used to live in a role's memory file. rules_list
-# returns it FIRST, before the rules, in the same call — "you are so-and-so,
-# and these are your rules" in one round trip. Empty is not an error. It is
-# written behind the admin code (an extension of consumers_add, not a new
-# door), versioned by the same trigger mechanism as the rules, and for
-# skills it stays empty by editorial discipline, not by a branch in the code.
-
-BRF_NAME = "Brief bench"
-
-BRF = R.create_project(
-    BRF_NAME,
-    [{"name": "architect", "kind": "chat",
-      "brief": "# Architect\n\nYou maintain the corpus."},
-     ("worker", "skill")],
-    {"VA": "vault"})["code"]
-ok(True, "create the brief bench, one consumer born WITH its brief")
-
-
-def the_brief_arrives_first_and_empty_is_not_an_error():
-    out = R.list_rules(BRF, "architect")
-    assert out["brief"] == "# Architect\n\nYou maintain the corpus.", out.get("brief")
-    keys = list(out)
-    assert keys.index("brief") < keys.index("rules"), \
-        f"the brief must come BEFORE the rules: {keys}"
-    bare = R.list_rules(BRF, "worker")
-    assert bare["brief"] == "", \
-        f"a consumer without a brief gets an empty field, not an error: {bare.get('brief')!r}"
-
-
-case("rules_list leads with the brief, and empty is not an error",
-     the_brief_arrives_first_and_empty_is_not_an_error)
-
-
-def the_brief_is_written_through_consumers_add_and_versioned():
-    # On an EXISTING consumer, add_consumers with a brief updates it: the
-    # extension of the door that already exists, not a new one.
-    R.add_consumers(BRF, [{"name": "worker", "kind": "skill",
-                           "brief": "worker now has a mandate"}])
-    assert R.list_rules(BRF, "worker")["brief"] == "worker now has a mandate"
-    rows = R.cx.execute(
-        "SELECT version, action, brief FROM consumer_versions "
-        "WHERE project=? AND consumer='worker' ORDER BY version",
-        (BRF_NAME,)).fetchall()
-    assert [r["action"] for r in rows] == ["created", "amended"], \
-        [dict(r) for r in rows]
-    assert rows[0]["brief"] is None and rows[-1]["brief"] == "worker now has a mandate"
-
-
-case("the brief writes through consumers_add, and the triggers keep versions",
-     the_brief_is_written_through_consumers_add_and_versioned)
-
-
-def a_hand_edit_of_the_brief_still_lands_in_history():
-    R.cx.execute("UPDATE consumers SET brief='edited by hand' "
-                 "WHERE project=? AND name='worker'", (BRF_NAME,))
-    last = R.cx.execute(
-        "SELECT brief, action FROM consumer_versions "
-        "WHERE project=? AND consumer='worker' ORDER BY version DESC LIMIT 1",
-        (BRF_NAME,)).fetchone()
-    assert last["brief"] == "edited by hand" and last["action"] == "amended", dict(last)
-
-
-case("a brief edited by hand with sqlite3 is versioned too: the trigger writes",
-     a_hand_edit_of_the_brief_still_lands_in_history)
-
-refuses("a brief over the body ceiling",
-        lambda: R.add_consumers(BRF, [{"name": "worker", "kind": "skill",
-                                       "brief": "z" * (MAX_BODY_BYTES + 1)}]),
-        "split", RulesError)
-
-
-# =====================================================================
-head("proposed_by is a door, and the pending queue has a ceiling")
-# =====================================================================
-
-# F4 and the schema half of R. An omitted proposed_by used to orphan the
-# proposal in silence — it would never appear in rules_pending for whoever
-# filed it, which is exactly the class of error this registry refuses at the
-# door everywhere else. And the owner reads batches of 3-4: the ceiling on
-# pending proposals is that rhythm moved from a dead rule (the old AM domain)
-# into the tool, where a machine-checkable constraint belongs.
-
-refuses("a proposal without proposed_by is refused, not orphaned",
-        lambda: R.propose(FP, "VA", "R", "Orphan attempt", "Body.", ["*"], "m"),
-        "proposed_by", RulesError)
-
-
-def the_default_ceiling_is_five_and_the_refusal_lists_the_queue():
-    g = Registry(os.path.join(D, "cap.db"))
-    CAP = g.create_project("Cap bench", [("architect", "chat")],
-                           {"VA": "vault"})["code"]
-    for i in range(5):
-        g.propose(CAP, "VA", "R", f"Pending {i}", "Body.", ["*"], "m", "architect")
-    try:
-        g.propose(CAP, "VA", "R", "One too many", "Body.", ["*"], "m", "architect")
-        raise AssertionError("it should have refused")
-    except RulesError as e:
-        msg = str(e)
-        assert "5" in msg and "Pending 0" in msg and "Pending 4" in msg, \
-            f"the refusal must say the ceiling AND list the queue: {msg[:200]}"
-    # Denial frees a slot by itself: no override flag, the queue is the knob.
-    first = g.pending(CAP)["waiting"][0]["id"]
-    g.deny(CAP, [first], "make room")
-    g.propose(CAP, "VA", "R", "Fits again", "Body.", ["*"], "m", "architect")
-    # And approval frees the rest.
-    g.approve(CAP, g.batch(CAP)["digest"])
-    g.propose(CAP, "VA", "R", "After the batch", "Body.", ["*"], "m", "architect")
-    g.close()
-
-
-case("the default ceiling is 5, the refusal lists the titles, deny/approve free slots",
-     the_default_ceiling_is_five_and_the_refusal_lists_the_queue)
-
-
-def the_ceiling_is_a_deployment_knob_with_a_working_default():
-    import inspect
-    sig = inspect.signature(Registry.__init__)
-    assert "pending_cap" in sig.parameters, list(sig.parameters)
-    g = Registry(os.path.join(D, "cap2.db"), pending_cap=2)
-    C2 = g.create_project("Cap two", [("architect", "chat")],
-                          {"VA": "vault"})["code"]
-    g.propose(C2, "VA", "R", "One", "Body.", ["*"], "m", "architect")
-    g.propose(C2, "VA", "R", "Two", "Body.", ["*"], "m", "architect")
-    try:
-        g.propose(C2, "VA", "R", "Three", "Body.", ["*"], "m", "architect")
-        raise AssertionError("it should have refused")
-    except RulesError as e:
-        assert "2" in str(e), e
-    g.close()
-
-
-case("the ceiling is configurable per deployment, and born with a default",
-     the_ceiling_is_a_deployment_knob_with_a_working_default)
-
-
-# =====================================================================
-head("the renewal reads the why, and the lists carry the legend")
-# =====================================================================
-
-# F5 (residue after C1) and F7. Renewal is where the corpus is governed, and
-# the question there — "would I file this today, for the reason it was filed
-# for?" — is undecidable without the reason in front of you. The manual used
-# to patch that with a habit ("read the history before renewing") in the very
-# system built to eliminate prescribed habits: now the tool does it. And the
-# two-letter domains age badly in human memory, so wherever IDs are listed in
-# bulk the legend of the domains PRESENT rides along, from the project's own
-# declarations — surfaced, not new state.
-
-LEG_NAME = "Legend bench"
-
-LEG = R.create_project(LEG_NAME, [("architect", "chat")],
-                       {"VA": "vault and files", "VE": "verification",
-                        "ZZ": "never used"})["code"]
-ok(True, "create the legend bench")
-
-LEG_WHY = "because the aggregator misreports the closing price"
-LEG_R1 = R.propose(LEG, "VA", "R", "Legend rule", "Body.", ["*"],
-                   LEG_WHY, "architect")["id"]
-R.approve(LEG, R.batch(LEG)["digest"])
-
-
-def the_renew_verdict_carries_the_original_reason():
-    out = R.renew(LEG, [LEG_R1])
-    assert out.get("reasons") == {LEG_R1: LEG_WHY}, out
-    assert out["renewed"] == [LEG_R1]
-
-
-case("rules_renew hands back the original reason next to each rule",
-     the_renew_verdict_carries_the_original_reason)
-
-
-def the_expiring_queue_carries_the_reason_and_only_that_queue():
-    R.cx.execute("UPDATE rules SET expires_at=? WHERE project=? AND id=?",
-                 (_plus_days(10), LEG_NAME, LEG_R1))
-    p = R.pending(LEG, "architect")
-    soon = [x for x in p["expiring_within_30_days"] if x["id"] == LEG_R1]
-    assert soon and soon[0].get("reason") == LEG_WHY, soon
-    # Only the renewals queue: waiting stays the shape it was.
-    rid = R.propose(LEG, "VE", "R", "Still waiting", "Body.", ["*"],
-                    "a why the waiting list does not carry", "architect")["id"]
-    w = [x for x in R.pending(LEG, "architect")["waiting"] if x["id"] == rid]
-    assert w and "reason" not in w[0], sorted(w[0])
-    R.deny(LEG, [rid], "bench cleanup")
-
-
-case("expiring_within_30_days carries the reason — the other lists do not",
-     the_expiring_queue_carries_the_reason_and_only_that_queue)
-
-
-def the_list_leads_with_the_legend_of_present_domains():
-    out = R.list_rules(LEG, "architect")
-    assert out.get("domains") == {"VA": "vault and files"}, out.get("domains")
-    keys = list(out)
-    assert keys.index("domains") < keys.index("rules"), keys
-
-
-case("rules_list carries the legend, limited to the domains present",
-     the_list_leads_with_the_legend_of_present_domains)
-
-
-def the_export_carries_the_legend_too():
-    md = R.export(LEG)["markdown"]
-    assert "VA — vault and files" in md, md[:400]
-    assert "ZZ" not in md, "a domain with no rules does not enter the legend"
-    per = R.export(LEG, "architect")["markdown"]
-    assert "VA — vault and files" in per, per[:400]
-
-
-case("the export leads with the legend of the domains present",
-     the_export_carries_the_legend_too)
-
-# =====================================================================
-head("the task log: what the DATABASE guarantees, not the door")
-# =====================================================================
-# These write with raw SQL on purpose. Every guarantee below is also refused
-# by the engine with a talking message — that is tested where the methods
-# are — but a guarantee that only lives in Python holds for the callers that
-# go through Python, and this database is readable from the share with
-# sqlite3. What is proved here is the half that survives a hand.
-
-_TK_OUT = R.create_project("Task bench", [("Architect", "chat"), ("Advisory", "chat")],
-                           {"VA": "vault"})
-TK, TK_KEY = _TK_OUT["code"], _TK_OUT["architect_key"]
-_TK_NAME = "Task bench"
-_TK_ARCH = R.cx.execute("SELECT id FROM consumers WHERE project=? AND lower(name)='architect'",
-                        (_TK_NAME,)).fetchone()[0]
-
-
-def _raw_task(tid: str, seq: int, **over):
-    row = dict(project=_TK_NAME, id=tid, seq=seq, title="t", body="b",
-               consumer_id=_TK_ARCH, created_by="Architect", urgent=0,
-               status="pending", outcome=None, reason=None, actor=None,
-               idem_key=None, created_at=_now_ish(), updated_at=_now_ish(),
-               closed_at=None)
-    row.update(over)
-    R.cx.execute(
-        "INSERT INTO tasks (project,id,seq,title,body,consumer_id,created_by,urgent,"
-        "status,outcome,reason,actor,idem_key,created_at,updated_at,closed_at) "
-        "VALUES (:project,:id,:seq,:title,:body,:consumer_id,:created_by,:urgent,"
-        ":status,:outcome,:reason,:actor,:idem_key,:created_at,:updated_at,:closed_at)",
-        row)
-
-
-def _now_ish() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def TK_is_a_reserved_domain():
-    """`TK` is the task log's prefix. A rule numbered TK-0001 would be
-    indistinguishable from a task, so the pair cannot be declared — and the
-    refusal holds at BOTH doors, declaration and use."""
-    try:
-        R.add_domains(TK, {"TK": "tasks"})
-        assert False, "add_domains accepted the reserved pair"
-    except RulesError as e:
-        assert "RESERVED" in str(e), e
-    try:
-        R.create_project("Reserved bench", [("a", "chat")], {"TK": ""})
-        assert False, "create_project accepted the reserved pair"
-    except RulesError as e:
-        assert "RESERVED" in str(e), e
-    # And at use, which is the door a hand-written row would come through.
-    R.cx.execute("INSERT INTO project_domains (project, domain) VALUES (?, 'TK')",
-                 (_TK_NAME,))
-    try:
-        R.propose(TK, "TK", "R", "smuggled", "Body.", ["*"], "why", "Architect")
-        assert False, "propose minted a rule in the reserved domain"
-    except RulesError as e:
-        assert "RESERVED" in str(e), e
-    finally:
-        R.cx.execute("DELETE FROM project_domains WHERE project=? AND domain='TK'",
-                     (_TK_NAME,))
-
-
-case("TK cannot be declared as a domain, and cannot be used as one either",
-     TK_is_a_reserved_domain)
-
-
-def completing_without_an_outcome_is_refused_by_the_schema():
-    _raw_task("TK-9001", 9001)
-    try:
-        R.cx.execute("UPDATE tasks SET status='completed', closed_at=? "
-                     "WHERE project=? AND id='TK-9001'", (_now_ish(), _TK_NAME))
-        assert False, "the schema let a completed task through with no outcome"
-    except sqlite3.IntegrityError as e:
-        assert "CHECK" in str(e).upper(), e
-    # An outcome of pure whitespace is not an outcome either.
-    try:
-        R.cx.execute("UPDATE tasks SET status='completed', outcome='   ', closed_at=? "
-                     "WHERE project=? AND id='TK-9001'", (_now_ish(), _TK_NAME))
-        assert False, "whitespace passed for an outcome"
-    except sqlite3.IntegrityError:
-        pass
-
-
-case("completed without an outcome: refused by the CHECK, not by the door",
-     completing_without_an_outcome_is_refused_by_the_schema)
-
-
-def dropping_without_a_reason_is_refused_by_the_schema():
-    _raw_task("TK-9002", 9002)
-    try:
-        R.cx.execute("UPDATE tasks SET status='dropped', closed_at=? "
-                     "WHERE project=? AND id='TK-9002'", (_now_ish(), _TK_NAME))
-        assert False, "the schema let a dropped task through with no reason"
-    except sqlite3.IntegrityError as e:
-        assert "CHECK" in str(e).upper(), e
-
-
-case("dropped without a reason: refused by the CHECK — closing without doing "
-     "is a decision", dropping_without_a_reason_is_refused_by_the_schema)
-
-
-def a_closed_task_is_closed():
-    _raw_task("TK-9003", 9003, status="completed", outcome="done",
-              closed_at=_now_ish())
-    for sql in ("UPDATE tasks SET title='rewritten' WHERE project=? AND id='TK-9003'",
-                "UPDATE tasks SET status='pending', outcome=NULL, closed_at=NULL "
-                "WHERE project=? AND id='TK-9003'",
-                "UPDATE tasks SET outcome='a different story' "
-                "WHERE project=? AND id='TK-9003'"):
-        try:
-            R.cx.execute(sql, (_TK_NAME,))
-            assert False, f"a closed task took: {sql[:40]}"
-        except sqlite3.IntegrityError as e:
-            assert "closed task" in str(e), e
-
-
-case("closed is closed: not amended, not reopened, and the outcome does not "
-     "get a second version", a_closed_task_is_closed)
-
-
-def urgency_belongs_to_whoever_created_it():
-    """The receiver cannot clear the flag. It is the one field where the
-    interest of the person who could change it points the wrong way."""
-    _raw_task("TK-9004", 9004, urgent=1)
-    for col, val in (("urgent", 0), ("created_by", "'Advisory'"),
-                     ("id", "'TK-9999'"), ("seq", 1)):
-        try:
-            R.cx.execute(f"UPDATE tasks SET {col}={val} WHERE project=? AND id='TK-9004'",
-                         (_TK_NAME,))
-            assert False, f"{col} moved on an open task"
-        except sqlite3.IntegrityError as e:
-            assert "frozen field" in str(e), (col, e)
-
-
-case("urgent, the ID, the number and the author are written once",
-     urgency_belongs_to_whoever_created_it)
-
-
-def the_history_is_written_by_the_triggers():
-    _raw_task("TK-9005", 9005)
-    v = R.cx.execute("SELECT version, status, consumer, action FROM task_versions "
-                     "WHERE project=? AND task_id='TK-9005' ORDER BY version",
-                     (_TK_NAME,)).fetchall()
-    assert [tuple(x) for x in v] == [(1, "pending", "Architect", "created")], v
-    R.cx.execute("UPDATE tasks SET title='fixed', actor='Advisory', updated_at=? "
-                 "WHERE project=? AND id='TK-9005'", (_now_ish(), _TK_NAME))
-    R.cx.execute("UPDATE tasks SET status='dropped', reason='not needed', "
-                 "actor='Architect', closed_at=?, updated_at=? "
-                 "WHERE project=? AND id='TK-9005'",
-                 (_now_ish(), _now_ish(), _TK_NAME))
-    v = [(x["version"], x["action"], x["actor"]) for x in R.cx.execute(
-        "SELECT version, action, actor FROM task_versions WHERE project=? "
-        "AND task_id='TK-9005' ORDER BY version", (_TK_NAME,))]
-    assert v == [(1, "created", "Architect"), (2, "amended", "Advisory"),
-                 (3, "dropped", "Architect")], v
-    # The owner is photographed RESOLVED: a version read in a year says who
-    # owned the task then, not who owns the row now.
-    assert all(x[0] == "Architect" for x in R.cx.execute(
-        "SELECT consumer FROM task_versions WHERE project=? AND task_id='TK-9005'",
-        (_TK_NAME,))), "the version did not photograph the owner"
-
-
-case("the task log keeps whole versions, written by the triggers",
-     the_history_is_written_by_the_triggers)
-
-
-def a_hand_deletion_leaves_its_trace():
-    _raw_task("TK-9006", 9006)
-    R.cx.execute("DELETE FROM tasks WHERE project=? AND id='TK-9006'", (_TK_NAME,))
-    last = R.cx.execute("SELECT action, actor FROM task_versions WHERE project=? "
-                        "AND task_id='TK-9006' ORDER BY version DESC LIMIT 1",
-                        (_TK_NAME,)).fetchone()
-    assert last["action"] == "DELETED", dict(last)
-    assert "outside the tools" in last["actor"], dict(last)
-
-
-case("a DELETE by hand is recorded, same safety net as the rules",
-     a_hand_deletion_leaves_its_trace)
-
-
-def the_idempotency_handle_is_an_index():
-    """Partial on `pending`: the same key while the task is open collides, and
-    after it closes it opens a new one. That is the semantics, and it lives in
-    the index rather than in a lookup."""
-    _raw_task("TK-9007", 9007, idem_key="audit-2026-08")
-    try:
-        _raw_task("TK-9008", 9008, idem_key="audit-2026-08")
-        assert False, "two pending tasks took the same key"
-    except sqlite3.IntegrityError as e:
-        assert "ux_tasks_idem" in str(e) or "UNIQUE" in str(e).upper(), e
-    R.cx.execute("UPDATE tasks SET status='completed', outcome='done', closed_at=?, "
-                 "updated_at=? WHERE project=? AND id='TK-9007'",
-                 (_now_ish(), _now_ish(), _TK_NAME))
-    _raw_task("TK-9008", 9008, idem_key="audit-2026-08")   # now it is free
-    # And the key is per OWNER: the same handle for another consumer is
-    # another task, because two roles finding the same thing is two jobs.
-    _adv = R.cx.execute("SELECT id FROM consumers WHERE project=? AND lower(name)='advisory'",
-                        (_TK_NAME,)).fetchone()[0]
-    _raw_task("TK-9009", 9009, idem_key="audit-2026-08", consumer_id=_adv)
-
-
-case("the idempotency key is a partial unique index, per owner and per open task",
-     the_idempotency_handle_is_an_index)
-
-# =====================================================================
-head("the task log: the door, and what it costs to close one")
-# =====================================================================
-
-_TL_OUT = R.create_project("Task log", [("Architect", "chat"), ("Advisory", "chat"),
-                                        ("FP-Verifica-Coerenza", "skill")],
-                           {"VA": "vault"})
-TL, TL_KEY = _TL_OUT["code"], _TL_OUT["architect_key"]
-
-
-def anybody_may_open_one_for_anybody_but_nobody_anonymously():
-    """That is how a coherence audit hands each correction to the role that
-    owns it. `created_by` is the door — the lesson of proposed_by."""
-    out = R.task_add(TL, "advisory", "Fix the wording",
-                     "The sentence in (VA-0001) contradicts the one below it.",
-                     "FP-Verifica-Coerenza")
-    assert out["id"] == "TK-0001", out
-    assert out["consumer"] == "Advisory", out          # spelling comes back stored
-    assert out["created_by"] == "FP-Verifica-Coerenza", out
-    try:
-        R.task_add(TL, "advisory", "Anonymous", "body", "")
-        assert False, "a task went in with no author"
-    except RulesError as e:
-        assert "created_by is mandatory" in str(e), e
-    try:
-        R.task_add(TL, "advisory", "Ghost", "body", "nobody-here")
-        assert False, "an unknown consumer signed a task"
-    except RulesError as e:
-        assert "unknown consumer" in str(e), e
-
-
-case("anybody opens one for anybody — and nobody opens one anonymously",
-     anybody_may_open_one_for_anybody_but_nobody_anonymously)
-
-
-def spelling_is_data_here_too():
-    """`ADVISORY`, `advisory` and `Advisory` are ONE owner with ONE spelling —
-    the casefolded unique index decides identity, the stored spelling comes
-    back untouched."""
-    for typed in ("ADVISORY", "advisory", "AdViSoRy"):
-        out = R.task_list(TL, typed)
-        assert out["consumer"] == "Advisory", (typed, out["consumer"])
-    ids = {x["id"] for x in R.task_list(TL, "advisory")["pending"]}
-    assert "TK-0001" in ids, ids
-
-
-case("a consumer typed in any case is the same owner, and answers in its own "
-     "spelling", spelling_is_data_here_too)
-
-
-def closing_costs_a_sentence():
-    tid = R.task_add(TL, "advisory", "Needs a word", "body", "Architect")["id"]
-    try:
-        R.task_complete(TL, tid, "   ", "advisory")
-        assert False, "completed with no outcome"
-    except RulesError as e:
-        assert "outcome is mandatory" in str(e), e
-    try:
-        R.task_drop(TL, tid, "", "advisory")
-        assert False, "dropped with no reason"
-    except RulesError as e:
-        assert "reason is mandatory" in str(e), e
-    out = R.task_complete(TL, tid, "done: the word was 'perimeter'", "advisory")
-    assert out["status"] == "completed" and out["by"] == "Advisory", out
-    # And a closed task is closed, at the door as well as in the schema.
-    for fn, frag in ((lambda: R.task_complete(TL, tid, "again", "advisory"), "already completed"),
-                     (lambda: R.task_drop(TL, tid, "changed my mind", "advisory"), "already completed"),
-                     (lambda: R.task_amend(TL, tid, "advisory", title="rewritten"), "is completed")):
-        try:
-            fn()
-            assert False, "a closed task took a second write"
-        except RulesError as e:
-            assert frag in str(e), (frag, e)
-
-
-case("completed costs an outcome, dropped costs a reason, and closed is closed",
-     closing_costs_a_sentence)
-
-
-def urgency_cannot_be_amended_away():
-    """There is no door at all: `urgent` is not a parameter of task_amend, and
-    an amend with nothing else to change says so by name."""
-    import inspect
-    assert "urgent" not in inspect.signature(R.task_amend).parameters, \
-        "task_amend grew a way to change urgent"
-    tid = R.task_add(TL, "advisory", "Urgent one", "body", "Architect", urgent=True)["id"]
-    try:
-        R.task_amend(TL, tid, "advisory")
-        assert False, "an empty amend was accepted"
-    except RulesError as e:
-        assert "urgent" in str(e), e
-    assert R.task_get(TL, [tid])["found"][0]["urgent"] is True
-
-
-case("urgent has no door: it is the creator's, and no amend reaches it",
-     urgency_cannot_be_amended_away)
-
-
-def a_misdirected_task_is_reassigned_not_recreated():
-    tid = R.task_add(TL, "advisory", "Belongs to the architect",
-                     "This is a vault job.", "Advisory")["id"]
-    out = R.task_amend(TL, tid, "Advisory", consumer="architect")
-    assert out["consumer"] == "Architect" and out["amended"] == ["consumer"], out
-    assert tid in {x["id"] for x in R.task_list(TL, "architect")["pending"]}
-    assert tid not in {x["id"] for x in R.task_list(TL, "advisory")["pending"]}
-    # The thread is not broken: the history says where it came from.
-    v = [(x["version"], x["consumer"]) for x in R.cx.execute(
-        "SELECT version, consumer FROM task_versions WHERE project='Task log' "
-        "AND task_id=? ORDER BY version", (tid,))]
-    assert v == [(1, "Advisory"), (2, "Architect")], v
-    R.task_drop(TL, tid, "bench cleanup", "architect")
-
-
-case("a misdirected task is reassigned, and the history keeps both owners",
-     a_misdirected_task_is_reassigned_not_recreated)
-
-
-def the_idempotency_key_at_the_door():
-    a = R.task_add(TL, "architect", "Same discrepancy", "body", "FP-Verifica-Coerenza",
-                   idem_key="coherence-2026-08-11")
-    b = R.task_add(TL, "architect", "Same discrepancy", "body", "FP-Verifica-Coerenza",
-                   idem_key="coherence-2026-08-11")
-    assert a["created"] is True and b["created"] is False, (a, b)
-    assert a["id"] == b["id"], (a["id"], b["id"])
-    R.task_complete(TL, a["id"], "fixed", "architect")
-    c = R.task_add(TL, "architect", "Same discrepancy, again", "body",
-                   "FP-Verifica-Coerenza", idem_key="coherence-2026-08-11")
-    assert c["created"] is True and c["id"] != a["id"], (a["id"], c["id"])
-    R.task_drop(TL, c["id"], "bench cleanup", "architect")
-
-
-case("the same key on an OPEN task returns it; after it closes, it opens a new one",
-     the_idempotency_key_at_the_door)
-
-
-def the_ID_is_never_handed_out_again():
-    """Not after a close, and not after a prune: an ID that came back would
-    make an old citation point at somebody else's work."""
-    before = R.task_add(TL, "architect", "Burner", "body", "Architect")["id"]
-    R.task_complete(TL, before, "done", "architect")
-    R.prune_tasks(TL, "2099-12-31")
-    after = R.task_add(TL, "architect", "The next one", "body", "Architect")["id"]
-    assert int(after.split("-")[1]) > int(before.split("-")[1]), (before, after)
-    R.task_drop(TL, after, "bench cleanup", "architect")
-
-
-case("a task number is burnt for good — a prune does not rewind the counter",
-     the_ID_is_never_handed_out_again)
-
-
-def the_prune_refuses_to_touch_open_work():
-    """Deleting open work by seniority is the hard expiry this design threw
-    out, wearing the clothes of housekeeping."""
-    tid = R.task_add(TL, "advisory", "Still open", "body", "Architect")["id"]
-    out = R.prune_tasks(TL, "2099-12-31")
-    assert tid not in out["pruned"], out
-    assert out["left_open_untouched"] >= 1, out
-    assert tid in {x["id"] for x in R.task_list(TL, "advisory")["pending"]}
-
-
-case("the prune takes closed tasks only, and says how many it left alone",
-     the_prune_refuses_to_touch_open_work)
-
-
-def a_task_body_expands_its_citations_and_refuses_nothing():
-    """Chosen with Alfredo on 2026-08-11: a task is prose ABOUT work, so the
-    four refusals a rule's body meets do not apply — but reading still hands
-    back the current title, and a pointer that does not resolve is reported in
-    the text instead of at the door."""
-    rid = R.propose(TL, "VA", "R", "The vault rule", "Body.", ["*"], "why", "Architect")["id"]
-    R.approve(TL, R.batch(TL)["digest"])
-    tid = R.task_add(TL, "advisory", "Cite both",
-                     f"Fix ({rid}) and also (VA-0099), and mention ZZ-0001.",
-                     "Architect")["id"]
-    body = R.task_get(TL, [tid])["found"][0]["body"]
-    assert f"({rid} — The vault rule)" in body, body
-    assert "VA-0099 — ⚠ never defined" in body, body
-    assert "ZZ-0001" in body, body       # not a domain here: ordinary prose
-    R.task_drop(TL, tid, "bench cleanup", "advisory")
-
-
-case("a task body expands what it cites, and never refuses a pointer at the door",
-     a_task_body_expands_its_citations_and_refuses_nothing)
-
-
-def the_search_says_WHY_it_matched():
-    tid = R.task_add(TL, "advisory", "Nothing telling in the title",
-                     "The paragraph about the wash-sale window is wrong.",
-                     "Architect")["id"]
-    out = R.task_search(TL, "advisory", "wash-sale")
-    hit = next(x for x in out["hits"] if x["id"] == tid)
-    assert "wash-sale window" in hit["match"], hit
-    assert "…" in hit["match"] or len(hit["match"]) < 130, hit
-    # It reaches the outcome too: "what did I do about X" is the same question.
-    R.task_complete(TL, tid, "rewritten against the 30-day rule", "advisory")
-    out = R.task_search(TL, "advisory", "30-day")
-    hit = next(x for x in out["hits"] if x["id"] == tid)
-    assert "30-day rule" in hit["match"], hit
-
-
-case("every hit carries the fragment that matched — a code with no fragment is "
-     "a second call", the_search_says_WHY_it_matched)
-
-
-def the_range_will_not_guess_which_date():
-    for bad in ("", "whatever", "created"):
-        try:
-            R.task_range(TL, "advisory", "2026-08-01", "2026-08-31", bad)
-            assert False, f"`on` accepted {bad!r}"
-        except RulesError as e:
-            assert "created_at" in str(e) and "closed_at" in str(e), e
-    opened = R.task_range(TL, "advisory", "2026-01-01", "2099-12-31", "created_at")
-    closed = R.task_range(TL, "advisory", "2026-01-01", "2099-12-31", "closed_at")
-    assert opened["total"] > closed["total"], (opened["total"], closed["total"])
-    assert all(x["status"] != "pending" for x in closed["tasks"]), closed["tasks"]
-    # A bare date as the upper bound covers the WHOLE day.
-    assert closed["until"].endswith("T23:59:59Z"), closed["until"]
-    try:
-        R.task_range(TL, "advisory", "31-08-2026", "2026-08-31", "created_at")
-        assert False, "a date in the wrong shape was taken"
-    except RulesError as e:
-        assert "YYYY-MM-DD" in str(e), e
-
-
-case("tasks_range refuses to guess which date it filters on",
-     the_range_will_not_guess_which_date)
-
-
-def the_batch_of_bodies_has_two_ceilings():
-    ids = [R.task_add(TL, "architect", f"Body {i}", "x" * 100, "Architect")["id"]
-           for i in range(TASKS_GET_IDS + 2)]
-    try:
-        R.task_get(TL, ids)
-        assert False, "the batch took more than the ceiling"
-    except RulesError as e:
-        assert str(TASKS_GET_IDS) in str(e) and "refused" in str(e), e
-    out = R.task_get(TL, ids[:TASKS_GET_IDS])
-    assert out["returned"] == TASKS_GET_IDS and out["truncated"] is False, out
-    # The BYTE ceiling is the one that actually bounds it: ten bodies at the
-    # body ceiling would be far over any client's result cap.
-    big = [R.task_add(TL, "architect", f"Big {i}", "y" * (MAX_BODY_BYTES - 100),
-                      "Architect")["id"] for i in range(3)]
-    out = R.task_get(TL, big)
-    assert out["truncated"] is True, out
-    assert out["returned"] < out["requested"] == 3, out
-    assert out["byte_ceiling"] == TASKS_GET_BYTES, out
-    for tid in ids + big:
-        R.task_drop(TL, tid, "bench cleanup", "architect")
-
-
-case("tasks_get REFUSES too many codes and DECLARES a byte truncation",
-     the_batch_of_bodies_has_two_ceilings)
-
-
-def the_cut_falls_on_the_fresh_work():
-    """When the cap bites, the ORDER decides what is lost. Urgent first, then
-    oldest first — so what survives is what has been waiting, which is the
-    reason the list exists."""
-    R.add_consumers(TL, [("Bench", "chat")])
-    made = []
-    for i in range(TASKS_LIST_CAP + 5):
-        made.append(R.task_add(TL, "Bench", f"Task {i:03d}", "body", "Architect",
-                               urgent=(i == TASKS_LIST_CAP + 4))["id"])
-    out = R.task_list(TL, "bench")
-    assert out["pending_total"] == TASKS_LIST_CAP + 5, out["pending_total"]
-    assert out["pending_truncated"] is True, out["pending_truncated"]
-    assert len(out["pending"]) == TASKS_LIST_CAP, len(out["pending"])
-    got = [x["id"] for x in out["pending"]]
-    assert got[0] == made[-1], "the urgent one did not come first"
-    # The five that fell off are the FRESHEST, never the oldest.
-    assert made[0] in got and made[1] in got, "an old task was cut"
-    for late in made[TASKS_LIST_CAP:-1]:
-        assert late not in got, f"{late} survived the cut ahead of an older task"
-
-
-case("the cap cuts the fresh work, never what has been waiting — and says the "
-     "real total", the_cut_falls_on_the_fresh_work)
-
-
-def the_stale_marker_is_a_label_and_not_a_lifecycle():
-    """THE CONSTANT IS MOVED, NOT THE CLOCK. Backdating the row is the obvious
-    way and it is refused by the very trigger that freezes `created_at` —
-    which is the guarantee working, not an obstacle. Waiting a month is not a
-    test either. So the suite shifts the threshold and puts it back."""
-    tid = R.task_add(TL, "advisory", "Long forgotten", "body", "Architect")["id"]
-    fresh = next(x for x in R.task_list(TL, "advisory")["pending"] if x["id"] == tid)
-    assert "stale" not in fresh, fresh
-    _rules.TASKS_STALE_DAYS = 0
-    try:
-        row = next(x for x in R.task_list(TL, "advisory")["pending"] if x["id"] == tid)
-        assert row.get("stale") is True, row
-        assert row["status"] == "pending", "a stale task expired: it must not"
-        assert R.task_overview(TL)["by_consumer"]["Advisory"]["stale"] >= 1
-    finally:
-        _rules.TASKS_STALE_DAYS = TASKS_STALE_DAYS
-    R.task_drop(TL, tid, "bench cleanup", "advisory")
-
-
-case("a task that has gone stale is MARKED, not expired",
-     the_stale_marker_is_a_label_and_not_a_lifecycle)
-
-
-def the_recent_window_hands_over_to_the_range():
-    """A closed task leaves the list once the window has passed, and it is not
-    gone: it is asked for by date. That handover is the whole reason the
-    window may be short. Same manoeuvre as above — the window moves, the
-    closing date cannot, because a closed task is closed."""
-    tid = R.task_add(TL, "advisory", "Ancient history", "body", "Architect")["id"]
-    R.task_complete(TL, tid, "done long ago", "advisory")
-    assert tid in {x["id"] for x in R.task_list(TL, "advisory")["recently_closed"]}
-    _rules.TASKS_RECENT_DAYS = -1              # a window that has already shut
-    try:
-        ids = {x["id"] for x in R.task_list(TL, "advisory")["recently_closed"]}
-        assert tid not in ids, "a task past the window stayed in the list"
-    finally:
-        _rules.TASKS_RECENT_DAYS = TASKS_RECENT_DAYS
-    today = R.task_get(TL, [tid])["found"][0]["closed_at"][:10]
-    found = R.task_range(TL, "advisory", today, today, "closed_at")
-    assert tid in {x["id"] for x in found["tasks"]}, found
-
-
-case("past the window a closed task leaves the list and is found by date",
-     the_recent_window_hands_over_to_the_range)
-
-
-def the_overview_counts_the_urgent_by_CREATOR():
-    """`urgent` has no ceiling and no levels, so the guard against inflation is
-    visibility: an inflated column is a skill to correct, not a set of tasks to
-    downgrade."""
-    out = R.task_overview(TL)
-    assert "FP-Verifica-Coerenza" in out["urgent_created_by"] or \
-           "Architect" in out["urgent_created_by"], out["urgent_created_by"]
-    assert set(out["by_consumer"]) >= {"Architect", "Advisory", "Bench"}, out["by_consumer"]
-    caps = out["caps_in_force"]
-    assert caps["list"] == TASKS_LIST_CAP and caps["get_ids"] == TASKS_GET_IDS, caps
-    assert caps["stale_after_days"] == TASKS_STALE_DAYS, caps
-    assert out["by_consumer"]["Bench"]["pending"] == TASKS_LIST_CAP + 5, out["by_consumer"]
-
-
-case("the overview is cross-consumer, counts urgent by creator, and declares "
-     "the ceilings in force", the_overview_counts_the_urgent_by_CREATOR)
-
-
-def a_rule_ID_handed_to_a_task_reader_says_so():
-    try:
-        R.task_get(TL, ["VA-0001"])
-        assert False, "a rule ID passed for a task"
-    except RulesError as e:
-        assert "not a task ID" in str(e) and "rules_get" in str(e), e
-    out = R.task_get(TL, ["TK-9999"])
-    assert out["never_defined"] == ["TK-9999"] and out["found"] == [], out
-
-
-case("a rule ID read as a task is named as one, not reported missing",
-     a_rule_ID_handed_to_a_task_reader_says_so)
-
-
-def a_relic_is_refused_in_the_task_log_too():
-    """ANYWHERE means anywhere. A task is not law, so an UNRESOLVED pointer is
-    reported in the text rather than refused — but a RELIC of the old Markdown
-    is refused here exactly as it is in a rule. Two different guarantees, both
-    holding. Found by injection: taking the sanitisation off task_add left the
-    whole suite green."""
-    # THE TASK LOG. A task is not law, so an unresolved pointer is reported in
-    # the text rather than refused — but a RELIC is refused here exactly as it
-    # is in a rule. The two are different guarantees and both hold.
-    ok_id = R.task_add(TL, "advisory", "Cita un ente vivo",
-                       "Guarda (VA-0001) e anche (VE-0099), che non esiste ancora.",
-                       "Architect")["id"]
-    R.task_drop(TL, ok_id, "bench cleanup", "advisory")
-    for field, kw in (("title", dict(title="Sistemare VE-05")),
-                      ("body", dict(body="Il paragrafo di ST-16 è sbagliato."))):
-        args = dict(title="Pulito", body="Corpo pulito.")
-        args.update(kw)
-        try:
-            R.task_add(TL, "advisory", args["title"], args["body"], "Architect")
-            raise AssertionError(f"a relic went into a task {field}")
-        except RulesError as e:
-            assert f"reference sanitisation failed in `{field}`" in str(e), (field, e)
-    tid = R.task_add(TL, "advisory", "Da chiudere", "Corpo pulito.", "Architect")["id"]
-    try:
-        R.task_complete(TL, tid, "fatto, come chiedeva VE-05", "advisory")
-        raise AssertionError("a relic went into an outcome")
-    except RulesError as e:
-        assert "reference sanitisation failed in `outcome`" in str(e), e
-    try:
-        R.task_amend(TL, tid, "advisory", body="Vedi RL-04.")
-        raise AssertionError("a relic went into an amended task body")
-    except RulesError as e:
-        assert "reference sanitisation failed in `body`" in str(e), e
-    R.task_drop(TL, tid, "bench cleanup", "advisory")
-
-
-case("a relic is refused in the task log too, and an unresolved pointer is not",
-     a_relic_is_refused_in_the_task_log_too)
-
-
-# =====================================================================
-head("ending a consumer: the row stays, every pointer goes")
-# =====================================================================
-# Placed LAST on purpose: it creates a project of its own, and three cases
-# above count the projects in the database.
-
-def a_retired_consumer_keeps_its_row_and_loses_every_pointer():
-    """RETIREMENT, and 'every pointer' is meant literally.
-
-    The model had no door for this until v3.2.0, and the absence made it rigid
-    exactly where a model must not be: roles end, skills get rewritten. The
-    nearest thing was to narrow every rule off a consumer by hand and leave it
-    there — where `_ALL_` went on reaching it, so it went on being bound by
-    every universal rule. That is not retired.
-
-    IT MARKS AND DELETES NOTHING. One column moves; not one row of
-    scope_members and not one row of rule_scopes is touched, and every read
-    excludes the retired one instead. The first version of this deleted both
-    junctions, and that was wrong in a way this case now pins: deleting from
-    rule_scopes changed the perimeter of LIVE RULES as a side effect of a
-    gesture aimed at somebody else, and deleting from scope_members threw away
-    the answer to "which rules used to reach it"."""
-    out = R.create_project("Retire bench",
-                           [{"name": "Architect"}, {"name": "Advisory"},
-                            {"name": "FP-Old", "kind": "skill"}], {"VA": "vault"})
-    RB, RB_KEY = out["code"], out["architect_key"]
-    R.create_scope(RB, "deliberativi", ["Architect", "FP-Old"])
-    wide = R.propose(RB, "VA", "R", "Universal", "Body.", ["*"], "why", "Architect")["id"]
-    aimed = R.propose(RB, "VA", "R", "Only for the skill", "Body.", ["FP-Old"],
-                      "why", "Architect")["id"]
-    grouped = R.propose(RB, "VA", "R", "For the group", "Body.", ["deliberativi"],
-                        "why", "Architect")["id"]
-    R.approve(RB, R.batch(RB)["digest"])
-    assert {wide, aimed} <= {x["id"] for x in R.list_rules(RB, "FP-Old")["rules"]}
-    photo = R.cx.execute("SELECT consumers FROM rule_versions WHERE project='Retire bench' "
-                         "AND rule_id=? ORDER BY version DESC LIMIT 1", (wide,)).fetchone()[0]
-    assert "FP-Old" in photo, photo
-
-    # OPEN TASKS BLOCK IT: retiring the owner of waiting work would make that
-    # work unreachable by every reading — a drop with no reason, performed by
-    # housekeeping.
-    tid = R.task_add(RB, "FP-Old", "Still open", "Body.", "Architect")["id"]
-    try:
-        R.retire_consumer(RB, "fp-old", "rewritten")
-        raise AssertionError("it retired an owner with open work")
-    except RulesError as e:
-        assert "open task" in str(e) and tid in str(e), e
-    R.task_drop(RB, tid, "bench cleanup", "Architect")
-
-    # COUNTED BEFORE AND AFTER: the relations must come through untouched, and
-    # no rule may gain a version — a rule whose perimeter nobody re-decided
-    # must not have a new photograph taken of it.
-    def rows():
-        return (R.cx.execute("SELECT COUNT(*) FROM rule_scopes").fetchone()[0],
-                R.cx.execute("SELECT COUNT(*) FROM scope_members").fetchone()[0],
-                R.cx.execute("SELECT COUNT(*) FROM rule_versions WHERE project="
-                             "'Retire bench'").fetchone()[0])
-    before = rows()
-    declared = R.cx.execute("SELECT scopes FROM rule_versions WHERE project='Retire bench' "
-                            "AND rule_id=? ORDER BY version DESC LIMIT 1", (aimed,)).fetchone()[0]
-
-    verdict = R.retire_consumer(RB, "fp-old", "the skill was rewritten")
-    assert verdict["retired"] == "FP-Old", verdict          # stored spelling comes back
-    assert rows() == before, f"the retirement wrote in the relations: {before} -> {rows()}"
-    assert R.cx.execute("SELECT scopes FROM rule_versions WHERE project='Retire bench' "
-                        "AND rule_id=? ORDER BY version DESC LIMIT 1",
-                        (aimed,)).fetchone()[0] == declared, \
-        "a rule's declared perimeter was re-decided by a gesture aimed at a consumer"
-    assert verdict["was_in_groups"] == ["deliberativi"], verdict
-    assert verdict["losing_a_reader"] == [aimed], verdict
-    assert verdict["now_reaching_nobody_live"] == [aimed], verdict
-
-    info = R.project_info(RB)
-    live = [c["name"] for c in info["consumers"]]
-    assert "FP-Old" not in live and live == ["Advisory", "Architect"], live
-    assert [c["name"] for c in info["retired_consumers"]] == ["FP-Old"], info
-    # _ALL_ STOPS REACHING IT, which is the half a flag alone would not buy.
-    allsc = next(s for s in info["scopes"] if s["name"] == ALL)
-    assert allsc["breadth"] == 2 and "FP-Old" not in allsc["members"], allsc
-    delib = next(s for s in info["scopes"] if s["name"] == "deliberativi")
-    assert delib["members"] == ["Architect"], delib
-    # BREADTH is what orders every reading, so a retired member left in the
-    # count would push a rule up the list for everybody.
-    assert delib["breadth"] == 1, delib
-    # AND THE PHOTOGRAPH IS UNTOUCHED.
-    assert R.cx.execute("SELECT consumers FROM rule_versions WHERE project='Retire bench' "
-                        "AND rule_id=? ORDER BY version LIMIT 1",
-                        (wide,)).fetchone()[0] == photo, "the past was rewritten"
-
-    # EVERY DOOR THAT NAMES IT REFUSES, and says RETIRED rather than unknown:
-    # a role that ended and a typo are not the same news.
-    for label, fn in (
-            ("list", lambda: R.list_rules(RB, "FP-Old")),
-            ("propose", lambda: R.propose(RB, "VA", "R", "x", "Body.", ["*"], "w", "FP-Old")),
-            ("task", lambda: R.task_add(RB, "FP-Old", "x", "Body.", "Architect")),
-            ("pending", lambda: R.pending(RB, "FP-Old")),
-            ("export", lambda: R.export(RB, "FP-Old"))):
-        try:
-            fn()
-            raise AssertionError(f"{label} accepted a retired consumer")
-        except RulesError as e:
-            assert "RETIRED" in str(e), (label, e)
-    # Its singleton survives — the history uses that spelling — but it is not
-    # a TARGET: a rule aimed there would reach nobody, quietly.
-    try:
-        R.propose(RB, "VA", "R", "x", "Body.", ["FP-Old"], "w", "Architect")
-        raise AssertionError("a rule was aimed at a retired consumer")
-    except RulesError as e:
-        assert "RETIRED" in str(e) and "reach nobody" in str(e), e
-    # A bare name does NOT bring it back: undoing a decision is never the
-    # silent effect of a list of names.
-    try:
-        R.add_consumers(RB, ["FP-Old"])
-        raise AssertionError("a bare name revived a retired consumer")
-    except RulesError as e:
-        assert "revive" in str(e), e
-
-    # THE NEXT PHOTOGRAPH DOES NOT NAME IT, and the old one still does. The
-    # snapshot is computed when a version is WRITTEN, so a rule amended after
-    # the retirement records who it reaches NOW, while every version taken
-    # before goes on saying what was true then.
-    R.amend(RB, wide, R._version("Retire bench", wide),
-            "a typo, nothing to do with anybody leaving", title="Universal, fixed")
-    # BOTH ROUTES: the universal one, and the one that arrives through a
-    # GROUP the retired consumer belonged to — they are two branches of the
-    # snapshot query and a filter on one is not a filter on the other.
-    R.amend(RB, grouped, R._version("Retire bench", grouped),
-            "a typo here too", title="For the group, fixed")
-    for rid in (wide, grouped):
-        versions = [r[0] for r in R.cx.execute(
-            "SELECT consumers FROM rule_versions WHERE project='Retire bench' "
-            "AND rule_id=? ORDER BY version", (rid,))]
-        assert "FP-Old" in versions[0], (rid, versions[0])
-        assert "FP-Old" not in versions[-1], (rid, versions[-1])
-
-    back = R.add_consumers(RB, [{"name": "fp-old", "revive": True}])
-    assert back["revived"] == ["FP-Old"], back
-    assert "FP-Old" in [c["name"] for c in R.project_info(RB)["consumers"]]
-    # EVERYTHING COMES BACK, and that is what marking instead of deleting buys:
-    # one column to NULL, no rebuild, no repair pass that could get it wrong.
-    reached = {x["id"] for x in R.list_rules(RB, "FP-Old")["rules"]}
-    assert {wide, aimed, grouped} <= reached, \
-        f"the revived consumer came back diminished: {reached}"
-    assert R.project_info(RB)["scopes"], "scopes survived"
-    assert "FP-Old" in next(s for s in R.project_info(RB)["scopes"]
-                            if s["name"] == "deliberativi")["members"], \
-        "the group membership did not come back"
-    assert rows()[:2] == before[:2], "reviving wrote in the relations"
-    v = [(x[0], x[1]) for x in R.cx.execute(
-        "SELECT version, action FROM consumer_versions WHERE project='Retire bench' "
-        "AND consumer='FP-Old' ORDER BY version")]
-    assert v == [(1, "created"), (2, "retired"), (3, "revived")], v
-
-
-case("a retired consumer keeps its row, loses every pointer, and comes back "
-     "only when somebody says so", a_retired_consumer_keeps_its_row_and_loses_every_pointer)
-
-print(f"\n{OK} passed, {FAIL} failed")
-if FAILURES:
-    print("failed: " + "; ".join(FAILURES))
-sys.exit(1 if FAIL else 0)
+        equals(name, gesture(), want)
+    except Exception as exc:                       # noqa: BLE001
+        _failed.append(f"{name}: raised instead of answering — {exc}")
+        print(f"  FAIL  {name}: raised — {str(exc)[:70]}")
+
+
+# =====================================================================
+print("\n— THE LADDER, and it is answered in ONE place —")
+# port_for is the only place the scale is written. The surface asks it; if it
+# were repeated at each door, one door would be out of step and nobody would
+# know which.
+equals("creating takes the admin code",
+       rules.Project.port_for("consumer", "create", {"kind": "chat"}), "admin")
+equals("amending anything that exists takes the one-time code too",
+       rules.Project.port_for("consumer", "amend", {"brief": "x"}), "auth")
+equals("a rename is a modification like any other",
+       rules.Project.port_for("consumer", "amend", {"name": "x"}), "auth")
+equals("group membership is a modification",
+       rules.Project.port_for("group", "amend", {"members": ["a"]}), "auth")
+equals("queue_cap is a modification",
+       rules.Project.port_for("project", "amend", {"queue_cap": 5}), "auth")
+equals("retiring is a modification", rules.Project.port_for("domain", "x", {}), "auth")
+equals("specs alone is the one exception downward",
+       rules.Project.port_for("consumer", "amend", {"specs": "x"}), "project")
+equals("and it holds for the project's own specs",
+       rules.Project.port_for("project", "amend", {"specs": "x"}), "project")
+equals("MIXED answers with the HIGHEST port it contains",
+       rules.Project.port_for("consumer", "amend", {"specs": "x", "brief": "y"}), "auth")
+equals("a brief is never the low door",
+       rules.Project.port_for("project", "amend", {"brief": "x"}), "auth")
+equals("and a domain has no specs to travel low",
+       rules.Project.port_for("domain", "amend", {"description": "x"}), "auth")
+
+# =====================================================================
+print("\n— THE ANAGRAFICA —")
+p = project()
+refused("a consumer with no kind", lambda: p.amend_project(
+    "consumer", "tax", "create", {}), "kind")
+refused("a kind that is not one of the three", lambda: p.amend_project(
+    "consumer", "tax", "create", {"kind": "robot"}), "one of chat, skill, human")
+refused("a consumer that already exists", lambda: p.amend_project(
+    "consumer", "ARCHITECT", "create", {"kind": "chat"}), "already has a consumer")
+refused("a domain code that is not two letters", lambda: p.amend_project(
+    "domain", "VALUE", "create", {"reason": "x"}), "two uppercase letters")
+refused("TK claimed as a domain of rules", lambda: p.amend_project(
+    "domain", "TK", "create", {"reason": "x"}), "RESERVED")
+refused("a domain with no reason", lambda: p.amend_project(
+    "domain", "QQ", "create", {}), "reason to exist")
+refused("a field that belongs to another entity", lambda: p.amend_project(
+    "consumer", "advisory", "amend", {"description": "x"}), "not a field of consumer")
+refused("the domain code, amended", lambda: p.amend_project(
+    "domain", "VA", "amend", {"code": "VB"}), "not a field of domain")
+refused("an amendment with nothing in it", lambda: p.amend_project(
+    "consumer", "advisory", "amend", {}), "nothing to amend")
+refused("a retirement with a change smuggled in", lambda: p.amend_project(
+    "consumer", "news", "retire", {"brief": "x"}, reason="done"), "takes no fields")
+refused("retiring without a reason", lambda: p.amend_project(
+    "consumer", "news", "retire", {}), "costs a reason")
+refused("a group with no members", lambda: p.amend_project(
+    "group", "vuoti", "create", {"members": []}), "at least one consumer")
+refused("a group emptied instead of retired", lambda: p.amend_project(
+    "group", "automatismi", "amend", {"members": []}), "retire it")
+refused("reviving something that is not retired", lambda: p.amend_project(
+    "consumer", "advisory", "revive", {}), "nothing to revive")
+refused("the project created from a tool", lambda: p.amend_project(
+    "project", "", "create", {}), "catastrophic has no tool")
+refused("a negative queue cap", lambda: p.amend_project(
+    "project", "", "amend", {"queue_cap": -1}), "none of the three")
+
+out = allowed("a rename goes through", lambda: p.amend_project(
+    "consumer", "advisory", "amend", {"name": "fidelity advisory"}, actor="architect"))
+equals("and the verdict says the old name STOPS RESOLVING",
+       "STOPS RESOLVING" in (out or {}).get("note", ""), True)
+equals("and it names what lives outside the registry",
+       all(w in (out or {}).get("note", "")
+           for w in ("skill", "instructions", "scheduled")), True)
+refused("the old name does not resolve any more",
+        lambda: p.list_rules("advisory"), "not a consumer of this project")
+allowed("the new one does", lambda: p.list_rules("fidelity advisory"))
+
+# =====================================================================
+print("\n— THE PERIMETER: declared, never deduced —")
+p = project()
+refused("a reach that is neither", lambda: p.propose(
+    "VA", "R", "t", "b", "why", "some", "architect"), "declared and never deduced")
+refused("targeted with nothing to aim at", lambda: p.propose(
+    "VA", "R", "t", "b", "why", "targeted", "architect"), "reaches NOBODY")
+refused("universal WITH a perimeter", lambda: p.propose(
+    "VA", "R", "t", "b", "why", "all", "architect", groups=["deliberativi"]),
+    "takes no group")
+refused("a group nobody declared", lambda: p.propose(
+    "VA", "R", "t", "b", "why", "targeted", "architect", groups=["fantasmi"]),
+    "not a group of this project")
+refused("a consumer named where a group goes", lambda: p.propose(
+    "VA", "R", "t", "b", "why", "targeted", "architect", groups=["news"]),
+    "A single consumer is not a group")
+refused("the same group twice", lambda: p.propose(
+    "VA", "R", "t", "b", "why", "targeted", "architect",
+    groups=["deliberativi", "DELIBERATIVI"]), "named twice")
+refused("an exception already inside this rule's groups", lambda: p.propose(
+    "VA", "R", "t", "b", "why", "targeted", "architect",
+    groups=["deliberativi"], exceptions=["advisory"]), "already inside")
+allowed("an exception that belongs to OTHER groups is its own business",
+        lambda: p.propose("VA", "R", "t1", "b", "why", "targeted", "architect",
+                          groups=["deliberativi"], exceptions=["news"]))
+allowed("group with group overlap is allowed",
+        lambda: p.propose("VA", "R", "t2", "b", "why", "targeted", "architect",
+                          groups=["deliberativi", "automatismi"]))
+
+# =====================================================================
+print("\n— PROPOSING —")
+p = project(queue_cap=3)
+refused("a type that is not R, M or F", lambda: p.propose(
+    "VA", "X", "t", "b", "why", "all", "architect"), "R binding, M method")
+refused("no title", lambda: p.propose("VA", "R", "", "b", "why", "all", "architect"),
+        "needs a title")
+refused("no body", lambda: p.propose("VA", "R", "t", "", "why", "all", "architect"),
+        "needs a body")
+refused("no reason", lambda: p.propose("VA", "R", "t", "b", "", "all", "architect"),
+        "reason is mandatory")
+refused("unsigned", lambda: p.propose("VA", "R", "t", "b", "why", "all", ""),
+        "proposed_by is required")
+refused("a domain nobody declared", lambda: p.propose(
+    "QQ", "R", "t", "b", "why", "all", "architect"), "not declared by this project")
+first = allowed("a proposal goes in", lambda: p.propose(
+    "VA", "R", "cite sources", "Always name the source.", "because it was decided",
+    "all", "architect"))
+equals("it is born proposed", (first or {}).get("status"), "proposed")
+equals("and the verdict says who it would reach", (first or {}).get("reaches"), 4)
+p.propose("VA", "M", "b", "body", "why", "all", "architect")
+p.propose("VA", "F", "c", "body", "why", "all", "architect")
+refused("the queue at its ceiling", lambda: p.propose(
+    "VA", "R", "d", "body", "why", "all", "architect"), "ceiling is 3")
+refused("and the refusal lists what is waiting", lambda: p.propose(
+    "VA", "R", "d", "body", "why", "all", "architect"), "cite sources")
+
+p = project(queue_cap=0)
+refused("a queue declared closed", lambda: p.propose(
+    "VA", "R", "t", "b", "why", "all", "architect"), "CLOSED")
+
+# =====================================================================
+print("\n— THE SANITISATION, at every door —")
+p = project()
+rid = rule(p, title="the first one")
+refused("a short ID in a body", lambda: p.propose(
+    "VA", "R", "t", "see (VA-01)", "why", "all", "architect"), "sanitisation failed")
+refused("a short ID in the REASON, which can never be repaired", lambda: p.propose(
+    "VA", "R", "t", "b", "after (VE-05)", "all", "architect"), "sanitisation failed")
+refused("a short ID in the title", lambda: p.propose(
+    "VA", "R", "about (VA-1)", "b", "why", "all", "architect"), "sanitisation failed")
+refused("a bare ID outside its brackets", lambda: p.propose(
+    "VA", "R", "t", "see VA-0001 for this", "why", "all", "architect"), "bare ID")
+refused("brackets holding a sentence instead of a pointer", lambda: p.propose(
+    "VA", "R", "t", "(see VA-0001)", "why", "all", "architect"), "bare ID")
+refused("a citation that does not resolve", lambda: p.propose(
+    "VA", "R", "t", "see (VA-0099)", "why", "all", "architect"), "does not resolve")
+refused("a citation towards something still in the queue", lambda: (
+    p.propose("VA", "R", "in the queue", "b", "why", "all", "architect"),
+    p.propose("VA", "R", "t", "see (VA-0002)", "why", "all", "architect")),
+    "not in force yet")
+refused("a gloss of your own inside the brackets", lambda: p.propose(
+    "VA", "R", "t", "see (VA-0001 — my own note)", "why", "all", "architect"),
+    "not that rule's title")
+allowed("the gloss the registry itself writes, pasted straight back",
+        lambda: p.propose("VA", "R", "t", "see (VA-0001 — the first one)", "why",
+                          "all", "architect"))
+yields("and it is STORED compact, so the title cannot go stale",
+       lambda: p.cx.execute("SELECT body FROM v_rule WHERE title='t' "
+                            "ORDER BY rule_id DESC").fetchone()[0],
+       "see (VA-0001)")
+yields("while READING puts the current title back in",
+       lambda: p._expand("see (VA-0001)"), "see (VA-0001 — the first one)")
+refused("a rule that cites a TASK", lambda: p.propose(
+    "VA", "R", "t", "see (TK-0001)", "why", "all", "architect"),
+    "cites a rule, never a task")
+
+# =====================================================================
+print("\n— THE SUPERSEDE —")
+p = project()
+victim = rule(p, title="the old way")
+heir = allowed("a proposal can claim a rule in force", lambda: p.propose(
+    "VA", "R", "the new way", "b", "it changed", "all", "architect",
+    supersedes=victim))
+refused("a second heir for the same rule", lambda: p.propose(
+    "VA", "R", "a third way", "b", "why", "all", "architect", supersedes=victim),
+    "already claimed")
+refused("superseding something that was never defined", lambda: p.propose(
+    "VA", "R", "t", "b", "why", "all", "architect", supersedes="VA-0099"),
+    "never defined")
+b = p.batch()
+allowed("approving the heir retires the victim in the same decision",
+        lambda: p.decide(b["digest"], [heir["id"]], {}))
+yields("and the victim points forward",
+       lambda: p.get_rules([victim])["rules"][0]["superseded_by"], heir["id"])
+yields("and the citation of the victim reads as retired, in the text",
+       lambda: "retired → superseded by" in p._expand(f"({victim})"), True)
+
+# =====================================================================
+print("\n— THE PAGE: one turn, two verdicts —")
+p = project()
+a = p.propose("VA", "R", "one", "b", "why", "all", "architect")["id"]
+b_ = p.propose("VA", "R", "two", "b", "why", "targeted", "architect",
+               groups=["deliberativi"])["id"]
+lot = p.batch()
+equals("the lot is the WHOLE queue", lot["count"], 2)
+equals("row one: the perimeter as DECLARED",
+       lot["pending"][1]["declared"], {"reach": "targeted",
+                                       "groups": ["deliberativi"], "exceptions": []})
+equals("row two: the consumers it EFFECTIVELY reaches, expanded and counted",
+       (lot["pending"][1]["reaches"], lot["pending"][1]["reaches_count"]),
+       (["advisory", "architect"], 2))
+equals("a universal proposal reaches everyone alive",
+       lot["pending"][0]["reaches_count"], 4)
+refused("a digest that went stale",
+        lambda: p.decide("deadbeef", [a], {b_: "a complete lot, so only the digest "
+                                               "can refuse this"}),
+        "changed between the reading and this post")
+refused("an unticked proposal with no reason", lambda: p.decide(lot["digest"], [a], {}),
+        "a denial costs a sentence")
+refused("a tick for something outside the lot",
+        lambda: p.decide(lot["digest"], ["VA-0099"], {}), "not in this lot")
+done = allowed("ticked in, unticked out, in one turn",
+               lambda: p.decide(lot["digest"], [a], {b_: "not now: it needs the tax desk"}))
+equals("the yes is recorded", [x["id"] for x in (done or {})["approved"]], [a])
+equals("and so is the NO, with its reason",
+       (done or {})["denied"], [{"id": b_, "reason": "not now: it needs the tax desk"}])
+yields("the denial is in the decision log, not lost",
+       lambda: p.cx.execute("SELECT verdict, reason FROM decision_rule "
+                            "ORDER BY rule_id").fetchall()[1][1],
+       "not now: it needs the tax desk")
+yields("an approved rule is provisional and dated",
+       lambda: p.get_rules([a])["rules"][0]["permanence"], "provisional")
+refused("deciding an empty queue", lambda: p.decide("x", [], {}), "nothing to decide")
+
+p = project(queue_cap=2)
+p.propose("VA", "R", "one", "b", "why", "all", "architect")
+p.propose("VA", "R", "two", "b", "why", "all", "architect")
+lot = p.batch()
+allowed("the ceiling lets a full lot through", lambda: p.decide(
+    lot["digest"], [x["id"] for x in lot["pending"]], {}))
+
+# =====================================================================
+print("\n— NARROWING: downwards only, and never to nobody —")
+p = project()
+universal = rule(p, title="binds everyone")
+targeted = rule(p, "targeted", groups=["deliberativi"], title="binds the deliberative")
+v = p.get_rules([universal], history=True)["rules"][0]["history"][-1]["version"]
+refused("a narrowing with no reason", lambda: p.amend_rule(
+    universal, "targeted", ["deliberativi"], [], v, "", "architect"), "reason is required")
+refused("writing against a version that moved", lambda: p.amend_rule(
+    universal, "targeted", ["deliberativi"], [], 99, "why", "architect"),
+    "somebody changed it after you read it")
+narrowed = allowed("a UNIVERSAL rule narrowed onto a group — the gesture the DDL blocked",
+                   lambda: p.amend_rule(universal, "targeted", ["deliberativi"], [],
+                                        v, "only the deliberative desks now", "architect"))
+equals("and it says who it stopped reaching",
+       (narrowed or {})["no_longer_reaches"], ["Alfredo", "news"])
+yields("the perimeter is what the rule now shows",
+       lambda: p.get_rules([universal])["rules"][0]["groups"], ["deliberativi"])
+def ver(rid):
+    return p.get_rules([rid], history=True)["rules"][0]["history"][-1]["version"]
+
+
+refused("widening by one consumer", lambda: p.amend_rule(
+    targeted, "targeted", ["deliberativi"], ["news"], ver(targeted), "one more",
+    "architect"), "it would newly bind news")
+refused("widening all the way back to everyone", lambda: p.amend_rule(
+    targeted, "all", [], [], ver(targeted), "everyone now", "architect"),
+    "not a narrowing")
+refused("and the refusal carries the cure", lambda: p.amend_rule(
+    targeted, "all", [], [], ver(targeted), "everyone now", "architect"), "supersede")
+p.amend_project("group", "deliberativi", "amend", {"members": ["architect"]},
+                actor="architect")
+# A group whose members have all ENDED: the new perimeter is a subset of the
+# old one — it has to be, it is empty — so containment says yes and only the
+# empty guard can say no.
+p.amend_project("group", "soli", "create", {"members": ["news"]}, actor="architect")
+p.amend_project("consumer", "news", "retire", {}, reason="the skill was withdrawn",
+                actor="architect")
+refused("a narrowing that leaves NOBODY is a retirement in disguise",
+        lambda: p.amend_rule(targeted, "targeted", ["soli"], [], ver(targeted), "why", "architect"),
+        "retirement in disguise")
+refused("and it points at the door that gesture really goes through",
+        lambda: p.amend_rule(targeted, "targeted", ["soli"], [], ver(targeted), "why", "architect"),
+        "rules_retire")
+refused("the content is not touched from here", lambda: p.amend_project(
+    "rule", "x", "amend", {}), "entity 'rule'")
+refused("a rule that is not in force has no perimeter to narrow", lambda: (
+    p.propose("VA", "R", "still queued", "b", "why", "all", "architect"),
+    p.amend_rule("VA-0003", "targeted", ["automatismi"], [], 1, "why", "architect")),
+    "not in force")
+
+# =====================================================================
+print("\n— THE EMPTY GUARD: it NAMES the rules —")
+p = project()
+only_news = rule(p, "targeted", exceptions=["news"], title="the news rule")
+refused("retiring the last consumer a rule in force reaches",
+        lambda: p.amend_project("consumer", "news", "retire", {}, reason="finished",
+                                actor="architect"), "the news rule")
+refused("and it says what to do about it",
+        lambda: p.amend_project("consumer", "news", "retire", {}, reason="finished",
+                                actor="architect"), "binding nobody")
+p2 = project()
+grp = rule(p2, "targeted", groups=["automatismi"], title="the automatic rule")
+refused("pulling out of a group the only people a rule in force reaches",
+        lambda: p2.amend_project("group", "automatismi", "amend",
+                                 {"members": ["architect"]}, actor="architect"),
+        "the automatic rule")
+refused("retiring that group outright, same guard",
+        lambda: p2.amend_project("group", "automatismi", "retire", {},
+                                 reason="done", actor="architect"),
+        "the automatic rule")
+allowed("taking ONE member out, when the rule still reaches somebody",
+        lambda: p2.amend_project("group", "automatismi", "amend",
+                                 {"members": ["advisory"]}, actor="architect"))
+rule(p2, "targeted", groups=["deliberativi"], exceptions=["news"], title="mixed")
+allowed("ADDING a member passes even when it covers an exception",
+        lambda: p2.amend_project("group", "deliberativi", "amend",
+                                 {"members": ["architect", "advisory", "news"]},
+                                 actor="architect"))
+yields("and the overlap it created is REPORTED, not hidden",
+       lambda: bool(p2.status()["overlaps"]), True)
+
+p3 = project()
+rule(p3, "targeted", exceptions=["news", "advisory"], title="two by name")
+refused("a group CREATED to mirror a rule's exceptions",
+        lambda: p3.amend_project("group", "ricalco", "create",
+                                 {"members": ["news", "advisory"]}, actor="architect"),
+        "two by name")
+
+# =====================================================================
+print("\n— RETIRING A RULE —")
+p = project()
+rid = rule(p, title="on the way out")
+refused("retiring without a reason", lambda: p.retire(rid, ""), "price of a retirement")
+refused("retiring something that was never defined", lambda: p.retire("VA-0099", "why"),
+        "never defined")
+allowed("a rule in force ends", lambda: p.retire(rid, "the reason it stopped applying",
+                                                 "architect"))
+refused("and it does not end twice", lambda: p.retire(rid, "again"), "already retired")
+p = project()
+rule(p, title="in force")
+refused("retiring a domain that still has rules in force",
+        lambda: p.amend_project("domain", "VA", "retire", {}, reason="done",
+                                actor="architect"), "in force")
+refused("and the refusal names them",
+        lambda: p.amend_project("domain", "VA", "retire", {}, reason="done",
+                                actor="architect"), "in force")
+allowed("a domain with nothing under it retires",
+        lambda: p.amend_project("domain", "ST", "retire", {}, reason="never used",
+                                actor="architect"))
+refused("and nothing new is filed under it", lambda: p.propose(
+    "ST", "R", "t", "b", "why", "all", "architect"), "was retired on")
+
+# =====================================================================
+print("\n— READING: the session start —")
+p = project(brief="the owner's book", specs="cash at 12%")
+u = rule(p, title="everyone")
+g = rule(p, "targeted", groups=["deliberativi"], title="the deliberative")
+d = rule(p, "targeted", exceptions=["advisory"], title="by name")
+start = allowed("one call", lambda: p.list_rules("advisory"))
+equals("the PROJECT comes first", (start or {})["profile"]["brief"], "the owner's book")
+equals("then the consumer's own", (start or {})["consumer"]["name"], "advisory")
+equals("then the rules that reach it", [r["id"] for r in (start or {})["rules"]],
+       [u, g, d])
+equals("universal first, then the group, then the name",
+       [r["reaches_you"] for r in (start or {})["rules"]],
+       ["everyone", "deliberativi", "by name"])
+equals("and the desk summary is TWO counters and nothing else",
+       set((start or {})["desk"]), {"open", "urgent"})
+yields("a rule that reaches nobody here is not listed",
+       lambda: [r["id"] for r in p.list_rules("news")["rules"]], [u])
+yields("query filters, and hands back the fragment",
+       lambda: p.list_rules("advisory", query="deliberative")["rules"][0]["id"], g)
+yields("the queue is the same call",
+       lambda: p.list_rules("advisory", pending=True)["count"], 0)
+refused("a consumer nobody declared", lambda: p.list_rules("nobody"),
+        "not a consumer of this project")
+refused("and the refusal lists the ones that exist", lambda: p.list_rules("nobody"),
+        "architect")
+
+# =====================================================================
+print("\n— READING: the detail, and the story —")
+refused("more IDs than the ceiling is REFUSED, not trimmed",
+        lambda: p.get_rules([u] * (rules.GET_IDS + 1)), "REFUSED and not trimmed")
+yields("a short ID resolves on READ", lambda: p.get_rules(["VA-01"])["rules"][0]["id"], u)
+yields("an ID that is not there is named, not invented",
+       lambda: p.get_rules(["VA-0099"])["not_found"], ["VA-0099"])
+allowed("the perimeter moves, and only the perimeter",
+        lambda: p.amend_rule(g, "targeted", [], ["advisory"], 2,
+                             "the architect desk stops carrying this", "architect"))
+hist = allowed("the history comes as dated gestures",
+               lambda: p.get_rules([g], history=True)["rules"][0]["history"])
+equals("version 1 photographs the perimeter it was born with",
+       (hist or [{}])[0].get("reaches"), ["advisory", "architect"])
+equals("the verbs the database can derive, it derives",
+       [h["action"] for h in (hist or [])], ["created", "approved", "amended"])
+equals("a gesture that moved only the perimeter carries no scalar field at all",
+       (hist or [{}, {}, {}])[2]["changed"], {})
+equals("the audience diff is in names, not in keys",
+       ((hist or [{}, {}, {}])[2].get("joined"), (hist or [{}, {}, {}])[2].get("left")),
+       ([], ["architect"]))
+
+# =====================================================================
+print("\n— THE TASK LOG —")
+p = project()
+rid = rule(p, title="the rule a task points at")
+refused("a task with no body", lambda: p.task_add("advisory", "t", "", "architect"),
+        "needs a body")
+refused("a task nobody signed", lambda: p.task_add("advisory", "t", "b", ""),
+        "created_by is required")
+refused("a task for a desk that does not exist",
+        lambda: p.task_add("nobody", "t", "b", "architect"), "not a consumer")
+t1 = allowed("opening a task for ANOTHER desk is free",
+             lambda: p.task_add("advisory", "check the drift",
+                                "Against (VA-0001).", "architect"))
+h = allowed("and one for a human, which does not notify them",
+            lambda: p.task_add("Alfredo", "sign the form", "b", "architect"))
+equals("and it says so", "does NOT notify" in (h or {}).get("note", ""), True)
+same = allowed("the same idem_key on the same desk absorbs the repeat",
+               lambda: (p.task_add("advisory", "x", "b", "architect", idem_key="k1"),
+                        p.task_add("advisory", "x", "b", "architect", idem_key="k1"))[1])
+equals("it is the task that was already there", (same or {}).get("already_open"), True)
+yields("a citation in a task body expands on read",
+       lambda: p.task_get([t1["id"]])["tasks"][0]["body"],
+       "Against (VA-0001 — the rule a task points at).")
+refused("closing somebody else's task",
+        lambda: p.task_close(t1["id"], "architect", outcome="done"),
+        "takes the admin code")
+allowed("with the admin code it goes through",
+        lambda: p.task_close(t1["id"], "architect", outcome="done", admin=True))
+refused("and closed is closed",
+        lambda: p.task_amend(t1["id"], "advisory", title="t"), "closed is closed")
+t2 = p.task_add("advisory", "another", "b", "architect")["id"]
+refused("closing with both an outcome and a reason",
+        lambda: p.task_close(t2, "advisory", outcome="done", reason="not done"),
+        "exactly one of the two")
+refused("closing with neither", lambda: p.task_close(t2, "advisory"),
+        "exactly one of the two")
+allowed("dropping costs a reason, and that is the whole gesture",
+        lambda: p.task_close(t2, "advisory", reason="the desk that owns it changed"))
+t3 = p.task_add("advisory", "to reassign", "b", "architect")["id"]
+moved = allowed("a reassignment is named",
+                lambda: p.task_amend(t3, "advisory", consumer="news"))
+equals("and it keeps both owners in sight",
+       ((moved or {}).get("reassigned_from"), (moved or {}).get("owner")),
+       ("advisory", "news"))
+refused("a rule read as a task is NAMED, not reported missing",
+        lambda: p.task_get([rid]), "is a RULE, not a task")
+yields("what I opened on other desks, with its outcome",
+       lambda: sorted(t["id"] for t in
+                      p.task_list("architect", authored=True)["closed_recent"]),
+       sorted([t1["id"], t2]))
+yields("and the outcome is on it, which is why the sender stops re-sending",
+       lambda: [t["outcome"] for t in
+                p.task_list("architect", authored=True)["closed_recent"]
+                if t["id"] == t1["id"]], ["done"])
+yields("the overview sees every desk, humans included",
+       lambda: sorted(d["consumer"] for d in p.task_overview()["desks"]),
+       ["Alfredo", "advisory", "architect", "news"])
+yields("and it declares its ceilings",
+       lambda: set(p.task_overview()["caps"]),
+       {"list", "get_ids", "get_bytes", "stale_days"})
+# Every number handed out so far, read BEFORE the prune and kept in Python: the
+# expectation must not come from the same arithmetic the engine is about to do,
+# or the case proves nothing. In 3.1.0 the prune DELETED, MAX(seq) walked
+# backwards, and TK-0004 came back after TK-0007.
+_handed_out = {r[0] for r in p.cx.execute("SELECT display_id FROM v_task")}
+allowed("the prune archives what is closed", lambda: p.prune_tasks("2099-01-01"))
+yields("and leaves the open ones alone, saying how many",
+       lambda: p.prune_tasks("2099-01-01")["left_open"] > 0, True)
+_after = allowed("a task opened after the prune",
+                 lambda: p.task_add("advisory", "after the prune", "b", "architect"))
+equals("takes a number NEVER handed out before",
+       (_after or {}).get("id") not in _handed_out, True)
+equals("and it is past the highest one ever handed out",
+       int((_after or {"id": "TK-0000"})["id"][3:])
+       > max(int(x[3:]) for x in _handed_out), True)
+
+# =====================================================================
+print("\n— THE SECRET, when a consumer has one —")
+p = project()
+p.amend_project("consumer", "news", "amend", {"secret": "s3cret"}, actor="architect")
+refused("a gesture in that consumer's name with no key",
+        lambda: p.task_add("advisory", "t", "b", "news"), "signs its gestures")
+allowed("with the key it goes through",
+        lambda: p.task_add("advisory", "t", "b", "news", consumer_key="s3cret"))
+allowed("and the admin code goes over the top of it",
+        lambda: p.task_add("advisory", "t", "b", "news", admin=True))
+allowed("a consumer with no secret is taken at its name",
+        lambda: p.task_add("advisory", "t", "b", "architect"))
+
+# =====================================================================
+print("\n— THE REPORT —")
+p = project()
+a = rule(p, title="the first")
+b_ = rule(p, "targeted", groups=["deliberativi"], title="the second")
+p.retire(a, "it stopped applying", "architect")
+p.propose("VA", "R", "points at a dead one", "see (VA-0001)", "why", "all", "architect")
+rep = allowed("one call", lambda: p.status())
+equals("it counts, and says it counted", (rep or {})["counted"]["in_force"], 1)
+equals("a citation towards a retired rule is reported",
+       [(d["in"], d["cites"], d["state"]) for d in (rep or {})["dangling_citations"]],
+       [("VA-0003", "VA-0001", "retired")])
+equals("a domain nothing was ever filed under is reported",
+       (rep or {})["domains_with_no_rules"], ["ST"])
+equals("and a consumer no rule reaches", (rep or {})["consumers_no_rule_reaches"],
+       ["news"])
+p.cx.execute("INSERT INTO rule_audience_group (rule_id, group_id) VALUES (3,1)")
+yields("an audience row next to a universal rule is reported before it bites",
+       lambda: p.status()["stray_audience_rows"][0]["rule"], "VA-0003")
+
+# =====================================================================
+_finished = True

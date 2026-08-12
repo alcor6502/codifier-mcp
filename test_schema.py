@@ -109,6 +109,29 @@ def refused(name, gesture, expect):
         con.close()
 
 
+def allowed(name, gesture):
+    """The mirror of `refused`: this gesture must go THROUGH.
+
+    A suite made only of refusals drifts one way — every new trigger makes it
+    greener — and the day a guard blocks something legitimate nothing goes
+    red. That is exactly what happened to `all -> targeted`: two triggers,
+    both defensible on their own, made a documented gesture unreachable in
+    every possible order, and forty green cases had nothing to say about it.
+    """
+    global _passed
+    con = _db()
+    try:
+        gesture(con)
+        con.commit()
+        _passed += 1
+        print(f"  ok    {name}")
+    except Exception as exc:                       # noqa: BLE001 — any refusal
+        _failed.append(f"{name}: REFUSED, and it should not have been — {exc}")
+        print(f"  FAIL  {name}: refused — {str(exc)[:70]}")
+    finally:
+        con.close()
+
+
 def equals(name, got, want):
     global _passed
     if got == want:
@@ -169,14 +192,41 @@ refused("targeted with no audience at all",
 refused("universal WITH an audience",
         lambda c: _rule(c, "all", groups=(1,)),
         "takes no group")
-refused("an audience row slipped next to a live universal rule",
+# THE NARROWING THAT USED TO BE UNREACHABLE. `all -> targeted` is the widest
+# narrowing this registry has, and until the two BEFORE INSERT guards on the
+# audience tables were dropped it could not be written in ANY order: audience
+# first was refused by them, rule first by trg_rule_arc_upd. The gesture is
+# documented — rules_amend takes `reach` and narrows "downwards only" — so the
+# invariant had made a legal move impossible, and no case said so.
+allowed("a universal rule narrowed to a group, in one transaction",
         lambda c: (_rule(c, "all"),
-                   c.execute("INSERT INTO rule_audience_group VALUES (1,1)")),
-        "not targeted")
-refused("an exception slipped next to a live universal rule",
+                   c.execute("INSERT INTO rule_audience_group VALUES (1,1)"),
+                   c.execute("UPDATE rule SET reach='targeted',updated_at=?,"
+                             "event='narrowed to deliberativi' WHERE rule_id=1",
+                             (NOW,))))
+allowed("a universal rule narrowed to a single exception",
         lambda c: (_rule(c, "all"),
-                   c.execute("INSERT INTO rule_audience_exception VALUES (1,1)")),
-        "not targeted")
+                   c.execute("INSERT INTO rule_audience_exception VALUES (1,1)"),
+                   c.execute("UPDATE rule SET reach='targeted',updated_at=?,"
+                             "event='narrowed to architect' WHERE rule_id=1",
+                             (NOW,))))
+
+# And the price of dropping those two, paid in the open: a row slipped next to
+# a live universal rule is no longer refused on the spot. It is INERT while it
+# sits there — the photograph trigger reads the audience tables only when
+# `reach` is 'targeted' — and the arc catches it at the next write on the
+# rule. Late, and on somebody else's gesture; project_status reports it before
+# then.
+allowed("a row slipped next to a live universal rule goes in, and is inert",
+        lambda c: (_rule(c, "all"),
+                   c.execute("INSERT INTO rule_audience_group VALUES (1,1)")))
+refused("...and the next write on that rule is the one that refuses",
+        lambda c: (_rule(c, "all"),
+                   c.execute("INSERT INTO rule_audience_group VALUES (1,1)"),
+                   c.execute("UPDATE rule SET event='an innocent amendment',"
+                             "updated_at=? WHERE rule_id=1", (NOW,))),
+        "takes no group")
+
 refused("a rule emptied of its perimeter by an amendment",
         lambda c: (_rule(c, "targeted", groups=(1,)),
                    c.execute("DELETE FROM rule_audience_group WHERE rule_id=1"),
