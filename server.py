@@ -31,7 +31,10 @@ inside this project "rules" is the only subject there is. The one manual —
 file, whole, with a stop line where the consumer's part ends.
 
 Configuration, all through environment variables:
-  DB_PATH                 the single database (default /db/rules.db)
+  DB_DIR                  the folder the container sees (default /db). Inside
+                          it: `projects.txt`, the registry, and one folder per
+                          project holding that project's database. Born
+                          optional with a working default in the code
   BACKUP_DIR              VACUUM INTO copies (default: <db dir>/backup)
   PROVISIONAL_DAYS        how long an approved rule lives (default 90)
   PENDING_CAP             pending proposals a project may hold (default 5).
@@ -90,6 +93,7 @@ from mcp_common_engine.gate import Gate
 from mcp_common_engine.logs import arm_argument_redaction
 from mcp_common_engine.refusals import make_tool
 import web
+import rules
 from rules import Registry, RulesError, RulesFault, VERSION
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
@@ -126,7 +130,12 @@ def env(name: str, default: str | None = None) -> str:
     return v
 
 
-DB_PATH = env("DB_PATH", "/db/rules.db")
+# The FOLDER, not a file: one project is one database under it, and the
+# registry that says which ones are served is the text file inside. Optional
+# with a working default in the code, because Unraid does not propagate a new
+# variable to containers already installed — and the default is the mapping
+# every deployment already has.
+DB_DIR = env("DB_DIR", rules.DB_ROOT)
 BASE_URL = env("BASE_URL")
 ALLOWED_LOGIN = env("ALLOWED_GITHUB_LOGIN")
 PORT = int(env("PORT", "3001"))
@@ -144,26 +153,27 @@ WEB_PORT = web.port_from_env()
 WEB_MASTER = env("WEB_MASTER_CODE")
 # Resolved in web.action_cap_from_env, once, for the reason the port is.
 WEB_ACTION_CAP = web.action_cap_from_env()
-BACKUP_DIR = os.environ.get("BACKUP_DIR") or os.path.join(os.path.dirname(DB_PATH), "backup")
+BACKUP_DIR = os.environ.get("BACKUP_DIR") or os.path.join(DB_DIR, "backup")
 # Resolved in the engine's cidrs_from_env so the service and the preflight can
 # never disagree about what the filter is.
 ALLOWED_CIDRS = cidrs_from_env()
 
-registry = Registry(DB_PATH,
+registry = Registry(DB_DIR,
                     provisional_days=int(os.environ.get("PROVISIONAL_DAYS") or 90),
                     pending_cap=int(os.environ.get("PENDING_CAP") or 5))
-if registry.repaired:
-    log.warning("schema rebuilt at open: %s — somebody had removed these objects",
-                ", ".join(registry.repaired))
-# A schema change on a database in service happens once and cannot be undone, so
-# the boot that does it says so. It is deliberately a short list: the migration
-# moves columns and converts NOTHING — the rules go back in by hand, one at a
-# time, and an engine that rewrote them behind the author's back would be moving
-# the very pointers that pass exists to re-decide.
-if registry.migrated:
-    log.warning("schema migrated at open: %s", ", ".join(registry.migrated))
+for _name, _objects in registry.repaired().items():
+    log.warning("schema rebuilt at open for %s: %s — somebody had removed these objects",
+                _name, ", ".join(_objects))
+# The line that catches the half-done rename. A database created empty is
+# normal exactly once — the day a project is added — and suspicious every
+# other time, because the registry line and the folder on disk are two gestures
+# and only one of them was made. The engine has already said it per project,
+# with the path; this is the roll-up on the boot line's own level.
+if registry.born_empty():
+    log.warning("created empty for: %s — expected on a new project, and the mark of a "
+                "folder not renamed on any other day", ", ".join(registry.born_empty()))
 log.info("registry %s — %s — %s projects — provisional %s days",
-         VERSION, DB_PATH, registry.projects()["count"], registry.provisional_days)
+         VERSION, registry.file, registry.projects()["count"], registry.provisional_days)
 
 auth = GitHubProvider(
     client_id=env("GITHUB_CLIENT_ID"),
@@ -996,5 +1006,5 @@ if __name__ == "__main__":
              VERSION, ENGINE_VERSION, BIND_HOST, PORT, BASE_URL, ALLOWED_LOGIN,
              describe_cidrs(ALLOWED_CIDRS),
              os.environ.get("FASTMCP_HOME", "(default — NOT persistent!)"),
-             DB_PATH, os.geteuid(), WEB_BIND_HOST, WEB_PORT)
+             DB_DIR, os.geteuid(), WEB_BIND_HOST, WEB_PORT)
     asyncio.run(_serve())

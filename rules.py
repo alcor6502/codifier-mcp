@@ -1,10 +1,14 @@
 """
-rules.py — a rules registry on SQLite. ONE database, N projects.
+rules.py — a rules registry on SQLite. ONE database PER PROJECT.
 
 The model
 ---------
-- A project is a COLUMN, not a table: the key is (project, id), so VA-02 of one
-  project and VA-02 of another coexist with separate histories.
+- A project is a FILE: `/db/<Name>/<slug>.db`, and there is no `project_id`
+  anywhere in the schema. Spillover between projects is not forbidden, it is
+  impossible. Which files are served is declared in `/db/projects.txt`, a text
+  file edited from Unraid — the registry stopped being a table in v4.0.0,
+  along with the tools that could create and rekey a project. What is
+  catastrophic has no tool.
 - A project is addressed by an opaque CODE, never by its name. No read tool
   lists projects and no error names one: whoever lacks the code cannot find the
   door. It is a guard against MISTAKE, not against will — the real boundary is
@@ -56,12 +60,19 @@ from __future__ import annotations
 import difflib
 import functools
 import hashlib
+import logging
 import os
 import re
 import secrets
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
+
+# A CHILD of the service's logger, so it inherits LOG_LEVEL and is caught by
+# the ring buffer the administration page reads. The engine logs exactly two
+# kinds of thing — a database created empty, and a schema object rebuilt —
+# and both are alarms about the world outside this process.
+log = logging.getLogger("codifier-mcp.registry")
 
 VERSION = "4.0.0"
 
@@ -156,6 +167,9 @@ RE_CODE = re.compile(r"^[A-Za-z0-9]{8,32}$")
 # lowercase, which silently rewrote what the owner typed: that rewriting is
 # extinct, not configurable.
 RE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _-]{0,40}$")
+# What a slug may hold, one character at a time — the pattern is per character
+# and not per string so a refusal can name WHICH characters were the trouble.
+RE_SLUG_CHAR = re.compile(r"[a-z0-9-]")
 
 FILE_MODE = 0o644                       # root writes, everyone else reads
 DIR_MODE = 0o755
@@ -362,6 +376,32 @@ def _fold(name: str) -> str:
     consumers. It matches SQLite's lower() — ASCII — which is what the unique
     indexes use: the two sides of the boundary must agree."""
     return (name or "").strip().lower()
+
+
+def _slug(name: str) -> str:
+    """The file name of a project, DERIVED from its name: lowercase, runs of
+    whitespace to a single dash, and nothing else allowed.
+
+    Derived and never stored, because the path is a RULE and not a datum:
+    folder = the name as it is spelled, file = the slug, always. Two places
+    that both claim to know where a project lives is how a rename half
+    happens.
+
+    Anything the slug cannot carry is refused NAMING the characters. It would
+    be easy to drop them quietly — and then two projects a month apart would
+    land on the same file and nobody would have been told."""
+    s = re.sub(r"\s+", "-", (name or "").strip().lower())
+    if not s:
+        raise RulesError("a project needs a name: the folder under /db is the name, "
+                         "and the file inside it is that name in lowercase with "
+                         "dashes for spaces")
+    bad = "".join(sorted({c for c in s if not RE_SLUG_CHAR.match(c)}))
+    if bad:
+        raise RulesError(
+            f"{name!r} cannot become a file name because of {bad!r}: a project name "
+            "carries letters, digits and spaces, and nothing else — the file is that "
+            "name in lowercase with dashes for spaces")
+    return s
 
 
 def _valid_domain(d: str) -> str:
@@ -1175,7 +1215,292 @@ TRIGGERS = ("trg_profile_ins", "trg_profile_upd",
 
 
 # =====================================================================
-# Registry
+# The registry: a FILE, not a table
+# =====================================================================
+# Until v3.1.0 the list of projects was a TABLE inside the one database that
+# held them all, reachable through tools that could create and rekey. It is a
+# text file now, and the reasons are three:
+#
+# - one project is one SQLite file, so spillover between projects is not
+#   forbidden, it is impossible;
+# - the file IS the truth. There is no state to reconcile it against: a line
+#   without a database creates one, a database without a line is not served;
+# - what is catastrophic has no tool. Deleting a project is deleting a folder
+#   from Unraid, and no call from a chat can reach it.
+#
+# The container sees /db and nothing above it; the mapping from the host is
+# the Unraid template's business, exactly as before.
+
+DB_ROOT = "/db"
+REGISTRY_FILE = "projects.txt"
+# Root only. The file holds the reference and admin codes in clear, which is
+# the decision: the file is the safe, and root is the process.
+REGISTRY_MODE = 0o600
+REGISTRY_FIELDS = 3
+
+# Written into the file the first time the server finds none, so that whoever
+# opens it from Unraid finds the instructions already inside. It is in English
+# like everything else in this repository, and it carries NO example row: a
+# specimen line with plausible codes is a line somebody uncomments.
+REGISTRY_TEMPLATE = """\
+# projects.txt — the project registry of codifier-mcp
+#
+# One line per project, three fields, separated by |
+#     name | reference code | admin code
+#
+# - This file IS the truth: a line without a database creates it
+#   (empty, current schema — the log says so out loud); a database
+#   without a line is not served.
+# - The NAME is a folder NEXT TO this file (original spelling); its slug
+#   (lowercase, spaces to dashes) is the .db filename inside it.
+#   Renaming a project = edit this line AND rename the folder.
+# - The reference code is what every chat of the project carries; the
+#   admin code is what elevates one. Both are 8 to 32 letters and
+#   digits, and no code may appear twice in this file.
+# - Lines starting with # and blank lines are ignored.
+# - Root only (600). Edited from Unraid; the server re-reads on mtime.
+# - Deletion is never done from tools: retire here, remove from Unraid.
+"""
+
+
+def _registry_lines(text: str, where: str) -> list[tuple]:
+    """Parse the registry. Every refusal names the LINE, and the line number
+    is the one an editor shows — comments and blanks counted in.
+
+    Nothing here is repaired quietly. A registry read half-right is worse than
+    one that will not read at all, because the half that got through looks
+    like the whole."""
+    out: list[tuple] = []
+    slug_at: dict[str, int] = {}
+    code_at: dict[str, int] = {}
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) != REGISTRY_FIELDS:
+            raise RulesFault(
+                f"{where} line {n}: {len(parts)} field(s) where {REGISTRY_FIELDS} are "
+                f"expected. A project line is `name | reference code | admin code` "
+                f"and nothing else is served — comment it out with # while you fix "
+                f"it: {line!r}")
+        name, ref, adm = parts
+        if not RE_NAME.match(name):
+            raise RulesFault(
+                f"{where} line {n}: {name!r} is not a usable project name — letters, "
+                "digits, spaces, dashes and underscores, up to 41 characters, and it "
+                "starts with a letter or a digit")
+        try:
+            slug = _slug(name)
+        except RulesError as exc:
+            raise RulesFault(f"{where} line {n}: {exc}") from None
+        for label, code in (("reference code", ref), ("admin code", adm)):
+            if not RE_CODE.match(code):
+                raise RulesFault(
+                    f"{where} line {n}: the {label} of {name!r} is not 8 to 32 letters "
+                    "and digits. Codes are generated, never invented — and a field left "
+                    "empty is a door left open")
+            if code in code_at:
+                # This catches the two mistakes that matter with one sentence:
+                # the same code on two projects (which project would answer?)
+                # and the reference code equal to the admin code on ONE project,
+                # which is elevation handed to every chat that can read.
+                raise RulesFault(
+                    f"{where} line {n}: the {label} of {name!r} already appears on line "
+                    f"{code_at[code]}. Every code in this file is its own: one that is "
+                    "written twice either points at two projects or turns a reference "
+                    "code into an admin code")
+            code_at[code] = n
+        if slug in slug_at:
+            raise RulesFault(
+                f"{where} line {n}: {name!r} and the project on line {slug_at[slug]} "
+                f"would share the file {slug}.db — two projects, one database. Rename "
+                "one of them")
+        slug_at[slug] = n
+        out.append((n, name, ref, adm))
+    return out
+
+
+def _registry_text(path: str) -> str:
+    """UTF-8, strictly, and a decoding failure names the line it broke on.
+
+    Strict because the alternative is `errors='replace'`, and a project name
+    silently altered by a replacement character is a folder that will never be
+    found again."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        n = data[:exc.start].count(b"\n") + 1
+        raise RulesFault(
+            f"{path} line {n}: not UTF-8 (byte {exc.object[exc.start]:#04x} at "
+            f"offset {exc.start}). The registry is a plain UTF-8 text file — an "
+            "editor that saved it in another encoding has to save it again") from None
+
+
+class Registry:
+    """The router: which files are served, and which code opens which.
+
+    It is not a connection pool and not a cache — it is the reading of a file
+    turned into objects, redone whenever the file changes. `project(code)` is
+    the only door in: from a code to one database, or to the same refusal a
+    missing code gets.
+
+    A malformed registry stops EVERYTHING, at boot and at re-read alike, and
+    the previous reading is kept untouched rather than half-replaced: the
+    service refuses with the offending line in the message until the file
+    parses again. The alternative — carrying on with the last good reading —
+    means serving a truth the file no longer states, which is the one failure
+    this registry exists to make impossible."""
+
+    def __init__(self, root: str = DB_ROOT, *,
+                 provisional_days: int = DEFAULT_PROVISIONAL_DAYS,
+                 pending_cap: int = DEFAULT_PENDING_CAP) -> None:
+        self.root = root
+        self.file = os.path.join(root, REGISTRY_FILE)
+        self.provisional_days = int(provisional_days or DEFAULT_PROVISIONAL_DAYS)
+        self.pending_cap = int(pending_cap or DEFAULT_PENDING_CAP)
+        self._lock = threading.RLock()
+        self._open: dict[str, Project] = {}      # by slug
+        self._by_code: dict[str, Project] = {}   # by REFERENCE code
+        self._mtime: int | None = None
+        self.template_written = False
+        os.makedirs(root, exist_ok=True)
+        self._ensure_file()
+        self.reload(force=True)
+
+    # ---------- the file ----------
+
+    def _ensure_file(self) -> None:
+        """Create-if-missing, with the template inside. Said out loud, because
+        an empty registry serves nothing and the reason must not have to be
+        guessed from silence."""
+        if os.path.exists(self.file):
+            return
+        with open(self.file, "w", encoding="utf-8") as fh:
+            fh.write(REGISTRY_TEMPLATE)
+        self.template_written = True
+        log.warning("created %s from the template: no project is served until a line "
+                    "is added to it", self.file)
+
+    def _enforce_mode(self) -> None:
+        """0600, re-imposed after every re-read.
+
+        Not only at creation: the file is edited from Unraid, over a share,
+        and an editor that writes a new file and renames it over the old one
+        brings its own mode with it. The codes are in clear in there — that is
+        the decision — so the mode is the whole of the protection, and a
+        protection restored only on the day the file is born is not one."""
+        try:
+            if os.stat(self.file).st_mode & 0o777 != REGISTRY_MODE:
+                os.chmod(self.file, REGISTRY_MODE)
+        except OSError:
+            pass
+
+    def reload(self, force: bool = False) -> bool:
+        """Re-read if the file moved. Adding a project does not need a restart.
+
+        mtime and not a checksum: the file is edited by a person from Unraid,
+        never by this process, and a person who saves changes the mtime. The
+        stamp is stored only on SUCCESS, so a file that will not parse is
+        retried at the next call instead of being taken as read."""
+        with self._lock:
+            self._ensure_file()
+            mtime = os.stat(self.file).st_mtime_ns
+            if not force and mtime == self._mtime:
+                return False
+            lines = _registry_lines(_registry_text(self.file), self.file)
+            keep: dict[str, Project] = {}
+            born: list[Project] = []
+            try:
+                for _n, name, ref, adm in lines:
+                    slug = _slug(name)
+                    p = self._open.get(slug)
+                    if p is None or p.name != name:
+                        # A different spelling is a different FOLDER, so it is a
+                        # different project on disk even when the slug matches.
+                        p = Project(name, self.root,
+                                    provisional_days=self.provisional_days,
+                                    pending_cap=self.pending_cap)
+                        born.append(p)
+                    p.reference_code, p.admin_code = ref, adm
+                    keep[slug] = p
+            except Exception:
+                for p in born:
+                    p.close()
+                raise
+            for slug, p in self._open.items():
+                if keep.get(slug) is not p:
+                    p.close()
+            self._open = keep
+            self._by_code = {p.reference_code: p for p in keep.values()}
+            self._mtime = mtime
+            self._enforce_mode()
+            return True
+
+    # ---------- the door ----------
+
+    def project(self, code: str) -> Project:
+        """From the reference CODE to one database. Never from the name: the
+        name is not a credential. Identical refusal for a missing code and a
+        wrong one — telling them apart would confirm a valid code to whoever
+        holds only half of one."""
+        self.reload()
+        c = (code or "").strip()
+        if not c:
+            raise RulesError(ERR_PROJECT)
+        with self._lock:
+            p = self._by_code.get(c)
+        if p is None:
+            raise RulesError(ERR_PROJECT)
+        return p
+
+    def by_name(self, name: str) -> Project:
+        """From the NAME to one database, and it is the administration page's
+        door, not a chat's: the page addresses projects by name because the
+        codes must not leave the process to sit in a URL."""
+        self.reload()
+        n = _fold(name)
+        with self._lock:
+            for p in self._open.values():
+                if _fold(p.name) == n:
+                    return p
+            known = ", ".join(sorted(p.name for p in self._open.values())) or "(none)"
+        raise RulesError(f"unknown project {name!r}. Served right now: {known}")
+
+    def projects(self) -> dict:
+        """What is served, by name. NO CODES: they live in the file and in the
+        instructions of whoever holds them, and a listing that carried them
+        would be the oracle this registry has never had."""
+        self.reload()
+        with self._lock:
+            out = [{"name": p.name, "slug": p.slug, "path": p.path,
+                    "schema": p.generation, "born_empty": p.born_empty}
+                   for p in sorted(self._open.values(), key=lambda x: _fold(x.name))]
+        return {"projects": out, "count": len(out), "registry": self.file}
+
+    def repaired(self) -> dict[str, list[str]]:
+        """Per project, the schema objects that had to be rebuilt at open."""
+        with self._lock:
+            return {p.name: p.repaired for p in self._open.values() if p.repaired}
+
+    def born_empty(self) -> list[str]:
+        """The projects whose database this boot CREATED. On a first
+        installation that is the whole registry; on any other boot it is the
+        signature of a folder that was not renamed with its line."""
+        with self._lock:
+            return sorted(p.name for p in self._open.values() if p.born_empty)
+
+    def close(self) -> None:
+        with self._lock:
+            for p in self._open.values():
+                p.close()
+            self._open, self._by_code, self._mtime = {}, {}, None
+
+
+# =====================================================================
+# One project, one file
 # =====================================================================
 
 def _serialised(cls):
@@ -1216,66 +1541,89 @@ def _serialised(cls):
 
 
 @_serialised
-class Registry:
-    def __init__(self, db_path: str, *,
+class Project:
+    """One project: one folder, one file, one connection, one lock.
+
+    The path is not configuration, it is arithmetic: `<root>/<name>/<slug>.db`,
+    folder spelled as the name is spelled, file spelled as the slug. Nothing
+    reads a path from anywhere — which is why a rename that moves only half of
+    the pair shows up as an empty database and a shouting log line, and not as
+    a project quietly serving the wrong file."""
+
+    def __init__(self, name: str, root: str = DB_ROOT, *,
+                 reference_code: str = "", admin_code: str = "",
                  provisional_days: int = DEFAULT_PROVISIONAL_DAYS,
                  pending_cap: int = DEFAULT_PENDING_CAP) -> None:
-        self.path = db_path
+        self.name = (name or "").strip()
+        self.slug = _slug(self.name)
+        self.reference_code = reference_code
+        self.admin_code = admin_code
+        self.dir = os.path.join(root, self.name)
+        self.path = os.path.join(self.dir, self.slug + ".db")
         self.provisional_days = int(provisional_days or DEFAULT_PROVISIONAL_DAYS)
         self.pending_cap = int(pending_cap or DEFAULT_PENDING_CAP)
         # Re-entrant, and it must exist before anything else: every public
         # method acquires it (see _serialised).
         self._lock = threading.RLock()
-        os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
-        fresh = not os.path.exists(db_path)
+        os.makedirs(self.dir, exist_ok=True)
+        try:
+            os.chmod(self.dir, DIR_MODE)
+        except OSError:
+            pass
+        self.born_empty = not os.path.exists(self.path)
         # check_same_thread=False because the server calls tools from a thread
         # pool. It is safe ONLY together with the lock above.
-        self.cx = sqlite3.connect(db_path, timeout=10, isolation_level=None,
+        self.cx = sqlite3.connect(self.path, timeout=10, isolation_level=None,
                                   check_same_thread=False)
         self.cx.row_factory = sqlite3.Row
         self.cx.execute("PRAGMA journal_mode=WAL")
         self.cx.execute("PRAGMA synchronous=FULL")
         self.cx.execute("PRAGMA foreign_keys=ON")
         self.cx.execute("PRAGMA busy_timeout=10000")
-        # The schema is re-applied at every open: a missing object — typically a
-        # trigger dropped by hand — is rebuilt. But the repair is DECLARED: a
-        # trigger that vanishes raises no error, it just stops writing history.
-        before = {r[0] for r in self.cx.execute("SELECT name FROM sqlite_master")}
-        self._migrate()
-        self.cx.executescript(SCHEMA)
-        after = {r[0] for r in self.cx.execute("SELECT name FROM sqlite_master")}
-        # With migration gone (a schema change means a wipe, by decision),
-        # whatever appears on an EXISTING database is a repair — a trigger
-        # somebody dropped by hand, rebuilt — and nothing else. The upgrade
-        # subtraction that used to live here left with the ALTER ladder.
-        self.repaired = [] if fresh else sorted(after - before)
+        generation = self.cx.execute("PRAGMA user_version").fetchone()[0]
+        if self.born_empty:
+            self.cx.executescript(SCHEMA)
+            # Written LAST, after the schema is in: a file that carries the
+            # generation carries the schema too, or the number would be a
+            # promise instead of a fact.
+            self.cx.execute(f"PRAGMA user_version = {SCHEMA_GENERATION}")
+            self.generation = SCHEMA_GENERATION
+            self.repaired: list[str] = []
+            log.warning("created empty database for %s at %s — schema generation %d, "
+                        "no anagrafica and no rules. If this project already existed, "
+                        "its folder was not renamed along with its registry line",
+                        self.name, self.path, SCHEMA_GENERATION)
+        elif generation != SCHEMA_GENERATION:
+            # THE refusal that used to be a migration. A database that does not
+            # know its generation reads as 0, which is exactly what every
+            # pre-4.0.0 file says, so the sentence fits both cases without a
+            # second test.
+            self.cx.close()
+            raise RulesFault(
+                f"{self.path} carries schema generation {generation} and this server "
+                f"speaks {SCHEMA_GENERATION}: the file is NOT served. There is no "
+                "migration, by decision — the corpus goes back in by hand. Move the "
+                "folder out of the way from Unraid and let the registry line create "
+                "the project again, or put back the image that speaks it.")
+        else:
+            # The schema is re-applied at every open: a missing object —
+            # typically a trigger dropped by hand — is rebuilt. But the repair
+            # is DECLARED: a trigger that vanishes raises no error, it just
+            # stops writing history.
+            before = {r[0] for r in self.cx.execute("SELECT name FROM sqlite_master")}
+            self.cx.executescript(SCHEMA)
+            after = {r[0] for r in self.cx.execute("SELECT name FROM sqlite_master")}
+            # Read from the FILE, not copied from the constant: they are equal
+            # by construction, which is exactly the kind of equality that stops
+            # being true without anybody noticing.
+            self.generation = generation
+            self.repaired = sorted(after - before)
         self._fix_modes()
 
+    def __repr__(self) -> str:            # what a log line and a traceback show
+        return f"<Project {self.name!r} at {self.path}>"
+
     # ---------- housekeeping ----------
-
-    def _migrate(self) -> None:
-        """THERE IS NO MIGRATION, and that is a decision (2026-08-11), not a
-        gap: the corpus goes back in by hand through the same door as any
-        other rule, so a database from an earlier schema is WIPED, never
-        converted. What this method does is refuse to run on one, out loud,
-        instead of letting IF NOT EXISTS half-apply the new schema over the
-        old and produce a database that is neither.
-
-        The v2.x ALTER TABLE ladder that used to live here left with the
-        decision: an upgraded database and a fresh one must be the same
-        thing, and with a wipe at every schema change they are — by
-        construction rather than by care."""
-        self.migrated: list[str] = []
-        have = {r[0] for r in self.cx.execute("SELECT name FROM sqlite_master "
-                                              "WHERE type='table'")}
-        if "consumers" not in have:
-            return                        # fresh, or pre-schema: nothing to judge
-        cols = {r[1] for r in self.cx.execute("PRAGMA table_info(consumers)")}
-        if "id" not in cols:
-            raise RulesFault(
-                f"{self.path} belongs to an earlier schema (consumers has no "
-                "surrogate id). There is no migration, by decision: wipe the "
-                "database and reseed — the corpus goes back in by hand.")
 
     def _fix_modes(self) -> None:
         """0644 is DELIBERATE: whoever mounts the share reads and does not touch."""
@@ -2162,7 +2510,6 @@ class Registry:
                              "SELECT COUNT(*) FROM approvals WHERE project=:p")},
             "registry_version": VERSION,
             "repaired_at_open": self.repaired,
-            "migrated_at_open": self.migrated,
         }
 
     def check(self, code: str) -> dict:

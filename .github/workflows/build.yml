@@ -33,6 +33,13 @@ jobs:
       # one place. --no-deps on purpose: the suites need no FastMCP, which is
       # exactly why they can run here in under a minute.
       - run: pip install --no-deps -r requirements.txt
+      # test_schema and test_registry go round the engine on purpose — one
+      # writes with raw SQL, the other with real files on disk — and they were
+      # NOT listed here when they were written. A suite the CI does not run is
+      # a suite that is green because nobody asked: it stops being a guarantee
+      # the first time somebody breaks it in a hurry.
+      - run: python3 test_schema.py
+      - run: python3 test_registry.py
       - run: python3 test_collaudo.py
       - run: python3 test_surface.py
       - run: python3 test_crash.py

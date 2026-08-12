@@ -14,17 +14,25 @@ cd /app
 # preflight checks this again from the inside, and refuses to start if the file
 # has become writable by group or others.
 
-DB="${DB_PATH:-/db/rules.db}"
-DBDIR=$(dirname "$DB")
+DBDIR="${DB_DIR:-/db}"
 BACKUP="${BACKUP_DIR:-$DBDIR/backup}"
+# The registry is the one file here that is NOT world-readable: it holds the
+# reference and admin codes in clear, and that is the decision — the file is
+# the safe, and root is the process. It has to be named to be spared, because
+# the sweep below is deliberately blind.
+REGISTRY="$DBDIR/projects.txt"
 
 echo "== init (root): $DBDIR =="
 mkdir -p "$DBDIR" "$BACKUP" /data
 
-echo "== permissions: root:root, 755 on directories, 644 on files =="
+echo "== permissions: root:root, 755 on directories, 644 on files, 600 on the registry =="
 chown -R 0:0 "$DBDIR" /data
 find "$DBDIR" -type d -exec chmod 755 {} +
-find "$DBDIR" -type f -exec chmod 644 {} +
+find "$DBDIR" -type f ! -path "$REGISTRY" -exec chmod 644 {} +
+# `if`, and not `[ -f … ] && chmod`: with `set -e` a false test is a failed
+# command and the container would exit 1 on the ONE boot where the registry
+# does not exist yet — the first one.
+if [ -f "$REGISTRY" ]; then chmod 600 "$REGISTRY"; fi
 
 export HOME=/data/home
 mkdir -p "$HOME"

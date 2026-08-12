@@ -47,6 +47,7 @@ import sys
 import web
 from mcp_common_engine import (RESULTS, SKIP, check, cidrs_from_env,
                                describe_cidrs, is_placeholder)
+from rules import DB_ROOT
 
 # `import web` and not `from web import ...`: this file must keep running on an
 # image where the web stack is broken, and web.py earns that by importing
@@ -55,8 +56,14 @@ from mcp_common_engine import (RESULTS, SKIP, check, cidrs_from_env,
 # expression the service uses, so the two cannot disagree about whether the
 # page is reachable from the internet.
 
-DB = os.environ.get("DB_PATH", "/db/rules.db")
-DBDIR = os.path.dirname(DB) or "/db"
+# The FOLDER the container sees. Everything below it — the registry file and
+# one folder per project — is the router's business, and from v4.0.0 this
+# preflight has to walk EVERY file of the registry instead of the one database
+# there used to be. That rewrite is not in this commit; what is, is the
+# variable, so that opening the registry cannot land on a path that was a file
+# name until yesterday.
+DBDIR = os.environ.get("DB_DIR") or DB_ROOT
+DB = os.environ.get("DB_PATH") or os.path.join(DBDIR, "rules.db")
 
 
 # =====================================================================
@@ -66,7 +73,7 @@ DBDIR = os.path.dirname(DB) or "/db"
 @check("db")
 def c_db():
     from rules import Registry            # applies the schema if the file is new
-    r = Registry(DB)
+    r = Registry(DBDIR)
     try:
         integrity = r.cx.execute("PRAGMA integrity_check").fetchone()[0]
         if integrity != "ok":
