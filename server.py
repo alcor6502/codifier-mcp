@@ -1,5 +1,5 @@
 """
-server.py — self-hosted MCP server for a RULES REGISTRY. ONE database, N projects.
+server.py — self-hosted MCP server for a RULES REGISTRY. ONE FILE PER PROJECT.
 
 Twin of archivist-mcp: same architecture, same OAuth gate, same blocking
 preflight. Three deliberate differences:
@@ -8,27 +8,36 @@ preflight. Three deliberate differences:
   READS them and does not touch them. Writing by hand bypasses the triggers and
   breaks history in silence;
 - there is no container per project: the project is an ARGUMENT — and not its
-  NAME but an opaque alphanumeric CODE that lives at the top of that project's
-  instructions. No read tool lists projects and no error names one: whoever
-  lacks the code cannot find the door;
+  NAME but an opaque alphanumeric REFERENCE CODE that lives at the top of that
+  project's instructions. No read tool lists projects and no error names one:
+  whoever lacks the code cannot find the door. Since v4.0.0 the isolation is a
+  DATABASE each, and the registry that says which ones are served is a text
+  file, `projects.txt`, that only Unraid writes;
 - writing is a two-step affair. A chat PROPOSES; the batch is approved in the
-  administration UI, behind the master, against the batch's DIGEST — you
-  approve the batch you read. Since v3.0.0 approve/renew/promote and the
-  master operations (create, registry, rekey) are NOT tools: they left the
-  MCP surface when the UI replaced their placeholder, so the master never
-  travels in a conversation. The backup left with them and lives on the UI's
-  maintenance page, where the session is the whole of what it needs. What stays behind the tools is REDACTION,
-  and it opens per project: the pair (project code, architect key) travels on
-  every maintenance call. ADMIN_ACCESS_CODE is dead — one container-wide code
-  opened the maintenance of every project, which is the defect you discover
-  the day the projects are two.
+  administration UI, behind its password, against the batch's DIGEST — you
+  approve the batch you read. Approving, denying, renewing, promoting, minting
+  the one-time codes and taking a backup are NOT tools and never will be:
+  what is catastrophic has no tool, so the UI password never travels in a
+  conversation.
 
-Every tool that acts on a rule is prefixed `rules_`: the vault's tools (status,
-history, diff, search...) live in the same chat, and two namesakes get confused.
-The prefix stays `rules_` even though the repository is called codifier-mcp —
-inside this project "rules" is the only subject there is. The one manual —
-`reference_guide` — carries no prefix, because it touches no rule: it serves a
-file, whole, with a stop line where the consumer's part ends.
+SIXTEEN TOOLS, and the number is the point: the catalogue sits in the context
+of every session of the project, so a tool nobody uses is paid for by every
+chat that never calls it. Ten of them work — reading, proposing, the task log —
+and six administer. The scale is FLAT and fits in a line: CREATING takes the
+admin code, MODIFYING anything that already exists takes the admin code AND a
+one-time `auth_code` minted on the page, PROPOSING takes the reference code
+because it goes past a person anyway. The ladder itself is written in exactly
+one place — `Project.port_for` in the engine — and this file ASKS it rather
+than repeating it: a rule spelled out at each door is a rule with one door out
+of step.
+
+Every tool that acts on a rule is prefixed `rules_`, and the ones that act on
+the project or its structure `project_`: the vault's tools (status, history,
+search...) live in the same chat, and two namesakes get confused. The prefix
+also says which LEVEL a call works on — rules and tasks are the project's
+objects, the profile and the anagrafica are the project itself.
+`reference_guide` carries no prefix, because it touches neither: it serves a
+file.
 
 Configuration, all through environment variables:
   DB_DIR                  the folder the container sees (default /db). Inside
@@ -97,7 +106,8 @@ from mcp_common_engine.logs import arm_argument_redaction
 from mcp_common_engine.refusals import make_tool
 import web
 import rules
-from rules import Registry, RulesError, RulesFault, VERSION
+from rules import (Project, Registry, RulesError, RulesFault, VERSION,
+                   check_admin)
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
 # for every library loaded, not for ours: that is where the noise came from.
@@ -266,698 +276,422 @@ tool = make_tool(mcp, log, refusal=RulesError, fault=RulesFault)
 mcp.add_middleware(Gate(log=log, allowed_login=ALLOWED_LOGIN,
                         allowed_cidrs=ALLOWED_CIDRS))
 
-# The manual. It ships inside the image, which is the whole reason it is a
-# file here and not a document in the vault: a manual that travels with the
-# code cannot describe a version that is not running, and a static check can
-# hold it against the code it ships with. A copy anywhere else is verified by
-# nobody. ONE manual since v2.0.0: the consumer part ends at a stop line, and
-# what follows — maintenance, and the legislator's craft — is read past it by
-# whoever holds the code. The separate legislator_guide door protected an
-# hygiene that had no readers: the manual is read by three chats, and the
-# skills do not read it at all.
+# The manual, and since v4.0.0 it is TWO FILES rather than one text cut at a
+# marker. They ship inside the image, which is the whole reason they are files
+# here and not documents in the vault: a manual that travels with the code
+# cannot describe a version that is not running, and a static check can hold it
+# against the code it ships with. A copy anywhere else is verified by nobody.
+#
+# Two files and not a runtime truncation, because the defect the marker existed
+# to prevent — the administration text served to somebody without the key —
+# stops being a thing to test and becomes a thing that cannot happen: the
+# branch without the key never opens the second file. The price is that two
+# texts can drift where one could not, which is why the static check walks the
+# REAL list of tools and their gates instead of the prose.
 _GUIDE = Path(__file__).with_name("reference-guide.md")
+_GUIDE_ADMIN = Path(__file__).with_name("reference-guide-admin.md")
+
+# Who signs a gesture that arrived through the tools. Not a person and not a
+# guess: the admin code is a CREDENTIAL, not a name, and the surface has no
+# other. The page signs 'web ui' for the same reason, and the day either grows
+# a login with a name this constant is the one place that changes.
+ADMIN_ACTOR = "admin"
 
 
-def _admin(project: str, key: str) -> None:
-    """The MAINTENANCE gate, PER PROJECT since v3.0.0: the pair (project
-    code, architect key) travels on every call — no session, no "mode" left
-    open, and no container-wide code any more. The check lives in the engine
-    (check_architect), because the key is per-project DATA now: a hash on the
-    project's own row, not a variable of the container. The engine resolves
-    the project first, then compares the hash, and answers every failure with
-    ONE message — which half was wrong is not said, on purpose.
+def _project(project: str):
+    """The reference code, and the whole of what a working chat needs.
 
-    No log line here, for the reason v1.2 dropped it: the Gate covers the
-    handshake, so a wrong pair can only come from one of Alfredo's own chats
-    — an ordinary refusal, logged once by the decorator, at INFO."""
-    registry.check_architect(project, key)
+    It opens every READ of the project — rules, tasks, anagrafica, for any
+    consumer — because inside a project there are no secrets between consumers:
+    the isolation is BETWEEN projects, and it is a database each. The refusal
+    for a missing code and a wrong one is the same sentence: telling them apart
+    would confirm half a code to whoever holds half of one."""
+    return registry.project(project)
+
+
+def _admin(project: str, key: str):
+    """The ADMINISTRATION gate: the pair (reference code, admin code), on every
+    call. Elevation is per call — MCP has no session, so there is no `su` that
+    stays open, and being admin is knowing the code and passing it again.
+
+    The check lives in the engine (`check_admin`), because the admin code is
+    per-project DATA: a line in `projects.txt`, not a variable of the
+    container. One refusal for both halves, on purpose.
+
+    No log line here: the Gate covers the handshake, so a wrong pair can only
+    come from one of Alfredo's own chats — an ordinary refusal, logged once by
+    the decorator."""
+    return check_admin(registry, project, key)
 
 
 # =====================================================================
-# Reading — open to every consumer
+# The manual — the one call that takes nothing
 # =====================================================================
 
 @tool
-def rules_project_info(project: str) -> dict:
-    """What is inside the project whose code you hold: the CONSUMERS that exist,
-    the SCOPES with who is in them, and the DOMAINS of the IDs. Call this first
-    if you do not know which consumer to declare — it is also the proof that the
-    registry answers.
+def reference_guide(project: str = "", key: str = "") -> dict:
+    """The manual — one of two, and which one depends on what you bring.
 
-    `project` is the alphanumeric CODE at the top of the project's instructions,
-    not its name. There is no tool that lists projects: without the code the
-    registry does not answer, and no error will ever hint at another one."""
-    return registry.project_info(project)
+    Called BARE it returns the WORK manual: everything a chat holding a project
+    code can do, and nothing it cannot. That call is meant to work before you
+    know anything else — a chat's bootstrap is kept to the bone, so the first
+    call it makes must not be a wall.
 
+    With `project` and the admin code in `key` it returns the OTHER HALF:
+    administration, and only that. Not the whole text — the work manual is
+    already in the caller's context, and sending it twice is context paid for
+    twice. The response says which half it served (`level: work | admin`).
 
-@tool
-def reference_guide() -> dict:
-    """The manual for this registry, whole. The consumer part comes first —
-    the model, the citations, which tool for which job, what the errors mean —
-    and ends at a STOP line: a working session can stop there. Below the line
-    live the maintenance tools, which want the architect key, and the craft of
-    deciding what deserves to be a rule. Read the first part before your first
-    write."""
+    They are two FILES, not one text cut at a marker: the half you cannot read
+    is a file this call never opens. A wrong pair is refused the way every
+    administration call is refused — one answer for both halves of it."""
+    if (key or "").strip():
+        _admin(project, key)
+        level, page = "admin", _GUIDE_ADMIN
+    else:
+        level, page = "work", _GUIDE
     try:
-        return {"version": VERSION, "guide": _GUIDE.read_text(encoding="utf-8")}
+        # Read HERE and not in a helper: a module function that reads a served
+        # file is a door — an extra tool calling it serves the same file with
+        # no gate, and every check that looks for a read INSIDE a tool goes
+        # blind. Measured on this repo, on the two-manual shape.
+        return {"version": VERSION, "level": level,
+                "guide": page.read_text(encoding="utf-8")}
     except OSError as e:
         # A FAULT, not a refusal: the caller did nothing wrong, the image is
-        # incomplete. As a RulesError it would leave one quiet INFO line
-        # beginning with the word "refused" — a broken image wearing the face
-        # of a normal answer, which is the exact inversion the decorator exists
-        # to prevent. As a RulesFault it rises with its traceback at ERROR.
+        # incomplete. As a refusal it would leave one quiet line beginning with
+        # the word `refused` — a broken image wearing the face of a normal
+        # answer, which is the exact inversion the decorator exists to prevent.
         raise RulesFault(f"guide not available in the image: {e}") from e
 
 
-@tool
-def rules_list(project: str, consumer: str) -> dict:
-    """EVERY rule in force for you, in ONE call: pass the project CODE and your
-    own consumer name, and you get them whole, ordered from the most widespread
-    to the most specific. This replaces opening the rule files — there is
-    nothing else to read.
-
-    The answer LEADS with your `brief` — your mandate, who you are — before
-    the rules: identity and law in one round trip. A consumer without a brief
-    gets an empty field, not an error; skills leave it empty on purpose. Next
-    to it rides the LEGEND of the domains present in your list, each with its
-    gloss — two letters age badly in human memory, and the glosses already
-    live in the project's declarations.
-
-    The order is the BREADTH of the scope a rule reaches you through: what comes
-    first binds everyone, what comes last is yours alone. Each rule arrives as
-    its ID and its BODY, citations expanded — and nothing else. That is the
-    CONSUMER reading: the title, the dates, the perimeter and the why are
-    administration, and they live in the maintenance reading (rules_batch,
-    rules_export) instead of costing context in every chat that works under
-    the rules.
-
-    Consumers are not fixed: every project declares its own, and a skill is a
-    consumer exactly like a chat. The verdict also says HOW MANY rules stayed
-    outside your perimeter: if an ID you need is not in the list, it is not
-    undefined — it belongs to somebody else.
-
-    Only rules IN FORCE: retired ones never appear here, and neither do expired
-    provisional ones (both stay reachable by ID, because citations must keep
-    resolving)."""
-    return registry.list_rules(project, consumer)
-
-
-@tool
-def rules_get(project: str, ids: list[str], consumer: str) -> dict:
-    """One or MANY rules by ID (e.g. ["VA-0002","ST-0011"]; the brackets of a
-    citation and the type suffix are both tolerated, and a shorter number is
-    padded — VA-02 is VA-0002).
-
-    Three DIFFERENT answers, kept apart, and the difference is the point:
-      found          the rule's ID and its expanded body. One that is NOT in
-                     force additionally says so — retired, denied, expired —
-                     because a body handed back as if it bound you would be a
-                     lie by omission
-      not_yours      they exist, but outside your perimeter — with who holds them
-      never_defined  those IDs were never defined here: a BROKEN CITATION to be
-                     reported, or you are using another project's code
-
-    Asking for the batch at once is what turns a stumble into an audit: broken
-    citations are worth much more seen together than one at a time.
-
-    Bodies come back with every citation EXPANDED — `(VA-0002 — its title)` — so
-    you understand a reference without a second call, and a pointer to a retired
-    rule arrives already marked as such."""
-    return registry.get_rules(project, ids, consumer)
-
-
-@tool
-def rules_search(project: str, text: str, consumer: str) -> dict:
-    """Search a string in the title and body of the rules in force within your
-    perimeter. It also says how many matches fell outside it, so you know they
-    exist without seeing them. Hits arrive as ID and expanded body — the
-    consumer reading, same as rules_list."""
-    return registry.search(project, text, consumer)
-
-
-@tool
-def rules_pending(project: str, consumer: str = "") -> dict:
-    """Your noticeboard: the proposals of yours still waiting, the ones that were
-    DENIED with the reason why, and your rules expiring within 30 days.
-
-    This is what replaces the note a chat used to keep in its own memory. You
-    filed a proposal three weeks ago and you do not remember what became of it:
-    ask here rather than proposing it again. Without `consumer` it shows the
-    whole project, which is the maintainer's view.
-
-    The expiring list — and only that one — carries each rule's original
-    `reason`: it is the renewals queue, read to decide, and the decision
-    needs the why in front of it."""
-    return registry.pending(project, consumer)
-
-
 # =====================================================================
-# Proposing — no key: a proposal reaches nobody
+# Reading and working — the reference code
 # =====================================================================
+
+@tool
+def project_info(project: str) -> dict:
+    """The living structure of the project: the profile, the DOMAINS with their
+    gloss, the CONSUMERS with kind, brief and specs, the GROUPS with their
+    members, and counts computed on read. The first call of a new chat.
+
+    The names read here are the names every other tool expects: do not guess a
+    consumer or a group — read it. `project` is the alphanumeric CODE at the
+    top of the project's instructions, never its name: no tool lists projects,
+    and no error will ever hint at another one."""
+    return _project(project).project_info()
+
+
+@tool
+def rules_list(project: str, consumer: str, query: str = "",
+               pending: bool = False) -> dict:
+    """SESSION START, in one call. The PROJECT first — its brief and its specs,
+    identity then the living facts — then YOUR brief and specs, the legend, and
+    the rules in force for you: universal, then groups from the widest, then
+    exceptions. Every line shows `reach` and the names it reaches. It closes
+    with the desk summary — TWO counters, open and urgent, nothing more: the
+    list itself is `tasks_list`'s job.
+
+    `query` filters on title and body and hands back the matching fragment.
+    `pending=True` shows the proposal QUEUE instead, with the reasons and the
+    proposers — look there before you propose, or you will file a twin.
+    Truncation is always declared with the real total.
+
+    This replaces opening the rule files: there is nothing else to read. An
+    empty set, or a registry that does not answer, is something to say out
+    loud and stop on — not to work around from memory."""
+    return _project(project).list_rules(consumer, query, pending)
+
+
+@tool
+def rules_get(project: str, ids: list[str], consumer: str,
+              history: bool = False) -> dict:
+    """Full detail for the rules you name: body, `reach` with the names,
+    permanence, expiry, supersede links both ways, citations expanded. Short
+    forms are forgiven on READ — `VA-02` resolves — because there the ID
+    identifies a row that exists.
+
+    `history=True` adds the rule's story as DATED GESTURES: timestamp, verb,
+    actor, and only the fields that differ from the version before, computed on
+    read. A rule's story is the why of what binds you, so it is at this gate
+    and not behind the admin code.
+
+    Two ceilings of different natures: more IDs than the cap are REFUSED, not
+    trimmed — whoever asked for thirty wanted thirty — and past the byte
+    ceiling the text truncates and says so."""
+    return _project(project).get_rules(ids, consumer, history)
+
 
 @tool
 def rules_propose(project: str, domain: str, type: str, title: str, body: str,
-                  scopes: list[str], reason: str, proposed_by: str = "",
-                  changelog: str = "", source: str = "",
-                  supersedes: str = "") -> dict:
-    """File a proposal for a new rule. It needs ONLY the project code, because a
-    proposal reaches nobody until its batch is approved: it cannot do harm, and
-    a chat that deposits one can stop keeping a note about it.
+                  reason: str, reach: str, proposed_by: str,
+                  groups: list[str] | None = None,
+                  exceptions: list[str] | None = None,
+                  supersedes: str = "", source: str = "",
+                  consumer_key: str = "") -> dict:
+    """The only way a chat writes a rule, and it needs only the reference code:
+    a proposal reaches NOBODY until a person approves it on the page, so it
+    cannot do harm — and asking a working chat for the admin code just to file
+    one would put that code in every chat.
 
-    THERE IS NO `id` PARAMETER. You give the `domain` — two uppercase letters,
-    already declared by the project — and the registry assigns the next number
-    in it, four digits: VA-0002. A number is not a choice, it is a position in a
-    sequence. The assigned ID comes back in the verdict, and it is what other
-    rules have to cite.
+    THERE IS NO `id` PARAMETER: you give the `domain`, two uppercase letters
+    the project has declared, and the registry assigns the next number in it.
+    `type` is one of R (binding) · M (method) · F (technical fact); retirement
+    is a STATE, not a type. `proposed_by` is REQUIRED — an unsigned proposal is
+    an orphan, and the door refuses it rather than filing it in your name by
+    guesswork.
 
-    `type`: R binding · M method · F technical fact. Retirement is a STATE, not
-    a type. `scopes`: consumer names, group scope names, or ["*"] if it binds
-    everyone present and future. `reason` is mandatory: without the why a rule
-    cannot be defended, and at the first opportunity it gets reopened.
-    `proposed_by` is MANDATORY too — your own consumer name, what makes the
-    proposal yours: omitted it would orphan the proposal in silence, so the
-    door refuses it.
+    THE AUDIENCE IS MIXED. `reach` declares 'all' — no audience at all, never
+    deduced — or 'targeted', and then the audience is `groups` UNION
+    `exceptions`. Groups are the normal case; exceptions are single consumers
+    standing NEXT TO the groups, and they only ever ADD, never subtract.
+    Checked at write time: group-with-group overlap is allowed, because the
+    anagrafica moves on its own; an exception already inside THIS rule's groups
+    is refused — it is either a mistake or a tie that survives in silence the
+    day that consumer leaves the group; an exception that belongs to OTHER
+    groups is its own business. An overlap that forms LATER blocks nothing: the
+    next write on this rule refuses it, and `project_status` reports it.
 
-    The project holds a LIMITED number of pending proposals (a deployment
-    knob, default 5): whoever approves reads in small batches, and that
-    rhythm is enforced here, by a refusal that lists what is in the queue.
-    Approval and denial free the slots by themselves — there is no override. `supersedes` names the rule this proposal
-    REPLACES — a dedicated field, never a citation in the body. The target
-    must be in force, only one pending proposal may claim it, and at approval
-    the swap is one transaction: the heir goes active and the named rule is
-    retired pointing at it. Declare the heir's scopes yourself — the
-    supersede is the moment the perimeter gets re-decided, not inherited.
+    `supersedes` names the rule this one REPLACES — a field, never a citation
+    in the body: changing a decision is ONE gesture, and the approval retires
+    the named rule inside the same decision. Declare the heir's audience
+    yourself: a supersede is where the perimeter is re-decided, not inherited.
 
-    CITATIONS IN THE BODY are an ID in ROUND BRACKETS, `(VA-0002)`. An ordinary
-    parenthesis is ordinary prose — what makes a token a citation is the shape
-    XX-NNNN, not the bracket. Four refusals: a bare ID left outside a bracket of
-    its own (case does not save you), one that does not resolve, one pointing at
-    a rule THAT IS NOT APPROVED YET, and anything of your own written inside the
-    brackets — the only text allowed there is the title the registry itself put
-    there when you read it, because what is inside is not stored.
+    CITATIONS in prose are an ID in round brackets, four digits, `(VA-0002)`.
+    Anything else is refused naming the field and the token — nothing is
+    corrected, no number is spent and no queue slot is taken.
 
-    Only the domains this project declared are hunted, so a ticket number or a
-    locale in a URL stays prose.
-
-    That last one decides the order of the work, so read it twice: file the
-    cited rule, have it approved — the ID it comes back with is final — and only
-    then file the rule that cites it. A rule that needs one which does not exist
-    yet simply waits. Citing a proposal would mean a batch could be approved
-    into a state where its own pointers were right only while it was being
-    written."""
-    return registry.propose(project, domain, type, title, body, scopes, reason,
-                            proposed_by, changelog, source, supersedes)
-
-
-# =====================================================================
-# Reading the batch, and denying — the architect key. Approval is the UI's
-# =====================================================================
-
-@tool
-def rules_batch(project: str, key: str) -> dict:
-    """MAINTENANCE. The pending proposals, whole, plus the DIGEST of the batch.
-
-    You approve the BATCH, never the single rule: seen side by side, three
-    proposals that say the same thing become visible as what they are.
-
-    Approval happens in the administration UI — the lot page, behind the
-    master — against this same digest: if a proposal arrives in between, the
-    digest changes and the stale one is refused. That is on purpose: it is
-    the proof that what gets approved is the batch that was READ.
-
-    Each proposal carries its `reason`: the why you are letting in is on the
-    table where the decision happens, not a history call away. A proposal
-    that SUPERSEDES a rule shows it here too — approving it also retires
-    that rule, and whoever approves must see both halves of the move."""
-    _admin(project, key)
-    return registry.batch(project)
+    `consumer_key` is only for a consumer that has been given a secret; where
+    none is set, the name is enough."""
+    return _project(project).propose(domain, type, title, body, reason, reach,
+                                     proposed_by, groups=groups,
+                                     exceptions=exceptions, supersedes=supersedes,
+                                     source=source, consumer_key=consumer_key)
 
 
 @tool
-def rules_deny(project: str, ids: list[str], reason: str, key: str) -> dict:
-    """MAINTENANCE. Refuse one or more proposals, with a reason. No signature is
-    asked for: refusing cannot do harm.
+def tasks_add(project: str, consumer: str, title: str, body: str,
+              created_by: str, urgent: bool = False, idem_key: str = "",
+              consumer_key: str = "") -> dict:
+    """Open a task on a desk — yours or anybody's. Opening for others is the
+    POINT of the log: an audit that finds something routes it to the owner who
+    can fix it instead of carrying it. `created_by` is the signature, humans
+    included; `urgent` belongs to whoever creates the task and never changes
+    afterwards, because a door that let the receiver clear it would put the
+    lever in the hand of the one with an interest in clearing it.
 
-    The row STAYS and the ID is burnt. It no longer BLOCKS a re-proposal: since
-    the counter assigns the number, the same text filed again simply takes a new
-    one. What the refusal buys is the REASON — rules_pending shows it to whoever
-    proposed it, so silence becomes an answer and they learn something instead of
-    guessing. Reading your own refusals is a habit now, not a guard rail."""
-    _admin(project, key)
-    return registry.deny(project, ids, reason)
+    ⚠ Opening a task for a HUMAN consumer does NOT notify them: a human calls
+    no tool, and their mail is seen by whoever reads `tasks_overview` or the
+    administration page. Tasks are not a notification channel to the owner.
 
-
-# =====================================================================
-# Maintaining rules
-# =====================================================================
-
-@tool
-def rules_fix(project: str, id: str, expected_version: int, reason: str, key: str,
-              title: str = "", body: str = "", type: str = "", changelog: str = "") -> dict:
-    """MAINTENANCE. Fix a DEFECT in place: a wrong number, a broken pointer, a
-    sentence that says something false. Same ID, the rule stays in force, and a
-    new version is born in history.
-
-    A superseded DECISION is NOT fixed this way: propose the new rule and retire
-    the old one pointing at it. The difference matters — a defect never was
-    right, a superseded decision was right and stopped being so.
-
-    `expected_version` is the number you read with rules_get: if somebody wrote
-    in the meantime the change is refused and you are told the current version.
-    Leave empty whatever you are not changing.
-
-    A `body` you pass goes through the SAME citation check as a proposal:
-    `(VA-0002)` must resolve and must point at a rule already approved, a bare
-    ID outside a bracket of its own is refused, and so is a note of your own
-    inside one. This is the tool that repairs what rules_check lists as broken
-    pointers, so it cannot be the one that lets a broken one in.
-
-    OMIT `body` and nothing about it is checked — that is what lets a rule
-    written before this format existed still be renamed, retyped or given a
-    changelog. The exemption is the field you leave out, not the text that
-    happens to be unchanged: a body passed back identical is still checked
-    first. You may paste the body back exactly as you read it — the title
-    inside the brackets is a gloss generated on reading, and it is dropped
-    here.
-
-    `reason` here is the why of the FIX: it lands in the event column and in
-    the history. The rule's own `reason` — the why it was filed — is never
-    rewritten by any event."""
-    _admin(project, key)
-    return registry.amend(project, id, expected_version, reason,
-                          title or None, body or None, type or None, changelog or None)
+    `idem_key` makes the call safe to repeat: the same key on the same desk
+    hands back the pending task instead of a twin."""
+    return _project(project).task_add(consumer, title, body, created_by,
+                                      urgent=urgent, idem_key=idem_key,
+                                      consumer_key=consumer_key)
 
 
 @tool
-def rules_widen(project: str, id: str, scopes: list[str], key: str, reason: str = "") -> dict:
-    """MAINTENANCE. Make a rule ALSO reach somebody else: one more row, and the
-    scope it already belonged to is not touched — that scope has other tenants
-    who have nothing to do with this rule.
-
-    This is the difference between moving a rule and widening a group, and they
-    are two different things. To change who is in a GROUP, use rules_scope_edit,
-    and know that it changes the perimeter of every rule pointing at it."""
-    _admin(project, key)
-    return registry.widen(project, id, scopes, reason)
-
-
-@tool
-def rules_narrow(project: str, id: str, scopes: list[str], key: str) -> dict:
-    """MAINTENANCE. Stop a rule reaching a scope. Symmetric to rules_widen: one
-    row less. If it ends up with no scope at all the verdict says so — a rule
-    that reaches nobody is not retired, it is invisible, which is worse."""
-    _admin(project, key)
-    return registry.narrow(project, id, scopes)
-
-
-@tool
-def rules_retire(project: str, id: str, reason: str, key: str,
-                 superseded_by: str = "", changelog: str = "") -> dict:
-    """MAINTENANCE. Retire a rule: it leaves the consumers' lists, but the row
-    STAYS. The ID is never reused and citations must keep resolving. There is no
-    deletion.
-
-    `superseded_by` when a new rule takes its place (create it first). The
-    verdict lists the active rules that still cite this one: those need
-    fixing."""
-    _admin(project, key)
-    return registry.retire(project, id, reason, superseded_by, changelog)
-
-
-# =====================================================================
-# Projects, consumers, scopes
-# =====================================================================
-
-@tool
-def rules_status(project: str, key: str) -> dict:
-    """MAINTENANCE. The verdict on the registry: database integrity, journal
-    mode, file permissions, counts by domain and by consumer, how many rules
-    have expired without being retired, how many batches were approved. The
-    counts cover every perimeter, which is why it wants the architect key."""
-    _admin(project, key)
-    return registry.status(project)
-
-
-@tool
-def rules_check(project: str, key: str) -> dict:
-    """MAINTENANCE. Audit of a project: broken pointers (IDs cited that do not
-    exist), and citations made by a rule IN FORCE towards one that is retired,
-    denied or still only proposed — plus rules with no perimeter and REDUNDANCY
-    CANDIDATES.
-
-    Those three buckets exist because the door can only judge a citation on the
-    day it is written: a rule is filed citing a proposal, and the proposal is
-    denied a week later. Nothing would ever say so. They count the SOURCE only
-    when it is in force, so a batch citing itself is not reported as a defect —
-    it is a batch.
-
-    The candidates are a suspicion, not a verdict: two rules in force, in the
-    same perimeter, citing the same IDs. The registry puts the pairs under your
-    eyes — deciding they say the same thing is a judgement, and it stays
-    yours.
-
-    There is no numbering-gap report any more, and that is a decision: the
-    number is assigned by the database, so a gap cannot happen — the counter
-    does not skip and retiring leaves the row in place. A check that cannot tell
-    a fault from a choice is a line you learn to skip."""
-    _admin(project, key)
-    return registry.check(project)
-
-
-@tool
-def rules_history(project: str, id: str, key: str) -> dict:
-    """MAINTENANCE. How that rule changed over time: one row per version, with
-    date, action and REASON, plus the perimeter in two columns — `scopes` what
-    was declared, `consumers` who was actually reached that day.
-
-    History is written by the database TRIGGERS, not by these tools, so a change
-    made by hand with sqlite3 is in here too. It serves whoever MAINTAINS the
-    rule, not whoever applies it: the latter only needs the text in force."""
-    _admin(project, key)
-    return registry.history(project, id)
-
-
-@tool
-def rules_diff(project: str, id: str, version_a: int, version_b: int, key: str) -> dict:
-    """MAINTENANCE. What changed between two versions of ONE rule (the numbers
-    come from rules_history). Whole versions are kept, not diffs: the comparison
-    is computed on the fly between any two, however far apart."""
-    _admin(project, key)
-    return registry.compare(project, id, version_a, version_b)
-
-
-@tool
-def rules_export(project: str, key: str, consumer: str = "", expand: bool = False) -> dict:
-    """MAINTENANCE. A Markdown snapshot, to be written into the vault with the
-    archivist's write_file. Two uses:
-      with `consumer`     only that perimeter, rules in force, widest first
-      without `consumer`  the whole project, retired rules included — the
-                          maintenance document, and the copy that goes into git
-
-    Every rule carries its `reason`, and the whole-project export the last
-    `event` too: this is the maintenance reading, where the why is on the page.
-    The legend of the domains present leads the page, glosses from the
-    project's own declarations.
-
-    `expand` decides how citations read: compact `(VA-0002)` by default, or
-    carrying the current title of what they point at. This is the only reader
-    offered the choice, because it is read by a person — rules_list and rules_get
-    always expand, since a chat is not given an option it can get wrong.
-
-    It is a DERIVATIVE: the truth stays in the database and this regenerates. Do
-    not edit it and expect the registry to notice."""
-    _admin(project, key)
-    return registry.export(project, consumer, expand)
-
-
-@tool
-def rules_consumers_add(project: str, consumers: list, key: str) -> dict:
-    """MAINTENANCE. Add consumers to a project — chats or skills. Each one gets
-    a scope of its own name, made by the database.
-
-    AN ITEM MAY BE A PLAIN NAME OR AN OBJECT, and the object is how you say
-    what kind it is. There are exactly TWO kinds — `chat` and `skill` — and
-    the case of that word is not data: `SKILL`, `Skill` and `skill` are one
-    value, stored lower-case. A NAME is the opposite and comes back byte for
-    byte, because the spelling of a name is somebody's choice.
-
-        "Advisory"                                → a chat, by default
-        {"name": "FP-Update-Tax", "kind": "skill"} → a skill
-        {"name": "Advisory", "brief": "…"}         → the brief, in the same call
-
-    The verdict says `added_kinds` for what it created, so nothing is written
-    in silence: a list of bare strings makes everything a chat, which is the
-    trap a dry run fell into — nine skills came back as chats and nothing
-    said so.
-
-    AN EXPLICIT KIND ON A CONSUMER THAT EXISTS REPAIRS IT, reported in
-    `kind_set` and versioned by the trigger. Without that the only cure for a
-    kind entered wrong would be creating a new consumer and abandoning the
-    old, which orphans every rule aimed at it — a typo would cost a piece of
-    the corpus. A BARE NAME says nothing about the kind and therefore changes
-    nothing: naming an existing skill in a plain list leaves it a skill.
-
-    An item may carry a `brief` — the consumer's mandate, in Markdown,
-    returned at the head of its rules_list: creating a consumer and giving it
-    its identity is one gesture. On a consumer that already EXISTS, an item
-    with a brief updates it — this is the door briefs are written through,
-    and the database versions every change by trigger, hand edits included.
-    Same size discipline as a rule's body. For skills leave it empty: a skill
-    describes itself in its own file, and a copy here would be verified by
-    nobody.
-
-    Only adding: removing a consumer would orphan the rules aimed at it. And a
-    consumer is never RENAMED — a renamed consumer is a different consumer, and
-    the rules that reached it need reviewing, not dragging along behind a name.
-    Create the new one and narrow every rule off the old.
-
-    ⚠ There is no `retired` flag on a consumer YET, so the old one stays: it
-    still appears here and `_ALL_` still reaches it, because `_ALL_` is
-    computed over every consumer that exists. Said plainly rather than left as
-    "retire the old", which named a door nobody can open."""
-    _admin(project, key)
-    return registry.add_consumers(project, consumers)
-
-
-@tool
-def rules_consumer_retire(project: str, name: str, reason: str, key: str) -> dict:
-    """MAINTENANCE. END a consumer. Roles end, skills get rewritten: this is
-    the door for it, and its absence is what made the model rigid.
-
-    The row STAYS — the history keeps resolving, and an old version goes on
-    naming it, because a version stores who it reached as text: a photograph,
-    not a pointer. What goes away is every POINTER. It leaves its own scope
-    and every group, `_ALL_` stops reaching it, every rule aimed at it loses
-    that pointer with the narrowing recorded on each one, and every door that
-    names it refuses — saying RETIRED, not "unknown", because a role that
-    ended and a typo are not the same news.
-
-    OPEN TASKS BLOCK IT. Retiring the owner of work still waiting would make
-    that work unreachable by every reading, which is a drop with no reason
-    performed by housekeeping. Close them, or hand them over with tasks_amend.
-
-    The verdict lists the rules left REACHING NOBODY: they are not retired
-    behind your back, they are reported — and rules_check keeps reporting them
-    until they get a perimeter or a retirement of their own.
-
-    Coming back is possible and has to be SAID: rules_consumers_add with an
-    item carrying `revive: true`. A name in a plain list will not do it, on
-    purpose — undoing a decision is never the silent effect of a list."""
-    _admin(project, key)
-    return registry.retire_consumer(project, name, reason)
-
-
-@tool
-def rules_domains_add(project: str, domains: dict, key: str) -> dict:
-    """MAINTENANCE. Add ID domains to a project: {"LQ":"liquidity"}. Two
-    uppercase letters each. Only adding, for the same reason."""
-    _admin(project, key)
-    return registry.add_domains(project, domains)
-
-
-@tool
-def rules_scope_create(project: str, name: str, members: list[str], key: str) -> dict:
-    """MAINTENANCE. Create a named group of consumers, e.g. "deliberativi" over
-    the four chats that deliberate.
-
-    At least two members: every consumer already has a singleton scope of its
-    own name, made by the database, so a one-member group would add nothing but
-    a second name for the same set. A group cannot take a consumer's name —
-    consumers and scopes share one namespace, and that is the right
-    constraint."""
-    _admin(project, key)
-    return registry.create_scope(project, name, members)
-
-
-@tool
-def rules_scope_edit(project: str, name: str, key: str,
-                     add: list[str] = None, remove: list[str] = None) -> dict:
-    """MAINTENANCE. Change who is in a GROUP scope. Careful: this changes the
-    perimeter of EVERY rule pointing at it, and the verdict says how many that
-    is. To make one rule reach one more consumer, use rules_widen instead.
-
-    A managed scope — a consumer's singleton, or _ALL_ — is refused: its
-    membership is fixed by construction, and the refusal comes from the
-    database."""
-    _admin(project, key)
-    return registry.edit_scope(project, name, add, remove)
-
-
-# =====================================================================
-# The task log — the project code, and the name of whoever is acting
-# =====================================================================
-#
-# Operating on tasks costs the PROJECT CODE and nothing else, plus the name of
-# whoever is acting, declared. It is the same trade rules_propose makes and
-# for the same reason turned inside out: a proposal is ungated because it
-# reaches nobody, a task because it IS the work — asking a working chat for
-# the architect key to write down what it has just finished would put the
-# maintenance credential in every chat in the project, which is the one thing
-# the credential model exists to prevent.
-#
-# The declared identity is not PROVED, and that is true of the whole registry
-# today. The one reading that IS maintenance is tasks_overview: across every
-# consumer at once is the maintainer's view, not a worker's.
-
-
-@tool
-def tasks_add(project: str, consumer: str, title: str, body: str, created_by: str,
-              urgent: bool = False, idem_key: str = "") -> dict:
-    """Open a task for a consumer. The ID comes back as TK-NNNN and is cited
-    like a rule, in round brackets: (TK-0012).
-
-    ANYBODY in the project may open one for ANYBODY — that is how a coherence
-    audit hands each correction to the role that owns it, instead of writing a
-    report somebody has to redistribute by hand. `created_by` is your own
-    consumer name and it is MANDATORY: a task nobody signed is a task nobody
-    can be asked about.
-
-    `urgent` is set by whoever CREATES the task and can never be changed
-    afterwards, by anyone. Urgency is born from a condition only the creator
-    knows, and letting the receiver clear the flag would put the lever in the
-    hand of whoever has an interest in postponing. There are no levels: a
-    scale of five inflates until it stops ordering anything. What guards
-    against inflation is that tasks_overview counts urgent tasks BY CREATOR.
-
-    `idem_key` is your own handle for a job you may report more than once —
-    the recurring audit that finds the same discrepancy three weeks running.
-    While a task with that key is still open on that consumer you get THAT
-    task back, not a second one; once it closes, the same key opens a new one,
-    because finding it again is a new report.
-
-    The body is Markdown and may cite rules: `(VA-0002)` comes back with that
-    rule's current title when the body is read. Nothing is refused here — a
-    task is prose about work, so a pointer that does not resolve is reported
-    in the text rather than blocking the task."""
-    return registry.task_add(project, consumer, title, body, created_by,
-                             urgent, idem_key)
-
-
-@tool
-def tasks_list(project: str, consumer: str) -> dict:
-    """WHAT IS OPEN FOR YOU, in one call — and what you closed lately, which is
-    the same question with the other filter. This is what replaces the
-    "pending" section a role memory used to carry, and the per-role changelog:
-    every completion cost an outcome, so the closed half reads as a record of
-    what was done.
-
-    The SHORT form: id, title, urgent, age, status. The bodies are read
-    separately with tasks_get, by code — a list that carried the bodies would
-    make the cheapest question in a chat the most expensive one.
-
-    THE SERVER ORDERS: urgent first, then oldest first. That matters when the
-    ceiling bites, because then the order decides what is lost — and what must
-    survive is the work that has been waiting, not the work you filed this
-    morning and still remember.
-
-    A truncated list SAYS SO, with the real total behind it.
-
-    A task open past the staleness threshold comes back MARKED. It has not
-    expired and it never will: a task that ages does not become false, it
-    stays work nobody did, and an automatic expiry would be a drop with no
-    reason, written by the clock. Closing it is your decision, with the reason
-    written."""
-    return registry.task_list(project, consumer)
-
-
-@tool
-def tasks_search(project: str, consumer: str, query: str) -> dict:
-    """Search your tasks, every state included — finding what you already did
-    is the same question as finding what is open.
-
-    Every hit carries THE FRAGMENT THAT MATCHED, next to the code: a list of
-    codes with no fragments tells you that something matched and not what, and
-    the only way on would be one more call per hit. It searches the title, the
-    outcome, the reason and the body, and shows the text as it is STORED."""
-    return registry.task_search(project, consumer, query)
-
-
-@tool
-def tasks_range(project: str, consumer: str, since: str, until: str,
-                on: str) -> dict:
-    """The tasks of a stretch of days, `since` and `until` inclusive
-    (YYYY-MM-DD). This is where a closed task goes on living once it has left
-    the recent window of tasks_list — it is not gone, it is asked for by date.
-
-    `on` says WHICH DATE it filters — `created_at` or `closed_at` — and there
-    is NO DEFAULT, deliberately. "Opened in July" and "closed in July" are two
-    different questions, a changelog wants the second, and a default would
-    answer one of them while you believed the other."""
-    return registry.task_range(project, consumer, since, until, on)
+def tasks_list(project: str, consumer: str, query: str = "", since: str = "",
+               until: str = "", authored: bool = False) -> dict:
+    """One desk, short form, ordered by the server: urgent first, then oldest —
+    so when the cap cuts, it cuts the FRESH work and never the thing that has
+    been waiting. Recently closed tasks trail the list; `since`/`until` open
+    the window on the older closed ones. `query` filters and returns the
+    fragment.
+
+    `authored=True` turns the view round: the tasks THIS consumer opened on
+    other desks, with status and outcome. A task for somebody else is also a
+    message, and a sender who cannot see it close sends it again.
+
+    A task pending for more than the staleness window comes out MARKED, and
+    that is all: tasks do not expire. Truncation is always declared with the
+    real total."""
+    return _project(project).task_list(consumer, query, since, until, authored)
 
 
 @tool
 def tasks_get(project: str, ids: list[str]) -> dict:
-    """The BODIES, by code, in a batch — e.g. ["TK-0003","TK-0011"]. Up to ten
-    per call, and asking for more is REFUSED rather than trimmed: a caller who
-    asked for fifteen and quietly got ten would act on the ten.
+    """Full bodies for the tasks you name, citations expanded — a broken
+    pointer is named inside the text, never refused.
 
-    A second ceiling, in bytes, is what actually bounds the answer, and when
-    it bites the truncation is DECLARED with how many came back. Bodies arrive
-    with their citations expanded — `(VA-0002 — its title)` — and one pointing
-    nowhere arrives marked in the text.
-
-    An ID that is not a task says so by name: a rule read here is not a
-    missing task, it is the wrong tool, and rules_get is the right one."""
-    return registry.task_get(project, ids)
+    It reads ANY task of the project, deliberately: reads are project-wide and
+    the boundary is the reference code. That is what makes the `authored` view
+    and an audit possible at all. The two ceilings are `rules_get`'s: too many
+    IDs is refused, too many bytes truncates and says so."""
+    return _project(project).task_get(ids)
 
 
 @tool
-def tasks_complete(project: str, id: str, outcome: str, by: str) -> dict:
-    """Close a task WITH ITS OUTCOME, which is mandatory. That is the whole
-    design of this log: the completed tasks with their outcomes ARE the
-    changelog of a consumer, and one closed in silence is an entry nobody can
-    read back.
+def tasks_close(project: str, id: str, by: str, outcome: str = "",
+                reason: str = "", consumer_key: str = "", key: str = "") -> dict:
+    """Close a task: ONE gesture, two verdicts. `outcome` completes it,
+    `reason` drops it — exactly one of the two, and the guarantee is the
+    schema's CHECK, not this docstring. Closed is closed: no amend, no reopen.
 
-    Keep the outcome short and queryable — one or two sentences, what came of
-    it. The long story goes in the project's own history, written by the same
-    hand in the same moment: two gestures, one moment. `by` is your own
-    consumer name.
-
-    A closed task is closed: not amended, not reopened, not re-closed."""
-    return registry.task_complete(project, id, outcome, by)
-
-
-@tool
-def tasks_drop(project: str, id: str, reason: str, by: str) -> dict:
-    """Close a task WITHOUT doing it, with the reason why — the twin of denying
-    a proposal. Deciding not to do something is a decision, and one that
-    leaves no reason gets taken again from scratch the next time somebody
-    reads the same request.
-
-    There is no delete. A dropped task keeps its number, and the number is
-    never handed out again."""
-    return registry.task_drop(project, id, reason, by)
+    Closing a task you do not own takes the ADMIN CODE in `key`, and the
+    refusal names the owner and the gate. It is the one declared exception to
+    the flat ladder — one factor, not two — because a task closed wrong reopens
+    as a new task, while a rule retired wrong loses its ID and its
+    continuity."""
+    admin = bool((key or "").strip())
+    prj = _admin(project, key) if admin else _project(project)
+    return prj.task_close(id, by, outcome=outcome, reason=reason,
+                          consumer_key=consumer_key, admin=admin)
 
 
 @tool
 def tasks_amend(project: str, id: str, by: str, title: str = "", body: str = "",
-                consumer: str = "") -> dict:
-    """Amend a task that is still OPEN: its title, its body, or its OWNER.
+                consumer: str = "", consumer_key: str = "", key: str = "") -> dict:
+    """Amend an OPEN task: title, body, or `consumer` to hand it to the right
+    desk — the reassignment is named in the story, which keeps both owners.
+    Only what you pass changes.
 
-    Reassigning is here because a misdirected task is an ordinary event, not an
-    incident — without it the only way out would be dropping and recreating,
-    which breaks the thread between the work and the request that started it.
-    The history keeps both owners.
+    `urgent` has no parameter here, and that is not an oversight: it belongs to
+    whoever created the task, and that door does not exist. Amending a task you
+    do not own takes the admin code in `key`, like closing one."""
+    admin = bool((key or "").strip())
+    prj = _admin(project, key) if admin else _project(project)
+    return prj.task_amend(id, by, title=title, body=body, consumer=consumer,
+                          consumer_key=consumer_key, admin=admin)
 
-    `urgent` is not here and cannot be reached from anywhere: it belongs to
-    whoever created the task. A closed task is not amended at all."""
-    return registry.task_amend(project, id, by, title, body, consumer)
+
+# =====================================================================
+# Administration — the admin code, and a one-time code on top of it for
+# anything that changes something that already exists
+# =====================================================================
+
+@tool
+def project_amend(project: str, entity: str, name: str, action: str,
+                  fields: dict | None = None, reason: str = "",
+                  auth_code: str = "", key: str = "") -> dict:
+    """Amend the project itself or its STRUCTURE — profile, domains, consumers,
+    groups. Rules and tasks are the project's OBJECTS and have tools of their
+    own; the prefix says which level a call works on.
+
+    `entity`: project | domain | consumer | group. `action`: create | amend |
+    retire | revive. `fields` carries only what changes.
+
+    THE LADDER IS FLAT: `create` passes on the admin code — a created thing is
+    attached to nothing, and the only door that ties a rule to an audience is
+    `rules_propose`, which goes past a person. Every `amend`, `retire` and
+    `revive` — renames, briefs, group membership, `queue_cap` — asks for a
+    one-time `auth_code` AS WELL, minted on the administration page: it lives
+    minutes and it is burned in the same transaction as the SUCCEEDED gesture,
+    so a refusal rolls it back and a typo costs nothing. Spent or expired it is
+    nothing, and alone it elevates nobody. ONE exception downward, declared:
+    `specs` alone — the project's or a consumer's — travels on the reference
+    code, because that is operational data and not identity.
+
+    A MIXED `fields` presented with the lower credential is refused WHOLE,
+    naming the field that needs the higher port. The authorised subset is never
+    written and the rest dropped: one gesture, one door, no silent halves.
+
+    The guarantees live in the schema and this door repeats them speaking: a
+    domain's code is immutable; retiring a domain with rules in force is
+    refused naming them; retiring anything costs a reason; creating a group
+    that mirrors a rule's exceptions is refused naming the rule, while ADDING a
+    member passes even when it covers one — that overlap is repairable, so it
+    goes to `project_status` and is refused at the next write on that rule. A
+    group edit or a consumer retire that would leave a rule in force with ZERO
+    consumers is refused naming the rules: that damage is silent. Names of
+    consumers and groups are amendable, and the OLD NAME STOPS RESOLVING — the
+    verdict lists what must be updated outside the registry: skill files, chat
+    instructions, scheduled prompts."""
+    fields = dict(fields or {})
+    port = Project.port_for(entity, action, fields)
+    if port == "project":
+        prj = _project(project)
+    else:
+        if not (key or "").strip():
+            # The MIXED call, refused whole and naming the field that costs
+            # more — and refused in the ENGINE, where a suite can exercise it
+            # without a server. Only when no pair was presented: with a key in
+            # hand the ordinary refusals speak for themselves.
+            Project.refuse_mixed(entity, action, fields)
+        prj = _admin(project, key)
+    return prj.amend_project(entity, name, action, fields, reason=reason,
+                             actor=ADMIN_ACTOR, auth_code=auth_code)
+
+
+@tool
+def rules_amend(project: str, id: str, reach: str, groups: list[str],
+                exceptions: list[str], expected_version: int, reason: str,
+                auth_code: str, key: str) -> dict:
+    """The PERIMETER of a rule in force, NARROWED, as one atomic gesture — and
+    at two factors, because it is a modification like any other.
+
+    The new effective set of consumers — the UNION of groups and exceptions —
+    must be CONTAINED in the old one. The engine computes both and compares: it
+    does not trust the shape, because two shapes can describe the same people
+    and one shape can describe different people a week later. And never to
+    ZERO: a narrowing that leaves nobody is a retirement in disguise, and that
+    gesture goes through `rules_retire`, where it costs a reason.
+
+    WIDENING binds somebody new, which is promulgation, and promulgation goes
+    past a person: propose a supersede carrying the wider audience and let the
+    approval retire this one in the same decision. The CONTENT is not touched
+    from here either — a rule that must SAY something else is a new decision.
+
+    `expected_version` guards against writing over something you did not read:
+    it is the version `rules_get(history=True)` last showed you."""
+    return _admin(project, key).amend_rule(id, reach, groups, exceptions,
+                                           expected_version, reason,
+                                           actor=ADMIN_ACTOR, auth_code=auth_code)
+
+
+@tool
+def rules_retire(project: str, id: str, reason: str, auth_code: str,
+                 key: str) -> dict:
+    """End a rule without an heir. It is the least reversible gesture on this
+    surface — the way back is a proposal and a human approval — so it takes two
+    factors: the admin code in `key` and a one-time `auth_code`.
+
+    The reason is the price: a rule that disappears without one comes back as
+    an argument. With an heir do not come here — propose the heir with
+    `supersedes`, and the approval retires the victim inside the same
+    decision."""
+    return _admin(project, key).retire(id, reason, actor=ADMIN_ACTOR,
+                                       auth_code=auth_code)
+
+
+@tool
+def project_status(project: str, key: str) -> dict:
+    """The project's health in one report: counts computed on read and never
+    stored, rules expiring with their reasons, the pending queue, prose
+    citations pointing at retired or missing rules, and the overlaps that FORMED
+    after the fact — an exception a group has since swallowed, a domain or a
+    consumer nothing reaches any more.
+
+    Structural pointers are not checked because they are impossible: the schema
+    refuses them at write time. It REPORTS and does not correct: what it finds
+    is sorted out by whoever has the context, not by whoever happens to be
+    running an audit. It declares what it counted."""
+    return _admin(project, key).status()
+
+
+@tool
+def rules_export(project: str, key: str, consumer: str = "",
+                 expand: bool = False) -> dict:
+    """The full corpus in one call, for a migration or for reading off-site.
+    `consumer` narrows it to one perimeter; `expand` inlines the titles of the
+    cited rules.
+
+    Mind your client's result ceiling: this is the tool that meets it first,
+    and the answer says how many bytes it is so the next call can be aimed."""
+    return _admin(project, key).export(consumer, expand)
 
 
 @tool
 def tasks_overview(project: str, key: str) -> dict:
-    """MAINTENANCE. The log across every consumer at once — open, closed,
-    dropped, urgent and stale per consumer, the oldest still waiting, and the
-    urgent tasks counted BY CREATOR.
+    """Every desk at once, short form, ceilings declared — the cross-view that
+    lets an audit route work to the owner who can do it.
 
-    That last count is the guard against urgency inflation, and it is why the
-    view is cross-consumer: if one creator's column is all urgent, what gets
-    corrected is that skill, not the tasks it filed. It also DECLARES the
-    ceilings in force, so the day one of them is exported to the template
-    there is a single place that says which value is commanding."""
-    _admin(project, key)
-    return registry.task_overview(project)
+    It also counts the urgent tasks BY CREATOR, and that is the guard against
+    urgency inflation: if one creator's column is all urgent, what gets
+    corrected is that skill, not the tasks it filed. Reading it moves nothing:
+    no counter, no timestamp."""
+    return _admin(project, key).task_overview()
 
 
 # =====================================================================

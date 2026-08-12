@@ -1782,6 +1782,25 @@ class Project:
             raise
         self.cx.execute("COMMIT")
 
+    @contextlib.contextmanager
+    def _gesture(self, auth_code: str, action: str, needs_auth: bool):
+        """A transaction with the SECOND FACTOR burned inside it.
+
+        This is the whole of "burned in the same transaction as the SUCCEEDED
+        gesture", and it is why the code travels down here instead of being
+        checked at the door: every method of this class opens its own
+        transaction, so a gate called by the surface would burn a code and then
+        watch the gesture roll back without it — a trip to the maintenance page
+        paid for a typo.
+
+        The burn is the FIRST statement inside, so any refusal below rolls it
+        back with everything else, and `needs_auth` is answered by `port_for`
+        at the top of the call: the ladder is asked, never repeated."""
+        with self._transaction():
+            if needs_auth:
+                check_auth_code(self, auth_code, action)
+            yield self.cx
+
     # ---------- the one-time codes ----------
 
     def mint_auth_code(self, minutes: int = 0) -> dict:
@@ -2882,7 +2901,8 @@ class Project:
         return out
 
     def amend_rule(self, rid: str, reach: str, groups, exceptions,
-                   expected_version: int, reason: str, actor: str = "") -> dict:
+                   expected_version: int, reason: str, actor: str = "",
+                   auth_code: str = "") -> dict:
         """THE PERIMETER of a rule in force, NARROWED, as one atomic gesture.
 
         The new effective set of consumers — the union of the groups and the
@@ -2937,7 +2957,8 @@ class Project:
                 "PROMULGATION — it puts an obligation on somebody who did not have it — "
                 "and it goes through the page: propose a supersede carrying the wider "
                 "audience, and let the approval retire this one in the same decision.")
-        with self._transaction():
+        with self._gesture(auth_code, "rule.amend",
+                           self.port_for("rule", "amend") == "auth"):
             self._write_audience(row["rule_id"], gids, cids)
             self.cx.execute(
                 "UPDATE rule SET reach=?, event=?, actor=?, updated_at=? WHERE rule_id=?",
@@ -2954,7 +2975,7 @@ class Project:
                         "snapshot that shows the audience shrink."}
 
     def retire(self, rid: str, reason: str, actor: str = "",
-               superseded_by=None) -> dict:
+               superseded_by=None, auth_code: str = "") -> dict:
         """End a rule without an heir. With an heir the road is the supersede,
         which retires the victim inside the same decision — this is for the rule
         that simply stops applying."""
@@ -2972,7 +2993,8 @@ class Project:
             raise RulesError("reason is the price of a retirement: a rule that disappears "
                              "without one comes back as an argument.")
         reason = self._prose("reason", reason)
-        with self._transaction():
+        with self._gesture(auth_code, "rule.retire",
+                           self.port_for("rule", "retire") == "auth"):
             self.cx.execute(
                 "UPDATE rule SET status='retired', event=?, actor=?, "
                 "superseded_by_rule_id=?, updated_at=? WHERE rule_id=?",
@@ -3199,7 +3221,15 @@ class Project:
         A mixed `fields` answers with the HIGHEST port it contains, which is
         what makes 'refuse the call whole' possible: the caller is told the
         field that needs the higher gate instead of getting the authorised
-        subset written and the rest dropped."""
+        subset written and the rest dropped.
+
+        It answers for RULES as well — `port_for('rule', 'amend')`,
+        `port_for('rule', 'retire')` — and for the same reason: narrowing a
+        perimeter and ending a rule are modifications of something that
+        exists, and the ladder does not learn a second shape for them. TASKS
+        do not come here, and that is the one declared exception: their gate
+        is about OWNERSHIP, not about entity and action, so it lives where
+        ownership is known — inside task_close and task_amend."""
         entity = (entity or "").strip().lower()
         action = (action or "").strip().lower()
         if action != "amend":
@@ -3209,8 +3239,35 @@ class Project:
             return "project"
         return "auth"
 
+    @classmethod
+    def refuse_mixed(cls, entity: str, action: str, fields=None) -> None:
+        """The MIXED call, refused WHOLE and naming the field that costs more.
+
+        It lives here, next to the ladder it reads, and not at the door: a
+        refusal written on the surface is a refusal no suite can exercise
+        without a server, and the one guarantee it carries — that the
+        authorised subset is NOT written while the rest is dropped — is
+        precisely the one worth a case.
+
+        Only genuinely mixed fields get this sentence. A call where everything
+        needs the higher gate is not a caller who chose the wrong field, it is
+        a caller who brought no credential, and the ordinary refusal says that
+        better. Called by the surface when no pair was presented at all."""
+        fields = dict(fields or {})
+        low = [f for f in fields if cls.port_for(entity, action, {f: fields[f]}) == "project"]
+        if not low or len(low) == len(fields):
+            return
+        high = ", ".join(sorted(set(fields) - set(low)))
+        raise RulesError(
+            f"{high}: this field is not operational data, and it does not travel on the "
+            f"reference code — {', '.join(sorted(low))} would. The call is refused WHOLE: "
+            "the part you are allowed is not written and the rest dropped, because a "
+            "gesture that half happened is a gesture nobody can read six months later. "
+            "Bring the admin code in `key`, and the one-time `auth_code` with it.")
+
     def amend_project(self, entity: str, name: str, action: str, fields=None,
-                      reason: str = "", actor: str = "") -> dict:
+                      reason: str = "", actor: str = "",
+                      auth_code: str = "") -> dict:
         """The project itself and its STRUCTURE — profile, domains, consumers,
         groups. Rules and tasks are the project's OBJECTS and have tools of
         their own; the prefix says which level a call works on.
@@ -3248,12 +3305,23 @@ class Project:
         if action == "amend" and not fields:
             raise RulesError("nothing to amend: `fields` carries only what changes, and "
                              "an empty one is a gesture with no content.")
+        # The ladder is ASKED, once, and carried down as a prepared gesture: the
+        # handlers open the transaction that writes, so that is where the
+        # one-time code has to burn. `create` needs none — a created thing is
+        # attached to nothing — and `specs` alone needs neither.
+        needs_auth = self.port_for(entity, action, fields) == "auth"
+        code, verb = auth_code, f"{entity}.{action}"
+
+        def gesture():
+            return self._gesture(code, verb, needs_auth)
+
         handler = getattr(self, f"_amend_{entity}")
-        return handler(name, action, fields, (reason or "").strip(), actor)
+        return handler(name, action, fields, (reason or "").strip(), actor, gesture)
 
     # ---------- the profile ----------
 
-    def _amend_project(self, name, action, fields, reason, actor) -> dict:
+    def _amend_project(self, name, action, fields, reason, actor,
+                     gesture) -> dict:
         if action != "amend":
             raise RulesError(
                 "the project is not created, retired or revived from here: it is a line "
@@ -3272,7 +3340,7 @@ class Project:
             brief = self._prose("brief", brief)
         if "specs" in fields:
             specs = self._prose("specs", specs)
-        with self._transaction():
+        with gesture():
             if row is None:
                 self.cx.execute(
                     "INSERT INTO project_profile (profile_id, brief, specs, queue_cap, "
@@ -3288,7 +3356,8 @@ class Project:
 
     # ---------- domains ----------
 
-    def _amend_domain(self, name, action, fields, reason, actor) -> dict:
+    def _amend_domain(self, name, action, fields, reason, actor,
+                     gesture) -> dict:
         if action == "create":
             # ONE door for the letter-pair, wherever it is declared: the
             # reservation of TK holds here and at every use, because a row put
@@ -3302,7 +3371,7 @@ class Project:
                 raise RulesError("a domain needs a reason to exist: one nobody can justify "
                                  "is a drawer, and drawers fill up.")
             desc = self._prose("description", fields.get("description") or "")
-            with self._transaction():
+            with gesture():
                 self.cx.execute(
                     "INSERT INTO domain (code, description, reason, created_at, actor) "
                     "VALUES (?,?,?,?,?)", (code, desc or None, why, _now(), actor))
@@ -3311,7 +3380,7 @@ class Project:
         row = self._domain_row(name, live=False)
         if action == "amend":
             desc = self._prose("description", fields.get("description") or "")
-            with self._transaction():
+            with gesture():
                 self.cx.execute("UPDATE domain SET description=?, actor=? WHERE domain_id=?",
                                 (desc or None, actor, row["domain_id"]))
             return {"entity": "domain", "action": "amended", "code": row["code"],
@@ -3331,7 +3400,7 @@ class Project:
                     f"domain {row['code']} still has rules in force: "
                     f"{'; '.join(live)}. Retire or supersede them first — a rule whose "
                     "domain is dead carries a label nobody can look up.")
-            with self._transaction():
+            with gesture():
                 self.cx.execute("UPDATE domain SET retired_at=?, retired_reason=?, actor=? "
                                 "WHERE domain_id=?", (_now(), reason, actor,
                                                       row["domain_id"]))
@@ -3341,14 +3410,15 @@ class Project:
         if not row["retired_at"]:
             raise RulesError(f"domain {row['code']} is not retired: there is nothing to "
                              "revive.")
-        with self._transaction():
+        with gesture():
             self.cx.execute("UPDATE domain SET retired_at=NULL, retired_reason=NULL, "
                             "actor=? WHERE domain_id=?", (actor, row["domain_id"]))
         return {"entity": "domain", "action": "revived", "code": row["code"]}
 
     # ---------- consumers ----------
 
-    def _amend_consumer(self, name, action, fields, reason, actor) -> dict:
+    def _amend_consumer(self, name, action, fields, reason, actor,
+                     gesture) -> dict:
         if action == "create":
             who = _valid_name(fields.get("name") or name, "consumer")
             if self.cx.execute("SELECT 1 FROM consumer WHERE lower(name)=?",
@@ -3361,7 +3431,7 @@ class Project:
                     f"kind {kind!r}: one of {', '.join(KINDS)}. A human calls no tool but "
                     "owns tasks; it is not guessed from the name, because a wrong guess "
                     "would be written in silence.")
-            with self._transaction():
+            with gesture():
                 self.cx.execute(
                     "INSERT INTO consumer (name, kind, brief, specs, secret, created_at, "
                     "actor) VALUES (?,?,?,?,?,?,?)",
@@ -3387,7 +3457,7 @@ class Project:
             secret = row["secret"]
             if "secret" in fields:
                 secret = (fields["secret"] or "").strip() or None
-            with self._transaction():
+            with gesture():
                 self.cx.execute(
                     "UPDATE consumer SET name=?, brief=?, specs=?, secret=?, actor=? "
                     "WHERE consumer_id=?",
@@ -3417,7 +3487,7 @@ class Project:
                     f"{'; '.join(stuck)}. Sort them out first — retire them properly, or "
                     "give them a perimeter that still means something. A rule left binding "
                     "nobody is a retirement nobody decided and nobody can find.")
-            with self._transaction():
+            with gesture():
                 # MARKED, and not one junction row deleted: `ba7dde8` paid for
                 # that sentence. Deleting from the audience tables would change
                 # the perimeter of LIVE RULES as the side effect of a gesture
@@ -3431,7 +3501,7 @@ class Project:
                             "Nothing reaches it any more."}
         if not row["retired_at"]:
             raise RulesError(f"{row['name']} is not retired: there is nothing to revive.")
-        with self._transaction():
+        with gesture():
             self.cx.execute("UPDATE consumer SET retired_at=NULL, retired_reason=NULL, "
                             "actor=? WHERE consumer_id=?", (actor, row["consumer_id"]))
         return {"entity": "consumer", "action": "revived", "name": row["name"],
@@ -3452,7 +3522,8 @@ class Project:
 
     # ---------- groups ----------
 
-    def _amend_group(self, name, action, fields, reason, actor) -> dict:
+    def _amend_group(self, name, action, fields, reason, actor,
+                     gesture) -> dict:
         if action == "create":
             gname = _valid_name(fields.get("name") or name, "group")
             if self.cx.execute("SELECT 1 FROM consumer_group WHERE lower(name)=?",
@@ -3464,7 +3535,7 @@ class Project:
                 raise RulesError("a group with no members is a name: give it at least one "
                                  "consumer, or do not create it yet.")
             self._no_mirror(set(members), gname)
-            with self._transaction():
+            with gesture():
                 self.cx.execute("INSERT INTO consumer_group (name, created_at, actor) "
                                 "VALUES (?,?,?)", (gname, _now(), actor))
                 gid = self.cx.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -3521,7 +3592,7 @@ class Project:
                 out["left"] = sorted(self.cx.execute(
                     "SELECT name FROM consumer WHERE consumer_id=?", (c,)).fetchone()[0]
                     for c in gone)
-            with self._transaction():
+            with gesture():
                 self.cx.execute("UPDATE consumer_group SET name=?, actor=? WHERE group_id=?",
                                 (new_name, actor, row["group_id"]))
                 if "members" in fields:
@@ -3543,14 +3614,14 @@ class Project:
                 raise RulesError(
                     f"retiring {row['name']} would leave these rules in force reaching "
                     f"nobody: {'; '.join(stuck)}. Sort them out first.")
-            with self._transaction():
+            with gesture():
                 self.cx.execute("UPDATE consumer_group SET retired_at=?, retired_reason=?, "
                                 "actor=? WHERE group_id=?",
                                 (_now(), reason, actor, row["group_id"]))
             return {"entity": "group", "action": "retired", "name": row["name"]}
         if not row["retired_at"]:
             raise RulesError(f"group {row['name']} is not retired: nothing to revive.")
-        with self._transaction():
+        with gesture():
             self.cx.execute("UPDATE consumer_group SET retired_at=NULL, "
                             "retired_reason=NULL, actor=? WHERE group_id=?",
                             (actor, row["group_id"]))

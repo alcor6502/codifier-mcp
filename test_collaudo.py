@@ -80,7 +80,8 @@ def project(**profile):
     p.amend_project("group", "automatismi", "create",
                     {"members": ["advisory", "news"]}, actor="architect")
     if profile:
-        p.amend_project("project", "", "amend", profile, actor="architect")
+        p.amend_project("project", "", "amend", profile, actor="architect",
+                        auth_code=p.mint_auth_code()["auth_code"])
     return p
 
 
@@ -94,6 +95,23 @@ def rule(p, reach="all", groups=(), exceptions=(), domain="VA", title="a title",
         b = p.batch()
         p.decide(b["digest"], [x["id"] for x in b["pending"]], {})
     return out["id"]
+
+
+def e_needs(entity: str) -> bool:
+    """The project itself is not retired from a tool at all, so its refusal is
+    the older one and arrives first — the ladder never gets asked."""
+    return entity != "project"
+
+
+def code(p):
+    """A live one-time auth code, the way the maintenance page hands one out.
+
+    Every MODIFICATION in this suite pays the same price a real one pays, and
+    that is the point of the helper: a suite that could modify without a code
+    would be measuring a ladder nobody has to climb. Minting is not gated here
+    because the gate on minting is the web UI's password, which no tool and no
+    test carries."""
+    return p.mint_auth_code()["auth_code"]
 
 
 def refused(name, gesture, expect):
@@ -180,6 +198,112 @@ equals("a brief is never the low door",
        rules.Project.port_for("project", "amend", {"brief": "x"}), "auth")
 equals("and a domain has no specs to travel low",
        rules.Project.port_for("domain", "amend", {"description": "x"}), "auth")
+# The MIXED call, and it is the guarantee the surface used to carry alone —
+# where no suite could reach it. What is refused is the shortcut of writing the
+# part you are allowed and dropping the rest.
+refused("mixed fields: refused WHOLE, naming the field that costs more",
+        lambda: rules.Project.refuse_mixed("consumer", "amend",
+                                           {"specs": "x", "brief": "y"}),
+        "refused WHOLE")
+refused("and it names the low field too, so the caller can split the call",
+        lambda: rules.Project.refuse_mixed("consumer", "amend",
+                                           {"specs": "x", "brief": "y"}), "specs")
+allowed("specs alone is not mixed: the ordinary door answers",
+        lambda: rules.Project.refuse_mixed("consumer", "amend", {"specs": "x"}))
+allowed("and neither is a call where everything needs the higher gate",
+        lambda: rules.Project.refuse_mixed("consumer", "amend",
+                                           {"brief": "y", "name": "z"}))
+allowed("nor a retirement, which carries no fields at all",
+        lambda: rules.Project.refuse_mixed("consumer", "retire", {}))
+
+equals("it answers for RULES too, so they do not grow a second scale",
+       rules.Project.port_for("rule", "amend"), "auth")
+equals("and ending one is a modification like the rest",
+       rules.Project.port_for("rule", "retire"), "auth")
+
+
+# =====================================================================
+print("\n— THE SECOND FACTOR: it burns WITH the gesture, not before —")
+p = project()
+rid = rule(p, "targeted", groups=["deliberativi"], title="the perimeter to shrink")
+
+
+def ver_of(prj, r):
+    return prj.get_rules([r], history=True)["rules"][0]["history"][-1]["version"]
+
+
+refused("a modification with no code at all",
+        lambda: p.amend_rule(rid, "targeted", ["deliberativi"], [], ver_of(p, rid),
+                             "why", "architect"), "one-time auth_code")
+refused("a code invented rather than minted",
+        lambda: p.amend_rule(rid, "targeted", ["deliberativi"], [], ver_of(p, rid),
+                             "why", "architect", auth_code="X" * 12),
+        "not one of this project's")
+other = project()
+refused("a code minted in ANOTHER project — it belongs to the database it was minted in",
+        lambda: p.amend_rule(rid, "targeted", ["deliberativi"], [], ver_of(p, rid),
+                             "why", "architect", auth_code=code(other)),
+        "not one of this project's")
+expired = code(p)
+p.cx.execute("UPDATE auth_code SET expires_at='2000-01-01T00:00:00Z' "
+             "WHERE spent_at IS NULL AND expires_at > '2000-01-02T00:00:00Z'")
+refused("a code that ran out of minutes",
+        lambda: p.amend_rule(rid, "targeted", ["deliberativi"], [], ver_of(p, rid),
+                             "why", "architect", auth_code=expired), "expired on")
+
+# The one that is not a confirmation: a refusal AFTER the gate must roll the
+# burn back with everything else. Injected on purpose, because nothing in the
+# ordinary path refuses that late — every argument is checked before the
+# transaction opens, which is exactly why this property would otherwise be
+# invisible until the day a trigger fires in production. If the burn is ever
+# moved out of the gesture's transaction, the SECOND of these two goes red.
+spendable = code(p)
+
+
+def _refuse_late(*a, **kw):
+    raise rules.RulesError("the write refused, after the gate")
+
+
+_real_write = p._write_audience
+p._write_audience = _refuse_late
+refused("a gesture refused after the gate is still a refusal",
+        lambda: p.amend_rule(rid, "targeted", ["deliberativi"], [], ver_of(p, rid),
+                             "why", "architect", auth_code=spendable),
+        "after the gate")
+p._write_audience = _real_write
+allowed("and the code it carried was NOT spent: the burn rolled back with it",
+        lambda: p.amend_rule(rid, "targeted", [], ["architect"], ver_of(p, rid),
+                             "the architect desk alone", "architect",
+                             auth_code=spendable))
+refused("but once the gesture succeeds, that code is nothing",
+        lambda: p.amend_rule(rid, "targeted", [], ["architect"], ver_of(p, rid),
+                             "again", "architect", auth_code=spendable),
+        "already spent")
+yields("and the spent row says what spent it",
+       lambda: p.auth_codes()["spent"][0]["spent_action"], "rule.amend")
+allowed("CREATING still takes no one-time code: a created thing is attached to nothing",
+        lambda: p.amend_project("domain", "RL", "create", {"reason": "rules of the road"},
+                                actor="architect"))
+
+# One case per ENTITY, and not for symmetry: the burn rides on the gesture the
+# handler opens, so a handler that went back to opening a plain transaction
+# would let every modification of ITS entity through with no second factor and
+# nothing else in this suite would notice. Four handlers, four cases.
+for _entity, _fields in (("project", {"brief": "a new mandate"}),
+                         ("domain", {"description": "a new gloss"}),
+                         ("consumer", {"brief": "a new mandate"}),
+                         ("group", {"members": ["architect"]})):
+    refused(f"{_entity}: amended with no one-time code",
+            (lambda e=_entity, f=_fields: p.amend_project(
+                e, {"project": "", "domain": "VA", "consumer": "architect",
+                    "group": "deliberativi"}[e], "amend", f, actor="architect")),
+            "one-time auth_code")
+    refused(f"{_entity}: retired with no one-time code",
+            (lambda e=_entity: p.amend_project(
+                e, {"project": "", "domain": "RL", "consumer": "advisory",
+                    "group": "automatismi"}[e], "retire", {}, reason="done",
+                actor="architect")),
+            "one-time auth_code" if e_needs(_entity) else "catastrophic has no tool")
 
 # =====================================================================
 print("\n— THE ANAGRAFICA —")
@@ -218,7 +342,8 @@ refused("a negative queue cap", lambda: p.amend_project(
     "project", "", "amend", {"queue_cap": -1}), "none of the three")
 
 out = allowed("a rename goes through", lambda: p.amend_project(
-    "consumer", "advisory", "amend", {"name": "fidelity advisory"}, actor="architect"))
+    "consumer", "advisory", "amend", {"name": "fidelity advisory"}, actor="architect",
+    auth_code=code(p)))
 equals("and the verdict says the old name STOPS RESOLVING",
        "STOPS RESOLVING" in (out or {}).get("note", ""), True)
 equals("and it names what lives outside the registry",
@@ -402,7 +527,8 @@ refused("writing against a version that moved", lambda: p.amend_rule(
     "somebody changed it after you read it")
 narrowed = allowed("a UNIVERSAL rule narrowed onto a group — the gesture the DDL blocked",
                    lambda: p.amend_rule(universal, "targeted", ["deliberativi"], [],
-                                        v, "only the deliberative desks now", "architect"))
+                                        v, "only the deliberative desks now", "architect",
+                                        auth_code=code(p)))
 equals("and it says who it stopped reaching",
        (narrowed or {})["no_longer_reaches"], ["Alfredo", "news"])
 yields("the perimeter is what the rule now shows",
@@ -420,13 +546,13 @@ refused("widening all the way back to everyone", lambda: p.amend_rule(
 refused("and the refusal carries the cure", lambda: p.amend_rule(
     targeted, "all", [], [], ver(targeted), "everyone now", "architect"), "supersede")
 p.amend_project("group", "deliberativi", "amend", {"members": ["architect"]},
-                actor="architect")
+                actor="architect", auth_code=code(p))
 # A group whose members have all ENDED: the new perimeter is a subset of the
 # old one — it has to be, it is empty — so containment says yes and only the
 # empty guard can say no.
 p.amend_project("group", "soli", "create", {"members": ["news"]}, actor="architect")
 p.amend_project("consumer", "news", "retire", {}, reason="the skill was withdrawn",
-                actor="architect")
+                actor="architect", auth_code=code(p))
 refused("a narrowing that leaves NOBODY is a retirement in disguise",
         lambda: p.amend_rule(targeted, "targeted", ["soli"], [], ver(targeted), "why", "architect"),
         "retirement in disguise")
@@ -462,12 +588,13 @@ refused("retiring that group outright, same guard",
         "the automatic rule")
 allowed("taking ONE member out, when the rule still reaches somebody",
         lambda: p2.amend_project("group", "automatismi", "amend",
-                                 {"members": ["advisory"]}, actor="architect"))
+                                 {"members": ["advisory"]}, actor="architect",
+                                 auth_code=code(p2)))
 rule(p2, "targeted", groups=["deliberativi"], exceptions=["news"], title="mixed")
 allowed("ADDING a member passes even when it covers an exception",
         lambda: p2.amend_project("group", "deliberativi", "amend",
                                  {"members": ["architect", "advisory", "news"]},
-                                 actor="architect"))
+                                 actor="architect", auth_code=code(p2)))
 yields("and the overlap it created is REPORTED, not hidden",
        lambda: bool(p2.status()["overlaps"]), True)
 
@@ -486,7 +613,7 @@ refused("retiring without a reason", lambda: p.retire(rid, ""), "price of a reti
 refused("retiring something that was never defined", lambda: p.retire("VA-0099", "why"),
         "never defined")
 allowed("a rule in force ends", lambda: p.retire(rid, "the reason it stopped applying",
-                                                 "architect"))
+                                                 "architect", auth_code=code(p)))
 refused("and it does not end twice", lambda: p.retire(rid, "again"), "already retired")
 p = project()
 rule(p, title="in force")
@@ -498,7 +625,7 @@ refused("and the refusal names them",
                                 actor="architect"), "in force")
 allowed("a domain with nothing under it retires",
         lambda: p.amend_project("domain", "ST", "retire", {}, reason="never used",
-                                actor="architect"))
+                                actor="architect", auth_code=code(p)))
 refused("and nothing new is filed under it", lambda: p.propose(
     "ST", "R", "t", "b", "why", "all", "architect"), "was retired on")
 
@@ -538,7 +665,8 @@ yields("an ID that is not there is named, not invented",
        lambda: p.get_rules(["VA-0099"])["not_found"], ["VA-0099"])
 allowed("the perimeter moves, and only the perimeter",
         lambda: p.amend_rule(g, "targeted", [], ["advisory"], 2,
-                             "the architect desk stops carrying this", "architect"))
+                             "the architect desk stops carrying this", "architect",
+                             auth_code=code(p)))
 hist = allowed("the history comes as dated gestures",
                lambda: p.get_rules([g], history=True)["rules"][0]["history"])
 equals("version 1 photographs the perimeter it was born with",
@@ -630,7 +758,8 @@ equals("and it is past the highest one ever handed out",
 # =====================================================================
 print("\n— THE SECRET, when a consumer has one —")
 p = project()
-p.amend_project("consumer", "news", "amend", {"secret": "s3cret"}, actor="architect")
+p.amend_project("consumer", "news", "amend", {"secret": "s3cret"}, actor="architect",
+                auth_code=code(p))
 refused("a gesture in that consumer's name with no key",
         lambda: p.task_add("advisory", "t", "b", "news"), "signs its gestures")
 allowed("with the key it goes through",
@@ -645,7 +774,7 @@ print("\n— THE REPORT —")
 p = project()
 a = rule(p, title="the first")
 b_ = rule(p, "targeted", groups=["deliberativi"], title="the second")
-p.retire(a, "it stopped applying", "architect")
+p.retire(a, "it stopped applying", "architect", auth_code=code(p))
 p.propose("VA", "R", "points at a dead one", "see (VA-0001)", "why", "all", "architect")
 rep = allowed("one call", lambda: p.status())
 equals("it counts, and says it counted", (rep or {})["counted"]["in_force"], 1)

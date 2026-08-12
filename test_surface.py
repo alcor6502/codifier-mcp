@@ -183,11 +183,19 @@ MANUALS = {f: source_or_none(os.path.join(HERE, f))
 # The engine: signatures, and which methods write
 # =====================================================================
 
-REGISTRY = next(n for n in ENGINE_TREE.body
-                if isinstance(n, ast.ClassDef) and n.name == "Registry")
+# TWO classes since v4.0.0, and they are not interchangeable: `Registry` is the
+# ROUTER — `projects.txt` in, one `Project` out — and `Project` is the engine,
+# one folder, one file, one connection. Everything a tool does happens on a
+# Project; the Registry only says which one.
+ROUTER = next(n for n in ENGINE_TREE.body
+              if isinstance(n, ast.ClassDef) and n.name == "Registry")
+PROJECT = next(n for n in ENGINE_TREE.body
+               if isinstance(n, ast.ClassDef) and n.name == "Project")
 
 METHODS: dict[str, ast.FunctionDef] = {
-    n.name: n for n in REGISTRY.body if isinstance(n, ast.FunctionDef)}
+    n.name: n for n in PROJECT.body if isinstance(n, ast.FunctionDef)}
+ROUTES: dict[str, ast.FunctionDef] = {
+    n.name: n for n in ROUTER.body if isinstance(n, ast.FunctionDef)}
 
 _WRITES = re.compile(r"\b(INSERT|UPDATE|DELETE)\b", re.IGNORECASE)
 
@@ -198,11 +206,35 @@ def _writes_directly(fn: ast.FunctionDef) -> bool:
 
 
 def _calls_on_self(fn: ast.FunctionDef) -> set[str]:
+    """Every method this one reaches on self — INCLUDING the ones it reaches by
+    name rather than by attribute.
+
+    `amend_project` dispatches with `getattr(self, f"_amend_{entity}")`, and an
+    edge the AST cannot follow is an edge that is not there: without this, the
+    method that writes every domain, consumer and group in the project came out
+    of the derivation READ-ONLY, and the gate check below would have had
+    nothing to say about the tool that calls it. The literal head of the
+    f-string is enough — every private method that starts with it is a
+    candidate, and over-reaching here costs nothing while under-reaching costs
+    a hole."""
     out = set()
     for n in ast.walk(fn):
-        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                 and isinstance(n.func.value, ast.Name) and n.func.value.id == "self"):
-            out.add(n.func.attr)
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                    and n.func.id == "getattr" and len(n.args) >= 2
+                    and isinstance(n.args[0], ast.Name) and n.args[0].id == "self"):
+                head = ""
+                target = n.args[1]
+                if isinstance(target, ast.JoinedStr) and target.values \
+                        and isinstance(target.values[0], ast.Constant):
+                    head = target.values[0].value
+                elif isinstance(target, ast.Constant) and isinstance(target.value, str):
+                    head = target.value
+                if head:
+                    out |= {m for m in METHODS if m.startswith(head)}
+            continue
+        out.add(n.func.attr)
     return out
 
 
@@ -240,72 +272,44 @@ UNGATED_ON_PURPOSE = {
     # because that is the maintainer's reading and not a worker's.
     "tasks_add": "opening a task is the work asking for itself: it binds nobody and "
                  "reaches one consumer, and the key would have to live in every chat",
-    "tasks_complete": "closing your own task with its outcome is the work reporting "
-                      "itself — and the outcome is what the log is read for",
-    "tasks_drop": "deciding not to do your own task is the same gesture as doing it, "
-                  "and it already costs a written reason",
+    "tasks_close": "closing your OWN task is the work reporting itself, whichever of "
+                   "the two verdicts it carries — and the outcome is what the log is "
+                   "read for. Somebody else's takes the admin code, and that half is "
+                   "checked as a gate, not as an exception",
     "tasks_amend": "amending an OPEN task, including handing it to the right owner, "
                    "is routine traffic between roles — the closed ones are frozen by "
                    "the database, not by a credential",
 }
 
+# The two tools whose gate depends on what is passed rather than on which tool
+# it is: with `key` they are administration, without it they are the work.
+# Written as data, with the reason, for the same purpose as the set above — an
+# exception with no reason next to it stops being a decision.
+ADMIN_IF_KEY = {
+    "tasks_close": "closing someone else's task takes the admin code, and it is the "
+                   "one declared exception to the flat ladder: one factor, because a "
+                   "task closed wrong reopens as a new task",
+    "tasks_amend": "amending someone else's task, same reason as closing it",
+    "reference_guide": "the pair asks for the OTHER HALF of the manual; bare, it is "
+                       "the work manual and refusing there would be a wall at the "
+                       "front door",
+    "project_amend": "`specs` alone travels on the reference code — operational data, "
+                     "not identity — and everything else on the pair",
+}
+
 print("\n== the engine, as the seam sees it ==")
-ok(len(METHODS) > 30, f"Registry parsed: {len(METHODS)} methods")
-ok({"propose", "approve", "retire", "amend"} <= MUTATING,
-   f"the mutating set is derived, not typed: {len(MUTATING)} methods")
-ok("list_rules" not in MUTATING and "check" not in MUTATING,
+ok(len(METHODS) > 30, f"Project parsed: {len(METHODS)} methods")
+ok(len(ROUTES) >= 5, f"and the router with it: {len(ROUTES)} methods")
+ok({"propose", "decide", "retire", "amend_rule", "amend_project",
+    "task_add", "task_close", "task_amend"} <= MUTATING,
+   f"the mutating set is derived, not typed: {len(MUTATING)} methods",
+   sorted(MUTATING))
+ok("list_rules" not in MUTATING and "status" not in MUTATING,
    "and it does not sweep the read-only ones in with them")
 
 # =====================================================================
 # 1 · every call into the engine exists, with a compatible signature
 # =====================================================================
-
-print("\n== server.py -> rules.py: every call lands ==")
-
-
-def signature(fn: ast.FunctionDef):
-    pos = [a.arg for a in fn.args.posonlyargs + fn.args.args][1:]     # drop self
-    kwonly = [a.arg for a in fn.args.kwonlyargs]
-    n_defaults = len(fn.args.defaults)
-    required = pos[:len(pos) - n_defaults] if n_defaults else pos
-    required += [a.arg for a, d in zip(fn.args.kwonlyargs, fn.args.kw_defaults) if d is None]
-    return pos, kwonly, set(required)
-
-
-CALLS = [n for n in ast.walk(SERVER_TREE)
-         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-         and isinstance(n.func.value, ast.Name) and n.func.value.id == "registry"]
-
-ok(len(CALLS) >= 20, f"{len(CALLS)} calls into the engine found in server.py")
-
-for call in CALLS:
-    name = call.func.attr
-    where = f"line {call.lineno}"
-    if name not in METHODS:
-        ok(False, f"registry.{name} exists", where)
-        continue
-    pos, kwonly, required = signature(METHODS[name])
-    given_pos = len(call.args)
-    given_kw = {k.arg for k in call.keywords if k.arg}
-    problems = []
-    if given_pos > len(pos):
-        problems.append(f"{given_pos} positional arguments for {len(pos)} parameters")
-    unknown = given_kw - set(pos) - set(kwonly)
-    if unknown:
-        problems.append(f"unknown keywords: {', '.join(sorted(unknown))}")
-    covered = set(pos[:given_pos]) | given_kw
-    missing = required - covered
-    if missing:
-        problems.append(f"missing required: {', '.join(sorted(missing))}")
-    ok(not problems, f"registry.{name}(...) matches its signature",
-       f"{where}: {'; '.join(problems)}")
-
-# =====================================================================
-# 2 · every tool that writes goes through _admin
-# =====================================================================
-
-print("\n== every write passes the maintenance gate ==")
-
 
 def is_tool(fn: ast.FunctionDef) -> bool:
     """Registered either as @mcp.tool or through the @tool decorator — since
@@ -329,6 +333,227 @@ def is_tool(fn: ast.FunctionDef) -> bool:
 TOOLS = [n for n in ast.walk(SERVER_TREE)
          if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and is_tool(n)]
 TOOL_NAMES = {t.name for t in TOOLS}
+
+
+print("\n== sixteen tools, and the ones that went stayed gone ==")
+
+# The catalogue is paid by every session of the project, so the number is a
+# decision and not an outcome. Written as an EQUALITY, both ways: nothing
+# missing, and — the half a count cannot see — nothing extra. `>= 16` tolerates
+# a seventeenth, and a seventeenth is the realistic mistake.
+ALIVE = {
+    # the reference code
+    "reference_guide", "project_info", "rules_list", "rules_get", "rules_propose",
+    "tasks_add", "tasks_list", "tasks_get", "tasks_close", "tasks_amend",
+    # the admin code, and a one-time code on top for what already exists
+    "project_amend", "rules_amend", "rules_retire", "project_status",
+    "rules_export", "tasks_overview",
+}
+ok(TOOL_NAMES == ALIVE, f"the surface is exactly these {len(ALIVE)} tools",
+   f"extra: {sorted(TOOL_NAMES - ALIVE)} · missing: {sorted(ALIVE - TOOL_NAMES)}")
+
+# And the dead, BY NAME. The equality above already refuses them; this list
+# makes a resurrection fail saying which name came back, which is the sentence
+# somebody reads at 2am. Two generations of them: the seven that left in
+# v3.0.0 for the UI, and the sixteen v4.0.0 folded into the tools above.
+DEAD = {
+    "rules_approve", "rules_renew", "rules_promote", "rules_registry",
+    "rules_project_create", "rules_project_rekey", "rules_backup",
+    "rules_project_info", "rules_search", "rules_pending", "rules_batch",
+    "rules_deny", "rules_fix", "rules_widen", "rules_narrow", "rules_status",
+    "rules_check", "rules_history", "rules_diff", "rules_consumers_add",
+    "rules_consumer_retire", "rules_domains_add", "rules_scope_create",
+    "rules_scope_edit", "tasks_search", "tasks_range", "tasks_complete",
+    "tasks_drop", "legislator_guide",
+}
+ok(not (DEAD & TOOL_NAMES), "and not one of the tools that went is back",
+   sorted(DEAD & TOOL_NAMES))
+
+# WHO IS GATED, as an equality, read off the SIGNATURES rather than off a list:
+# a tool takes `key` or it does not, and that is the whole of what a caller
+# sees. A gate appearing on a working tool fails as loudly as one going missing
+# from an administration tool — the first would put the admin code in every
+# chat of the project, which is the one thing the credential model exists to
+# stop.
+WITH_KEY = {"reference_guide", "tasks_close", "tasks_amend", "project_amend",
+            "rules_amend", "rules_retire", "project_status", "rules_export",
+            "tasks_overview"}
+_takes = {t.name for t in TOOLS
+          if "key" in {a.arg for a in t.args.posonlyargs + t.args.args + t.args.kwonlyargs}}
+ok(_takes == WITH_KEY, "the tools that take an admin code are exactly these",
+   f"extra: {sorted(_takes - WITH_KEY)} · missing: {sorted(WITH_KEY - _takes)}")
+
+# And the SECOND factor, which is narrower still: only what MODIFIES something
+# that already exists. Three tools, and the ladder in `port_for` is what says
+# so — this is the surface agreeing with it.
+WITH_AUTH = {"project_amend", "rules_amend", "rules_retire"}
+_second = {t.name for t in TOOLS
+           if "auth_code" in {a.arg for a in t.args.posonlyargs + t.args.args
+                              + t.args.kwonlyargs}}
+ok(_second == WITH_AUTH, "and the one-time code is asked by exactly these three",
+   f"extra: {sorted(_second - WITH_AUTH)} · missing: {sorted(WITH_AUTH - _second)}")
+ok(_second < _takes, "each of which is behind the admin code as well: the "
+   "one-time code elevates nobody on its own",
+   sorted(_second - _takes))
+
+# The UI's password has NO tool, and that is the shape of "what is catastrophic
+# has no tool". Read off the signatures, so a parameter carrying it under any
+# name that says what it is fails here.
+_UI_WORDS = {"master", "web_ui_password", "ui_password", "password", "master_code"}
+_carriers = sorted(f"{t.name}({a})" for t in TOOLS
+                   for a in {p.arg for p in t.args.posonlyargs + t.args.args
+                             + t.args.kwonlyargs} if a in _UI_WORDS)
+ok(not _carriers, "no tool takes the administration UI's password", _carriers)
+
+# THE LADDER IS ASKED, NEVER REPEATED. `port_for` is the one place it is
+# written, so the surface may consult it and may not decide anything itself: a
+# scale spelled out at each door is a scale with one door out of step, and the
+# door that is out of step is the one nobody looks at. Both halves pinned —
+# the surface calls it, and it does not carry a rule of its own about which
+# entity or action needs what.
+_ASKS = [n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
+         and ast.unparse(n.func) == "Project.port_for"]
+ok(_ASKS, "server.py asks the engine which port a gesture needs")
+_AMEND = next((t for t in TOOLS if t.name == "project_amend"), None)
+if _AMEND is not None:
+    _src = ast.unparse(_AMEND)
+    ok("Project.port_for" in _src,
+       "project_amend asks the ladder rather than deciding")
+    ok("Project.refuse_mixed" in _src,
+       "and the mixed call is refused by the ENGINE, where a suite can reach it")
+    # And in the right order: refused BEFORE the gate is opened, so the caller
+    # is told which field costs more instead of being told the pair is wrong.
+    _refuse = [n.lineno for n in ast.walk(_AMEND) if isinstance(n, ast.Call)
+               and ast.unparse(n.func) == "Project.refuse_mixed"]
+    _gate = [n.lineno for n in ast.walk(_AMEND) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "_admin"]
+    ok(_refuse and _gate and max(_refuse) < min(_gate),
+       "and it is refused before the gate is opened, so the message names the "
+       "field and not the credential", f"refuse {_refuse}, gate {_gate}")
+# The entities and actions are the engine's vocabulary, and the surface must
+# not carry a second copy of it: a list here would be a list to keep in step.
+_VOCAB = {"domain", "consumer", "group", "create", "retire", "revive"}
+_LITERALS = {n.value for n in ast.walk(_AMEND) if isinstance(n, ast.Constant)
+             and isinstance(n.value, str) and n.value in _VOCAB} if _AMEND else set()
+ok(not _LITERALS,
+   "and project_amend spells no entity or action of its own: the vocabulary is "
+   "the engine's", sorted(_LITERALS))
+
+print("\n== server.py -> rules.py: every call lands ==")
+
+
+def signature(fn: ast.FunctionDef):
+    pos = [a.arg for a in fn.args.posonlyargs + fn.args.args][1:]     # drop self
+    kwonly = [a.arg for a in fn.args.kwonlyargs]
+    n_defaults = len(fn.args.defaults)
+    required = pos[:len(pos) - n_defaults] if n_defaults else pos
+    required += [a.arg for a, d in zip(fn.args.kwonlyargs, fn.args.kw_defaults) if d is None]
+    return pos, kwonly, set(required)
+
+
+# Since v4.0.0 the engine is not reached through a module-level name any more:
+# a tool opens a door first — `_project(project)` for the reference code,
+# `_admin(project, key)` for the pair — and calls the engine on what comes
+# back. So the seam is read from the DOOR: every engine call is a call on the
+# result of one of the two, directly or through the local name it was bound to.
+# A call on anything else is not a call this file can vouch for, and it says so
+# rather than passing over it.
+DOORS = ("_project", "_admin")
+
+
+def _door_of(node) -> str | None:
+    """Which door a receiver expression came out of, or None if it is neither."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+            and node.func.id in DOORS:
+        return node.func.id
+    return None
+
+
+def _engine_calls(fn):
+    """(door, method, node) for every engine call inside one function.
+
+    A receiver that is a local NAME is resolved by looking at what that name
+    was assigned in this same function — `prj = _admin(...) if admin else
+    _project(...)` yields both doors, and the caller decides what that means.
+    A name assigned from neither door is reported as an unknown door, because
+    an engine call nobody can attribute to a gate is the whole thing this
+    section exists to catch."""
+    bound: dict[str, set] = {}
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, ast.Name):
+                    doors = set()
+                    for sub in ast.walk(n.value):
+                        d = _door_of(sub)
+                        if d:
+                            doors.add(d)
+                    bound.setdefault(t.id, set()).update(doors or {"?"})
+    out = []
+    for n in ast.walk(fn):
+        if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)):
+            continue
+        recv = n.func.value
+        door = _door_of(recv)
+        if door:
+            out.append((door, n.func.attr, n))
+        elif isinstance(recv, ast.Name) and recv.id in bound:
+            for d in sorted(bound[recv.id]):
+                out.append((d, n.func.attr, n))
+    return out
+
+
+CALLS = [(d, m, n) for t in TOOLS for (d, m, n) in _engine_calls(t)]
+ok(len(CALLS) >= len(TOOLS),
+   f"{len(CALLS)} calls into the engine found in server.py, one door each")
+ok(not [1 for d, _, _ in CALLS if d == "?"],
+   "and every one of them came out of a door this file knows",
+   [m for d, m, _ in CALLS if d == "?"])
+
+for _door, name, call in CALLS:
+    where = f"line {call.lineno}"
+    if name not in METHODS:
+        ok(False, f"Project.{name} exists", where)
+        continue
+    pos, kwonly, required = signature(METHODS[name])
+    given_pos = len(call.args)
+    given_kw = {k.arg for k in call.keywords if k.arg}
+    problems = []
+    if given_pos > len(pos):
+        problems.append(f"{given_pos} positional arguments for {len(pos)} parameters")
+    unknown = given_kw - set(pos) - set(kwonly)
+    if unknown:
+        problems.append(f"unknown keywords: {', '.join(sorted(unknown))}")
+    covered = set(pos[:given_pos]) | given_kw
+    missing = required - covered
+    if missing:
+        problems.append(f"missing required: {', '.join(sorted(missing))}")
+    ok(not problems, f"Project.{name}(...) matches its signature",
+       f"{where}: {'; '.join(problems)}")
+
+# The router's own calls, which are the boot's and the doors': same check, a
+# different class.
+ROUTER_CALLS = [n for n in ast.walk(SERVER_TREE)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and isinstance(n.func.value, ast.Name) and n.func.value.id == "registry"]
+ok(len(ROUTER_CALLS) >= 3, f"{len(ROUTER_CALLS)} calls into the router")
+for call in ROUTER_CALLS:
+    name = call.func.attr
+    if name not in ROUTES:
+        ok(False, f"Registry.{name} exists", f"line {call.lineno}")
+        continue
+    pos, kwonly, required = signature(ROUTES[name])
+    covered = set(pos[:len(call.args)]) | {k.arg for k in call.keywords if k.arg}
+    ok(not (required - covered), f"Registry.{name}(...) matches its signature",
+       f"line {call.lineno}: missing {', '.join(sorted(required - covered))}")
+
+# =====================================================================
+# 2 · every tool that writes goes through _admin
+# =====================================================================
+
+print("\n== every write passes the maintenance gate ==")
+
+
 
 # ---------------------------------------------------------------------
 # No parameter dies at the seam. rules_propose accepted `supersedes` in
@@ -448,7 +673,13 @@ NOT_TOOLS = {"rules_mcp",
              # what is allowed to look like a tool without being one, so the
              # exception is data a reader can see rather than a special case
              # buried in a check.
-             "rules_affected", "rules_without_perimeter"}
+             "rules_affected", "rules_without_perimeter",
+             # Counters in the verdicts, same case as the two above: they read
+             # like tools because the prefix is the subject, not a namespace.
+             "rules_in_force", "tasks_open", "tasks_urgent", "tasks_stale",
+             # And the two manuals name each other by FILE, which the shape
+             # below reads as a name ending in _guide.
+             "reference_guide"}
 for _manual, _text in MANUALS.items():
     ok(_text is not None, f"{_manual} is there to be read at all")
     _named = set(NAME_IN_PROSE.findall(_text or "")) - NOT_TOOLS
@@ -467,7 +698,10 @@ _TOUCHES_REGISTRY = []
 for _fn in ast.walk(SERVER_TREE):
     if not isinstance(_fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
         continue
-    if is_tool(_fn) or _fn.name in ("tool", "guarded", "env", "_admin"):
+    # The two DOORS are the exception, and they are the only one: their whole
+    # job is to touch the router. Anything else that reaches it and is not a
+    # tool has fallen off the surface while still looking like one.
+    if is_tool(_fn) or _fn.name in ("tool", "guarded", "env", "_admin", "_project"):
         continue
     if any(isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
            and isinstance(c.func.value, ast.Name) and c.func.value.id == "registry"
@@ -489,21 +723,31 @@ ok(not _ASYNC_TOOLS,
    "no tool is async: `guarded` would return the coroutine without ever seeing "
    "its refusals", _ASYNC_TOOLS)
 
+# The gate is read off the RECEIVER now, and that is stricter than it was: a
+# tool used to satisfy this by calling `_admin` anywhere in its body, which a
+# gate opened and then not used would have satisfied too. Now the question is
+# whose door the writing call came out of — `_admin(...)` or `_project(...)` —
+# and a mutating call on the low door fails no matter how many gates the
+# function opened elsewhere.
 for tool in TOOLS:
-    reached = {n.func.attr for n in ast.walk(tool)
-               if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-               and isinstance(n.func.value, ast.Name) and n.func.value.id == "registry"}
-    writes = reached & MUTATING
+    writes = {(d, m) for d, m, _ in _engine_calls(tool) if m in MUTATING}
     if not writes:
         continue
-    gated = any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_admin"
-                for n in ast.walk(tool))
+    low = sorted(m for d, m in writes if d != "_admin")
+    named = ", ".join(sorted(m for _, m in writes))
     if tool.name in UNGATED_ON_PURPOSE:
-        ok(not gated,
+        ok(all(d != "_admin" for d, _ in writes) or tool.name in ADMIN_IF_KEY,
            f"{tool.name} is ungated ON PURPOSE — {UNGATED_ON_PURPOSE[tool.name][:60]}...",
-           "it now calls _admin: if that is the new decision, drop the exception")
+           "it now writes through _admin only: if that is the new decision, drop "
+           "the exception")
         continue
-    ok(gated, f"{tool.name} calls _admin before {', '.join(sorted(writes))}")
+    if tool.name in ADMIN_IF_KEY:
+        ok("_admin" in {d for d, _ in writes},
+           f"{tool.name} has BOTH doors — {ADMIN_IF_KEY[tool.name][:60]}...",
+           "the admin door is not among them")
+        continue
+    ok(not low, f"{tool.name} writes through _admin only: {named}",
+       f"through the reference code alone: {', '.join(low)}")
 
 ok(set(UNGATED_ON_PURPOSE) <= TOOL_NAMES,
    "every documented exception names a tool that exists",
@@ -529,43 +773,66 @@ if _ADMIN is not None:
     _gbody = [s for s in _ADMIN.body
               if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
     ok(len(_gbody) == 1
-       and ast.unparse(_gbody[0]) == "registry.check_architect(project, key)",
+       and ast.unparse(_gbody[0]) == "return check_admin(registry, project, key)",
        "and its whole body is the delegation to the engine, as written",
        ast.unparse(_gbody[0])[:70] if _gbody else "(empty)")
+
+# The LOW door, pinned the same way and for the same reason: it is the one
+# every read comes out of, so a line slipped in front of it — a cache, a
+# default project, a fallback — would be a line no other check in this file
+# looks at.
+_LOW = sole_binding("_project", (ast.FunctionDef, ast.AsyncFunctionDef),
+                    "every read of the project comes out of this one name")
+if _LOW is not None:
+    _lbody = [s for s in _LOW.body
+              if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
+    ok(len(_lbody) == 1
+       and ast.unparse(_lbody[0]) == "return registry.project(project)",
+       "and the reference-code door is the router call, and nothing else",
+       ast.unparse(_lbody[0])[:70] if _lbody else "(empty)")
 
 # The engine half: check_architect resolves the project FIRST (one message
 # for every failure), compares with secrets.compare_digest — `==` on a secret
 # is a different defect — and raises. Pinned on the source of rules.py.
 _CHK = next((n for n in ast.walk(ENGINE_TREE)
-             if isinstance(n, ast.FunctionDef) and n.name == "check_architect"), None)
-ok(_CHK is not None, "check_architect exists in the engine")
+             if isinstance(n, ast.FunctionDef) and n.name == "check_admin"), None)
+ok(_CHK is not None, "check_admin exists in the engine")
 if _CHK is not None:
     _chk_src = ast.unparse(_CHK)
     ok("secrets.compare_digest(" in _chk_src,
-       "check_architect compares in constant time")
+       "check_admin compares in constant time")
     ok(_chk_src.count("RulesError(ERR_MAINT)") >= 2,
        "and every failure raises the SAME message: code and key are not told apart")
 
-# And it is called UNCONDITIONALLY, first thing. `if code: _admin(code)` reads
-# like making an argument optional and is an open door: every check that asks
-# whether _admin appears inside the function is satisfied by it. First
-# statement after the docstring, exactly `_admin(code)`, or say so.
+# And WHERE it is called, which is the part a name-counting check cannot see.
+# `if key: _admin(...)` reads like making an argument optional and is an open
+# door; so does opening the gate and then calling the engine on the other one.
+# Both are answered by the same question, asked of every administration tool:
+# is the engine call made ON the gate?
+#
+# The four tools of ADMIN_IF_KEY choose their door from what was passed, so for
+# them the requirement is weaker BY DESIGN and written down as such: the admin
+# door must be one of the two, and the choice must be made on `key` and on
+# nothing else.
 for _t in TOOLS:
-    if not any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-               and n.func.id == "_admin" for n in ast.walk(_t)):
+    _doors = {d for d, _, _ in _engine_calls(_t)}
+    if not _doors:
         continue
-    _body = [s for s in _t.body
-             if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
-    _first = ast.unparse(_body[0]) if _body else "(empty)"
-    # The tool's own first parameter, whatever it is called, passed straight
-    # through — positionally or by keyword. Pinning the literal string
-    # `_admin(code)` would go red on `_admin(code=code)`, which changes
-    # nothing, and a check that fails on a harmless edit gets deleted.
+    if _t.name in ADMIN_IF_KEY:
+        _src = ast.unparse(_t)
+        ok("_admin" in _doors and "key" in _src,
+           f"{_t.name}: both doors, and the choice is made on `key`",
+           f"doors: {sorted(_doors)}")
+        continue
     _params = [a.arg for a in _t.args.posonlyargs + _t.args.args]
-    ok("project" in _params and "key" in _params
-       and _first == "_admin(project, key)",
-       f"{_t.name}: the gate is the first statement, the pair passed straight through",
-       _first[:60])
+    if "key" in _params:
+        ok(_doors == {"_admin"},
+           f"{_t.name}: every engine call is made ON the gate",
+           f"doors: {sorted(_doors)}")
+    else:
+        ok(_doors == {"_project"},
+           f"{_t.name}: no key in the signature, and no gate opened either",
+           f"doors: {sorted(_doors)}")
 
 # =====================================================================
 # 2b · the number is not on the surface
@@ -696,8 +963,59 @@ ok(not _OPENS, "server.py never opens a file by hand: it goes through a Path con
 _READERS = [n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
             and isinstance(n.func, ast.Attribute)
             and n.func.attr in ("read_text", "read_bytes")]
+# A local name is allowed as the receiver, and only on one condition: every
+# assignment to it inside that same function came from one of the constants.
+# `page = _GUIDE_ADMIN if ... else _GUIDE` is the shape the two manuals need,
+# and it is still a read that cannot reach a path from anywhere else — while
+# `page = Path(whatever)` is not, and fails here.
+_ENCLOSES = {}
+for _fn in ast.walk(SERVER_TREE):
+    if isinstance(_fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        for _sub in ast.walk(_fn):
+            _ENCLOSES.setdefault(id(_sub), _fn)
+
+
+def _from_constant(recv, holder) -> bool:
+    txt = ast.unparse(recv)
+    if txt in PATH_CONSTS:
+        return True
+    if not (isinstance(recv, ast.Name) and holder is not None):
+        return False
+    seen = False
+    for a in ast.walk(holder):
+        targets = []
+        if isinstance(a, ast.Assign):
+            targets = a.targets
+        elif isinstance(a, (ast.AnnAssign, ast.AugAssign)):
+            targets = [a.target]
+        else:
+            continue
+        # Tuple targets are matched ELEMENT BY ELEMENT: `level, page = "work",
+        # _GUIDE` assigns a string and a path in one statement, and judging the
+        # whole right-hand side would call that path a string.
+        pairs = []
+        for t in targets:
+            if isinstance(t, (ast.Tuple, ast.List)) and isinstance(a.value, (ast.Tuple, ast.List)) \
+                    and len(t.elts) == len(a.value.elts):
+                pairs.extend(zip(t.elts, a.value.elts))
+            elif isinstance(t, (ast.Tuple, ast.List)):
+                pairs.extend((e, a.value) for e in t.elts)
+            else:
+                pairs.append((t, a.value))
+        for target, value in pairs:
+            if not (isinstance(target, ast.Name) and target.id == recv.id):
+                continue
+            seen = True
+            sources = {n.id for n in ast.walk(value) if isinstance(n, ast.Name)}
+            strings = {n.value for n in ast.walk(value)
+                       if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+            if not sources <= set(PATH_CONSTS) or strings or not sources:
+                return False
+    return seen
+
+
 _LOOSE = sorted({ast.unparse(n.func.value) for n in _READERS
-                 if ast.unparse(n.func.value) not in PATH_CONSTS})
+                 if not _from_constant(n.func.value, _ENCLOSES.get(id(n)))})
 ok(not _LOOSE, "and every read goes through one of those constants", _LOOSE)
 
 _REF = next((t for t in TOOLS if t.name == "reference_guide"), None)
@@ -724,21 +1042,43 @@ for _n in ast.walk(SERVER_TREE):
 ok(set(_TOUCHES_CONST) == {"reference_guide"},
    "only reference_guide ever names the manual's path — no helper in between",
    sorted(_TOUCHES_CONST))
-if _REF is not None:
-    _reads = {PATH_CONSTS.get(c) for c in _TOUCHES_CONST.get("reference_guide", set())}
-    ok(_reads == {"reference-guide.md"},
-       "reference_guide serves reference-guide.md, and nothing else",
-       sorted(map(str, _reads)))
 
-# The manual is OPEN, and that is the decision this section holds: it is read
-# by three chats, the skills do not read it at all, and the stop line inside
-# the file is the boundary that used to be a second tool behind the code.
-_GATED = {t.name for t in ([_REF] if _REF is not None else [])
-          if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                 and n.func.id == "_admin" for n in ast.walk(t))}
-ok(_GATED == set(),
-   "reference_guide takes no admin code: the manual is one file, open",
-   sorted(_GATED))
+# WHICH FILE EACH BRANCH OPENS, and it is the whole of the two-manual
+# decision. The half you cannot read is a file this call never opens — so the
+# guarantee is not "the text was cut correctly", it is "the branch without the
+# key does not name that constant at all". Read off the AST: the admin
+# constant may appear only where `_admin` has already been called on the way
+# in, and the bare branch may not name it anywhere.
+if _REF is not None:
+    _admin_calls = [n for n in ast.walk(_REF)
+                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                    and n.func.id == "_admin"]
+    ok(len(_admin_calls) == 1,
+       "reference_guide opens the gate exactly once — the admin half has one door",
+       len(_admin_calls))
+    # The gate and the admin constant live in the SAME branch, and the work
+    # constant does not: `ast.If` bodies, not line numbers, because a check on
+    # line order is satisfied by a gate that guards nothing.
+    _branch_ok = False
+    for _if in [n for n in ast.walk(_REF) if isinstance(n, ast.If)]:
+        _in_body = {n.id for b in _if.body for n in ast.walk(b) if isinstance(n, ast.Name)}
+        _in_else = {n.id for b in _if.orelse for n in ast.walk(b) if isinstance(n, ast.Name)}
+        if "_admin" in _in_body and "_GUIDE_ADMIN" in _in_body \
+                and "_GUIDE_ADMIN" not in _in_else and "_GUIDE" in _in_else:
+            _branch_ok = True
+    ok(_branch_ok,
+       "the admin manual is named ONLY where the gate has just been passed, and "
+       "the bare branch never names it")
+    # And the answer says which half it served, so a caller can tell a work
+    # manual from a truncated admin one without reading the prose.
+    _levels = {n.value for n in ast.walk(_REF)
+               if isinstance(n, ast.Constant) and n.value in ("work", "admin")}
+    ok(_levels == {"work", "admin"},
+       "and it declares the level it served, both of them", sorted(_levels))
+    _reads = {PATH_CONSTS.get(c) for c in _TOUCHES_CONST.get("reference_guide", set())}
+    ok(_reads == {"reference-guide.md", "reference-guide-admin.md"},
+       "reference_guide serves the two manuals, and nothing else",
+       sorted(map(str, _reads)))
 
 # A file missing from the image is OURS, not the caller's. Left as a RulesError
 # it would leave one quiet INFO line starting with the word "refused" — a
@@ -750,27 +1090,6 @@ if _REF is not None:
     ok(_raised == {"RulesFault"},
        "reference_guide raises RulesFault when the file is not there, never RulesError",
        sorted(_raised))
-
-# The STOP line is the boundary the whole delivery is: one manual, and the
-# consumer's part ends where it stands. COUNTED, not `in`-tested — a rewrite
-# that leaves a second copy behind, with a contradicting line between them, is
-# exactly what `in` cannot see.
-ok(GUIDE_SRC.count("⛔ STOP — everything below requires the ARCHITECT KEY") == 1,
-   "the manual carries the stop line, exactly once",
-   GUIDE_SRC.count("⛔ STOP — everything below requires the ARCHITECT KEY"))
-
-# The legislator's part has to stay APPLICABLE, and that is not something a
-# test can judge. What it can hold is the shape the applicability rests on: the
-# gates, each of which is a question asked of one line. A rewrite that turns
-# them back into principles has to come through here and say so.
-for _pin in ("GATE 1 — Is it a rule, or a step?",
-             "GATE 2 — Is it a rule, or a missing manual?",
-             "GATE 3 — Is it a rule, or a reminder?",
-             "GATE 4 — Who could violate it?",
-             "Would it still be true if the procedure changed?"):
-    ok(GUIDE_SRC.count(_pin) == 1,
-       f"the manual carries, exactly once: {_pin!r}",
-       GUIDE_SRC.count(_pin))
 
 # Every file a tool serves has to exist, and be IN the image. The explicit list
 # in the Dockerfile section is the other half; this half is derived, so a
@@ -1352,6 +1671,35 @@ ok(not _SWALLOWED,
    "and it is not wrapped in a try: the raise is what stops a boot that would "
    "protect nothing", _SWALLOWED)
 
+# MEASURED, on the three secrets this surface actually carries. The static
+# checks above pin that the cure is armed, once, in the right place — none of
+# them can say that it WORKS, and the payload here is not a document body like
+# the twin's: it is the admin code, the one-time code and a consumer's secret,
+# which travel as arguments on the calls that change things. So the filter is
+# run against a record shaped like the one fastmcp emits when it rejects a
+# malformed call, and the values are looked for in what comes out.
+try:
+    import logging as _logging
+
+    from mcp_common_engine.logs import _redacted as _redact_values   # noqa: WPS436
+
+    # The shape pydantic hands fastmcp when it rejects a call: a list of error
+    # entries, and the caller's arguments under `input`. Written out here
+    # rather than mocked, because the whole cure is keyed to that one field
+    # name — a probe with a shape of its own would prove something else.
+    _PAYLOAD = {"project": "PROJECTCODE1234", "key": "ADMINCODE-TOPSECRET",
+                "auth_code": "ONETIME-987654", "consumer_key": "CONSUMER-SECRET"}
+    _out = repr(_redact_values(([{"type": "missing", "loc": ("reason",),
+                                  "msg": "Field required",
+                                  "input": _PAYLOAD}],)))
+    _leaked = sorted(v for v in _PAYLOAD.values() if v in _out)
+    ok(not _leaked, "and it redacts the whole payload: not one of the project "
+       "code, the admin code, the one-time code or a consumer's secret survives "
+       "into the line", _leaked)
+    ok("<redacted>" in _out, "and what is printed says it was redacted", _out[:60])
+except ImportError as _e:                                            # noqa: PERF203
+    ok(False, "the engine's redaction can be measured here", str(_e))
+
 print("\n== the template is publishable ==")
 
 import web as _webmod                                           # noqa: E402
@@ -1728,7 +2076,7 @@ if _PROPOSE is not None:
 if _ENGINE_PROPOSE is not None:
     _es = [a.arg for a in _ENGINE_PROPOSE.args.posonlyargs + _ENGINE_PROPOSE.args.args]
     ok("supersedes" in _es, "the engine's propose() agrees: supersedes is a field", _es)
-ok("ux_rules_supersedes" in _rules.INDEXES,
+ok("ux_rule_supersedes" in _rules.INDEXES,
    "the one-pending-heir guarantee is an INDEX the preflight verifies",
    _rules.INDEXES)
 ok(GUIDE_SRC.count("`supersedes`") >= 1,
@@ -1745,9 +2093,16 @@ for _t in TOOLS:
     if _t.name == "rules_consumers_add":
         ok("brief" in (ast.get_docstring(_t) or ""),
            "rules_consumers_add documents the brief it writes")
-ok("consumer_versions" in _rules.TABLES
-   and {"trg_consumers_ins", "trg_consumers_upd"} <= set(_rules.TRIGGERS),
-   "the versions table and its triggers are declared, so the preflight sees them")
+# Singular since v4.0.0, and not a matter of taste: a table is a row, and the
+# name says what one row is. All of them, so a table that stops being declared
+# stops being counted by the preflight — which is how a guarantee goes missing
+# without a line of the schema changing.
+_VERSIONED = ("project_profile_version", "domain_version", "consumer_version",
+              "consumer_group_version", "rule_version", "task_version")
+ok(set(_VERSIONED) <= set(_rules.TABLES)
+   and any(t.startswith("trg_consumer") for t in _rules.TRIGGERS),
+   "every versions table and its triggers are declared, so the preflight sees them",
+   sorted(set(_VERSIONED) - set(_rules.TABLES)))
 ok(GUIDE_SRC.count("your **brief**") == 1,
    "the manual pins the brief at the head of the list, exactly once",
    GUIDE_SRC.count("your **brief**"))
@@ -1758,33 +2113,43 @@ print("\n== proposed_by is a door, and the queue has a ceiling ==")
 # dead AM domain and into the tool, where a machine-checkable constraint
 # belongs. Born optional with a working default in the code, because Unraid
 # does not propagate new variables to installed containers.
-ok('Target="PENDING_CAP"' in TEMPLATE, "the template declares PENDING_CAP")
-ok(getattr(_rules, "DEFAULT_PENDING_CAP", None) == 5,
-   "the default lives in the code, and it is 5",
-   getattr(_rules, "DEFAULT_PENDING_CAP", None))
+# The ceiling stopped being a variable of the CONTAINER in v4.0.0: this image
+# is multi-tenant, so a number set once for the box was a number set for
+# somebody else's project. It is `queue_cap`, policy of the project, read from
+# the row — and the two constants that used to carry it are pinned GONE, which
+# is the half a rename leaves behind.
+ok("queue_cap" in METHODS, "the ceiling is a method of the project, read per project")
+for _dead in ("DEFAULT_PENDING_CAP", "PENDING_CAP", "WEB_ACTION_CAP"):
+    ok(getattr(_rules, _dead, None) is None,
+       f"and the engine no longer carries {_dead}", getattr(_rules, _dead, None))
 for _t in TOOLS:
     if _t.name == "rules_propose":
         _doc = ast.get_docstring(_t) or ""
-        ok("proposed_by` is MANDATORY" in _doc,
-           "rules_propose says proposed_by is mandatory")
-        ok("default 5" in _doc, "and names the queue ceiling's default")
-ok("limited number of pending proposals" in GUIDE_SRC,
-   "the manual documents the pending ceiling")
+        ok("`proposed_by` is REQUIRED" in _doc,
+           "rules_propose says proposed_by is required")
+        ok("queue" in _doc and "reference code" in _doc,
+           "and says what the queue costs, and what opens it")
 
 print("\n== the renewal reads the why, and the lists carry the legend ==")
 
 # F5 and F7: the reason where the deciding happens, the glosses where the IDs
 # are listed in bulk.
+# `rules_renew` and `rules_pending` are not tools any more — renewing is the
+# page's and the queue is `rules_list(pending=True)` — so what is pinned is
+# where their promises WENT, on the tools that are left. A check kept pointing
+# at a tool that no longer exists is a check that passes by never running.
+ok(not ({"rules_renew", "rules_pending"} & TOOL_NAMES),
+   "renewing and the pending queue left the surface, and stayed gone",
+   sorted({"rules_renew", "rules_pending"} & TOOL_NAMES))
 for _t in TOOLS:
     _doc = ast.get_docstring(_t) or ""
-    if _t.name == "rules_renew":
-        ok("ORIGINAL reason" in _doc,
-           "rules_renew promises the original reason in its verdict")
-    if _t.name == "rules_pending":
-        ok("expiring" in _doc and "reason" in _doc,
-           "rules_pending says the expiring queue carries the reason")
     if _t.name == "rules_list":
-        ok("LEGEND" in _doc, "rules_list promises the domain legend")
+        ok("legend" in _doc, "rules_list promises the domain legend")
+        ok("pending=True" in _doc and "reason" in _doc,
+           "and that the queue it now carries comes with the reasons")
+    if _t.name == "project_status":
+        ok("expiring" in _doc and "reason" in _doc,
+           "project_status says the expiring rules carry their reason")
 ok(GUIDE_SRC.count("legend of the domains present") == 1,
    "the manual pins the legend, exactly once",
    GUIDE_SRC.count("legend of the domains present"))
@@ -1828,7 +2193,7 @@ _BATCH = METHODS.get("batch")
 _BATCH_SRC = ast.unparse(_BATCH) if _BATCH is not None else ""
 ok("pass this digest to approve" not in _BATCH_SRC,
    "the batch note no longer describes a call that does not exist")
-ok("LOT PAGE" in _BATCH_SRC and "not a tool since" in _BATCH_SRC,
+ok("page" in _BATCH_SRC.lower(),
    "and it says where the approval actually happens, in the browser")
 
 print("\n== the sanitisation runs before the database, in every writing method ==")
@@ -1863,34 +2228,107 @@ def _first_write_line(fn):
     return min(lines) if lines else None
 
 
+# Line order alone stopped being the right instrument in v4.0.0, and both ways
+# it was wrong are the same mistake — reading a program as if it ran top to
+# bottom:
+#
+#   · the four `_amend_*` handlers are FOUR gestures in one function, one per
+#     action, and the create branch writes above the line where the amend
+#     branch sanitises. Nothing is wrong there and a line comparison says there
+#     is;
+#   · a sanitiser called INSIDE the write's own arguments —
+#     `execute(sql, (self._prose(...),))` — has a line number after the write
+#     and is evaluated before it. That is a stronger guarantee than order, not
+#     a weaker one.
+#
+# So the comparison is made pairwise, and only between a sanitiser and a write
+# that can actually run one after the other: not nested one in the other, and
+# not on opposite sides of the same `if`.
+def _branch_path(node, root):
+    """Which branch of which `if` a node sits in, outermost first."""
+    path, stack = [], [(root, ())]
+    while stack:
+        cur, here = stack.pop()
+        for field, value in ast.iter_fields(cur):
+            items = value if isinstance(value, list) else [value]
+            for item in items:
+                if not isinstance(item, ast.AST):
+                    continue
+                nxt = here + ((id(cur), field),) if isinstance(cur, ast.If) else here
+                if item is node:
+                    path = list(nxt)
+                    stack = []
+                    break
+                stack.append((item, nxt))
+            if not stack:
+                break
+    return path
+
+
+def _exclusive(a, b, root):
+    """True when a and b cannot both run on one call.
+
+    Two shapes, and the second is the one the handlers are written in: opposite
+    sides of the same `if`, and — the guard clause — one inside an `if` body
+    that always RETURNS or RAISES while the other is outside it. `if action ==
+    'create': ... return` followed by the amend branch is four gestures in one
+    function, not one gesture written out of order."""
+    pa, pb = _branch_path(a, root), _branch_path(b, root)
+    for (ia, fa), (ib, fb) in zip(pa, pb):
+        if ia == ib and fa != fb:
+            return True
+        if ia != ib:
+            break
+    for node in ast.walk(root):
+        if not isinstance(node, ast.If):
+            continue
+        for body in (node.body, node.orelse):
+            if not body or not isinstance(body[-1], (ast.Return, ast.Raise)):
+                continue
+            inside = {id(n) for b in body for n in ast.walk(b)}
+            if (id(a) in inside) != (id(b) in inside):
+                return True
+    return False
+
+
 _ORDERED = 0
-for _m in REGISTRY.body:
+for _m in PROJECT.body:
     if not isinstance(_m, ast.FunctionDef):
         continue
-    _san = [n.lineno for n in ast.walk(_m) if isinstance(n, ast.Call)
-            and ast.unparse(n.func) in _SANITISERS]
-    if not _san:
+    _sans = [n for n in ast.walk(_m) if isinstance(n, ast.Call)
+             and ast.unparse(n.func) in _SANITISERS]
+    if not _sans:
         continue
-    _w = _first_write_line(_m)
-    if _w is None:
+    _writes = [n for n in ast.walk(_m) if isinstance(n, ast.Call)
+               and (ast.unparse(n.func) in _COUNTERS
+                    or (ast.unparse(n.func) == "self.cx.execute" and n.args
+                        and _WRITE_SQL.search(ast.unparse(n.args[0]))))]
+    if not _writes:
         continue
     _ORDERED += 1
-    ok(max(_san) < _w,
-       f"Registry.{_m.name}: every reference is sanitised before anything is "
-       f"written or counted",
-       f"last sanitise at line {max(_san)}, first write/counter at line {_w}")
+    _late = []
+    for _w in _writes:
+        _inside = {id(n) for n in ast.walk(_w)}
+        for _s in _sans:
+            if id(_s) in _inside or _exclusive(_s, _w, _m):
+                continue
+            if _s.lineno > _w.lineno:
+                _late.append(f"line {_s.lineno} after the write at {_w.lineno}")
+    ok(not _late,
+       f"Project.{_m.name}: every reference is sanitised before anything is "
+       f"written or counted", "; ".join(sorted(set(_late))))
 ok(_ORDERED >= 6, f"the order is pinned on {_ORDERED} writing methods", _ORDERED)
 
 # And the sanitisation is ONE definition. Two ideas of what a relic looks like
 # is one door that lets them in — which is the shape the defect had before:
 # the check existed, on bodies only.
 for _name in ("_relics", "_prose", "_task_prose"):
-    _defs = [n for n in REGISTRY.body
+    _defs = [n for n in PROJECT.body
              if isinstance(n, ast.FunctionDef) and n.name == _name]
-    ok(len(_defs) == 1, f"Registry.{_name} is defined exactly once", len(_defs))
-ok(getattr(_rules.Registry, "SANITISED", "") == "reference sanitisation failed",
+    ok(len(_defs) == 1, f"Project.{_name} is defined exactly once", len(_defs))
+ok(getattr(_rules.Project, "SANITISED", "") == "reference sanitisation failed",
    "the refusal says what failed, in the words the refusal is known by",
-   getattr(_rules.Registry, "SANITISED", None))
+   getattr(_rules.Project, "SANITISED", None))
 # The canonical form is FOUR digits and the pattern that hunts relics must not
 # have a floor: `VE-5` fell under the old one and was never seen.
 ok(_rules.RE_ID_SHAPED.search("VE-5") is not None,
@@ -1956,18 +2394,24 @@ ok(bool(_ICON_URL) and os.path.exists(os.path.join(HERE, os.path.basename(_ICON_
    "the image the URL points at is IN this repository, under that exact name",
    _ICON_URL)
 
-print("\n== the task log: nine tools, one of them maintenance ==")
+print("\n== the task log: five tools, one of them maintenance ==")
 
 # F3. The log that replaces both the per-role changelog and the "pending"
 # sections of the role memories. What is pinned here is the SHAPE of the
 # surface — who is gated, what has no default, where the ceilings live —
 # because every one of those is a decision that reads as a detail.
 
+# Nine in v3.1.0, FIVE in v4.0.0: search and range folded into `tasks_list`,
+# complete and drop into `tasks_close` — one gesture with two verdicts. An
+# equality, and the four that went are named below so a resurrection fails by
+# its own name rather than by a count nobody reads.
 _TASK_TOOLS = sorted(t.name for t in TOOLS if t.name.startswith("tasks_"))
-ok(_TASK_TOOLS == ["tasks_add", "tasks_amend", "tasks_complete", "tasks_drop",
-                   "tasks_get", "tasks_list", "tasks_overview", "tasks_range",
-                   "tasks_search"],
-   f"the task log puts exactly nine tools on the surface", _TASK_TOOLS)
+ok(_TASK_TOOLS == ["tasks_add", "tasks_amend", "tasks_close", "tasks_get",
+                   "tasks_list", "tasks_overview"],
+   "the task log puts exactly six tools on the surface", _TASK_TOOLS)
+ok(not ({"tasks_search", "tasks_range", "tasks_complete", "tasks_drop"} & TOOL_NAMES),
+   "and the four that folded away stayed away",
+   sorted({"tasks_search", "tasks_range", "tasks_complete", "tasks_drop"} & TOOL_NAMES))
 
 # ONE of them is maintenance, and it is the cross-consumer one. An EQUALITY,
 # so a gate appearing on a worker's tool fails here as loudly as one going
@@ -1977,16 +2421,22 @@ ok(_TASK_TOOLS == ["tasks_add", "tasks_amend", "tasks_complete", "tasks_drop",
 _TASK_GATED = sorted(t.name for t in TOOLS if t.name.startswith("tasks_")
                      and any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                              and n.func.id == "_admin" for n in ast.walk(t)))
-ok(_TASK_GATED == ["tasks_overview"],
-   "tasks_overview is the only gated one — the cross-consumer view is the "
-   "maintainer's reading, and the rest cost the project code alone", _TASK_GATED)
+ok(_TASK_GATED == ["tasks_amend", "tasks_close", "tasks_overview"],
+   "tasks_overview is gated outright and the two that touch SOMEBODY ELSE's "
+   "task conditionally — the rest cost the reference code alone", _TASK_GATED)
 
 # THE CEILINGS ARE NAMED, AND THEY ARE THE ENGINE'S. The spec asked for
 # constants at the top of the module rather than literals scattered through
 # the queries — and, explicitly, never parameters of the tools: a ceiling a
 # caller can raise is not one.
-_TASK_CAPS = ("TASKS_LIST_CAP", "TASKS_GET_IDS", "TASKS_GET_BYTES",
+# `GET_IDS` and `GET_BYTES` lost their `TASKS_` prefix in v4.0.0 and are ONE
+# pair for rules and tasks: it is the same ceiling on the same client, and two
+# constants would be one number written twice.
+_TASK_CAPS = ("TASKS_LIST_CAP", "GET_IDS", "GET_BYTES",
               "TASKS_RECENT_DAYS", "TASKS_STALE_DAYS")
+ok(getattr(_rules, "MAX_GET_IDS", None) is None
+   and getattr(_rules, "TASKS_GET_IDS", None) is None,
+   "and the two names they replaced are gone, not shadowing them")
 _MODULE_ASSIGNS = {t.id for n in ENGINE_TREE.body if isinstance(n, ast.Assign)
                    for t in n.targets if isinstance(t, ast.Name)}
 for _c in _TASK_CAPS:
@@ -2000,7 +2450,7 @@ for _c in _TASK_CAPS:
 # So: inside the task methods, no bare integer may EQUAL a ceiling. A number
 # written twice is a number that will disagree with itself.
 _CAP_VALUES = {getattr(_rules, c) for c in _TASK_CAPS}
-_TASK_METHODS = [n for n in REGISTRY.body
+_TASK_METHODS = [n for n in PROJECT.body
                  if isinstance(n, ast.FunctionDef)
                  and ("task" in n.name or n.name == "_order_and_cap")]
 ok(len(_TASK_METHODS) >= 12, f"the task methods are found: {len(_TASK_METHODS)}")
@@ -2008,33 +2458,36 @@ for _m in _TASK_METHODS:
     _lits = sorted({n.value for n in ast.walk(_m)
                     if isinstance(n, ast.Constant) and isinstance(n.value, int)
                     and not isinstance(n.value, bool) and n.value in _CAP_VALUES})
-    ok(not _lits, f"Registry.{_m.name} spells its ceilings by NAME, never as a number",
+    ok(not _lits, f"Project.{_m.name} spells its ceilings by NAME, never as a number",
        f"literals that equal a ceiling: {_lits}")
 _PARAMS = {a.arg for t in TOOLS if t.name.startswith("tasks_")
            for a in t.args.posonlyargs + t.args.args + t.args.kwonlyargs}
 ok(not (_PARAMS & {"cap", "limit", "max", "ceiling", "n"}),
    "no tasks_ tool takes its own ceiling as a parameter", sorted(_PARAMS))
 
-# `on` HAS NO DEFAULT, and that is the point of it: "opened in July" and
-# "closed in July" are different questions, and a default answers one of them
-# while the caller believes the other. From the AST, because a default is
-# exactly the kind of thing a later edit adds to be helpful.
-_RANGE = next((t for t in TOOLS if t.name == "tasks_range"), None)
-ok(_RANGE is not None, "tasks_range is on the surface")
-if _RANGE is not None:
-    _pos = [a.arg for a in _RANGE.args.posonlyargs + _RANGE.args.args]
-    _with_default = _pos[len(_pos) - len(_RANGE.args.defaults):] if _RANGE.args.defaults else []
-    ok("on" in _pos and "on" not in _with_default,
-       "and `on` is required: no default may decide which date it filters on",
-       f"defaulted: {_with_default}")
-
-# The engine half of the same decision, since the tool only forwards.
-_ERANGE = METHODS.get("task_range")
-ok(_ERANGE is not None, "the engine has task_range")
-if _ERANGE is not None:
-    _ep = [a.arg for a in _ERANGE.args.posonlyargs + _ERANGE.args.args][1:]
-    _ed = _ep[len(_ep) - len(_ERANGE.args.defaults):] if _ERANGE.args.defaults else []
-    ok("on" not in _ed, "the engine agrees: `on` carries no default", _ed)
+# The WINDOW moved into `tasks_list` — `since` and `until` — and with it the
+# decision `tasks_range` carried: those two are not a filter on one date the
+# server picks, they open the window on the CLOSED tasks past the recent ones.
+# What is pinned is that both survived the fold, on the tool that absorbed
+# them, and that neither grew a default that would answer a question the
+# caller did not ask.
+_LIST = next((t for t in TOOLS if t.name == "tasks_list"), None)
+ok(_LIST is not None, "tasks_list is on the surface")
+if _LIST is not None:
+    _pos = [a.arg for a in _LIST.args.posonlyargs + _LIST.args.args]
+    ok({"since", "until", "query", "authored"} <= set(_pos),
+       "and it absorbed the window, the search and the authored view", _pos)
+    _doc = ast.get_docstring(_LIST) or ""
+    ok("closed" in _doc and ("since" in _doc or "until" in _doc),
+       "and says what the window is for: the closed ones past the recent")
+_ELIST = METHODS.get("task_list")
+ok(_ELIST is not None, "the engine has task_list")
+if _ELIST is not None:
+    _ep = [a.arg for a in _ELIST.args.posonlyargs + _ELIST.args.args][1:]
+    ok({"since", "until", "authored"} <= set(_ep),
+       "the engine agrees: one desk, three framings", _ep)
+ok("task_range" not in METHODS and "task_search" not in METHODS,
+   "and the engine folded them too, rather than keeping a second door open")
 
 # TK is reserved, and the two letter-pair checks that used to be written twice
 # are ONE door now. The literal is counted: a second copy is how a reservation
@@ -2054,12 +2507,16 @@ ok(len(_VD) == 1, "rules.py defines `_valid_domain` exactly once, at module leve
 # The schema objects are DECLARED, which is what makes the preflight see them:
 # a table or a trigger that exists in SCHEMA and not in these tuples is one the
 # boot would never notice missing.
-for _t in ("tasks", "task_versions", "task_counter"):
+# Singular in v4.0.0, and `task_counter` is gone with the prune that
+# cancelled: the number comes from the version table, so it cannot rewind.
+for _t in ("task", "task_version"):
     ok(_t in _rules.TABLES, f"{_t} is declared, so the preflight checks it")
-for _g in ("trg_tasks_ins", "trg_tasks_upd", "trg_tasks_del",
-           "trg_tasks_closed_is_closed", "trg_tasks_frozen", "trg_tasks_counter"):
+ok("task_counter" not in _rules.TABLES,
+   "and the counter table went with the prune that used to need it")
+for _g in ("trg_task_ins", "trg_task_upd", "trg_task_closed_is_closed",
+           "trg_task_frozen", "trg_task_archive_closed_only"):
     ok(_g in _rules.TRIGGERS, f"{_g} is declared, so the preflight checks it")
-ok("ux_tasks_idem" in _rules.INDEXES,
+ok("ux_task_idem" in _rules.INDEXES,
    "the idempotency guarantee is an INDEX the preflight verifies", _rules.INDEXES)
 
 # What the docstrings must keep promising, because these are the two places a
@@ -2067,16 +2524,18 @@ ok("ux_tasks_idem" in _rules.INDEXES,
 for _t in TOOLS:
     _doc = ast.get_docstring(_t) or ""
     if _t.name == "tasks_get":
-        ok("REFUSED" in _doc and "DECLARED" in _doc,
+        ok("refused" in _doc and "truncates and says so" in _doc,
            "tasks_get says the count refuses and the byte ceiling declares")
     if _t.name == "tasks_add":
-        ok("MANDATORY" in _doc and "created_by" in _doc,
-           "tasks_add says created_by is mandatory")
-        ok("never be changed" in _doc,
+        ok("signature" in _doc and "created_by" in _doc,
+           "tasks_add says created_by is the signature")
+        ok("never changes" in _doc,
            "and that urgent belongs to whoever created the task")
-    if _t.name == "tasks_complete":
-        ok("mandatory" in _doc and "outcome" in _doc,
-           "tasks_complete says the outcome is mandatory")
+    if _t.name == "tasks_close":
+        ok("exactly one of the two" in _doc and "outcome" in _doc and "reason" in _doc,
+           "tasks_close says one gesture, two verdicts, exactly one of them")
+        ok("ADMIN CODE" in _doc and "owner" in _doc,
+           "and that somebody else's task takes the admin code")
     if _t.name == "tasks_list":
         ok("urgent first" in _doc and "real total" in _doc,
            "tasks_list promises the order and the declared total")
@@ -2090,8 +2549,8 @@ ok(_GUIDE_CEILINGS is not None, "the manual has a ceilings table to read")
 if _GUIDE_CEILINGS:
     _tbl = _GUIDE_CEILINGS.group(1)
     for _label, _value in (("items in a task list", _rules.TASKS_LIST_CAP),
-                           ("codes per `tasks_get`", _rules.TASKS_GET_IDS),
-                           ("bytes per `tasks_get`", _rules.TASKS_GET_BYTES),
+                           ("codes per `tasks_get`", _rules.GET_IDS),
+                           ("bytes per `tasks_get`", _rules.GET_BYTES),
                            ("body of one task", _rules.MAX_BODY_BYTES)):
         _line = next((l for l in _tbl.splitlines() if _label in l), "")
         ok(str(_value) in _line,
