@@ -63,14 +63,26 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 
-VERSION = "3.1.0"
+VERSION = "4.0.0"
+
+# The GENERATION of the schema, and it is a number the database carries in
+# `PRAGMA user_version`. It exists because of a thing that was seen live at
+# the v3.1.0 Apply: a database that does not know what generation it is makes
+# ordinary growth — the new tables of a new release — indistinguishable from
+# REPAIR, and the preflight duly reported "somebody had removed these
+# objects" about tables that had simply never existed. With this number the
+# router knows before it opens: match and it connects, mismatch and it
+# refuses naming the file. There is NO migration in 4.0.0 — an old database
+# is refused, not upgraded.
+SCHEMA_GENERATION = 4
 
 TYPES = ("R", "M", "F")                 # R binding · M method · F technical fact
-ALL = "_ALL_"                           # reaches every consumer, present and future
-ALL_ALIASES = {"_all_", "*", "all", "tutti", "chiunque"}
-KINDS = ("chat", "skill")
+KINDS = ("chat", "skill", "human")      # a human calls no tool, but owns tasks
 STATUSES = ("proposed", "active", "retired", "denied")
 PERMANENCE = ("provisional", "permanent")
+REACH = ("all", "targeted")             # the audience is MIXED: groups ∪ exceptions
+VERDICTS = ("approved", "denied")
+TASK_STATUSES = ("pending", "completed", "dropped")
 
 # The canonical ID is FOUR digits — the same width as the changelog. Two
 # conventions where one is enough get confused, and IDs are never reused, so a
@@ -391,537 +403,775 @@ def _norm_scope_list(scopes) -> list[str]:
 #   consumers who was REACHED    (resolved and expanded)
 # A version is a photograph: if only the scope name were stored, changing the
 # membership of that scope tomorrow would rewrite what was true yesterday.
-_SCOPES_OF = """(SELECT IFNULL(GROUP_CONCAT(nm, ','), '') FROM
-    (SELECT sc.name AS nm FROM rule_scopes rs
-       JOIN scopes sc ON sc.id = rs.scope_id
-      WHERE rs.project = {R}.project AND rs.rule_id = {R}.id ORDER BY sc.name))"""
-
-_CONSUMERS_OF = """(SELECT IFNULL(GROUP_CONCAT(c, ','), '') FROM
-    (SELECT DISTINCT k.name AS c
-       FROM rule_scopes rs
-       JOIN scope_members m ON m.scope_id = rs.scope_id
-       JOIN consumers k ON k.id = m.consumer_id
-      WHERE rs.project = {R}.project AND rs.rule_id = {R}.id
-        AND k.retired_at IS NULL
-      UNION
-     SELECT k.name FROM consumers k
-      WHERE k.project = {R}.project
-        AND k.retired_at IS NULL
-        AND EXISTS (SELECT 1 FROM rule_scopes z
-                      JOIN scopes zs ON zs.id = z.scope_id
-                     WHERE z.project = {R}.project AND z.rule_id = {R}.id
-                       AND zs.name = '_ALL_')
-      ORDER BY 1))"""
-
-_NEXT_VERSION = """(SELECT IFNULL(MAX(version), 0) + 1 FROM rule_versions
-    WHERE project = {R}.project AND rule_id = {R}.id)"""
-
-_VCOLS = ("project, rule_id, version, type, title, body, status, permanence, "
-          "expires_at, superseded_by, changelog, scopes, consumers, ts, action, reason")
-
-# The task log's own two fragments. The owner is photographed RESOLVED — the
-# consumer's spelling of that day, not its surrogate id — for the same reason
-# a rule's version stores the consumers it reached: a version read in a year
-# must say who owned the task then, not who owns the row now.
-_TASK_OWNER = """(SELECT c.name FROM consumers c WHERE c.id = {R}.consumer_id)"""
-_NEXT_TVERSION = """(SELECT IFNULL(MAX(version), 0) + 1 FROM task_versions
-    WHERE project = {R}.project AND task_id = {R}.id)"""
-_TVCOLS = ("project, task_id, version, title, body, consumer, created_by, urgent, "
-           "status, outcome, reason, ts, action, actor")
-
-
 def _f(sql: str, row: str) -> str:
-    return sql.format(R=row)
+    """Bind a SQL fragment to the row alias it must read (NEW, OLD, r…)."""
+    return sql.replace("{R}", row)
+
+
+# The next version number of an entity, computed rather than counted anywhere:
+# a stored counter is a second copy of a fact, and the version tables never
+# lose a row, so MAX+1 can be trusted here in a way it could not be trusted
+# for task IDs (see `seq` on `task`).
+_NEXT_RULE_V = ("(SELECT IFNULL(MAX(version), 0) + 1 FROM rule_version "
+                "WHERE rule_id = {R}.rule_id)")
+_NEXT_CONSUMER_V = ("(SELECT IFNULL(MAX(version), 0) + 1 FROM consumer_version "
+                    "WHERE consumer_id = {R}.consumer_id)")
+_NEXT_DOMAIN_V = ("(SELECT IFNULL(MAX(version), 0) + 1 FROM domain_version "
+                  "WHERE domain_id = {R}.domain_id)")
+_NEXT_GROUP_V = ("(SELECT IFNULL(MAX(version), 0) + 1 FROM consumer_group_version "
+                 "WHERE group_id = {R}.group_id)")
+_NEXT_TASK_V = ("(SELECT IFNULL(MAX(version), 0) + 1 FROM task_version "
+                "WHERE task_id = {R}.task_id)")
+_NEXT_PROFILE_V = "(SELECT IFNULL(MAX(version), 0) + 1 FROM project_profile_version)"
+
+_NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
 
 
 SCHEMA = f"""
-CREATE TABLE IF NOT EXISTS projects (
-  name               TEXT PRIMARY KEY,
-  code               TEXT NOT NULL UNIQUE,  -- opaque handle: the only way in
-  architect_key_hash TEXT NOT NULL,     -- sha256 of the maintenance key. The
-                                        -- key itself exists only on the
-                                        -- receipt that showed it once: this
-                                        -- file is readable from the share,
-                                        -- and a credential in clear here
-                                        -- would make every reader an
-                                        -- architect of every project
-  description        TEXT,
-  created            TEXT NOT NULL
-);
+-- =====================================================================
+-- The project IS the file
+-- =====================================================================
+-- There is no `project_id` anywhere below, and no `projects` table: one
+-- project is one SQLite file under /db/<Name>/<slug>.db, and the registry
+-- that says which files are served is `projects.txt`. Spillover between
+-- projects is not forbidden here — it is impossible.
 
-CREATE TABLE IF NOT EXISTS project_domains (
-  project     TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
-  domain      TEXT NOT NULL,
-  description TEXT,
-  PRIMARY KEY (project, domain)
-);
-
--- Whoever downloads rules. A skill is not a chat, but it acts, and what acts
--- is under rules: calling list_rules is the only requirement.
--- `brief` is the consumer's IDENTITY — its mandate, in Markdown — returned at
--- the head of list_rules so "who you are" and "what binds you" arrive in one
--- round trip. It is not a rule: a mandate is not violable and not shared, and
--- modelling it as one would fatten the corpus the expiry mechanism exists to
--- keep small. For skills it stays empty by editorial discipline — a skill
--- describes itself in its own file, and a copy here would be verified by
--- nobody. That is a discipline, not a branch in the code.
-CREATE TABLE IF NOT EXISTS consumers (
-  id      INTEGER PRIMARY KEY,
-  project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
-  name    TEXT NOT NULL,                -- exactly as first given: spelling is DATA
-  kind    TEXT NOT NULL CHECK (kind IN ('chat','skill')),
-  brief   TEXT,
-  created TEXT NOT NULL,
-  -- RETIREMENT. A role ends, a skill is rewritten, a chat is replaced: the
-  -- registry has to be able to say so, and until v3.2.0 it could not — the
-  -- manual instructed "retire the old" and there was no door. The row STAYS,
-  -- because the history has to keep resolving and rules that once reached it
-  -- must keep reading true; what goes away is every POINTER. Retired, a
-  -- consumer is reached by nothing, not even _ALL_, owns no scope membership,
-  -- and is refused at every door that names it.
-  retired_at     TEXT,                  -- NULL means live
-  retired_reason TEXT
-);
-
--- Identity is the CASEFOLDED name; the spelling above is the author's and is
--- never rewritten. `Architect` and `architect` are one consumer, not two.
-CREATE UNIQUE INDEX IF NOT EXISTS ux_consumers_fold
-    ON consumers(project, lower(name));
-
--- A brief is identity, and a silent change to a role's identity is exactly
--- the class of change this registry exists to record: the history IS the
--- protection. Whole versions, written by triggers — a change made by hand
--- with sqlite3 is recorded too, same doctrine as the rules.
-CREATE TABLE IF NOT EXISTS consumer_versions (
-  project    TEXT NOT NULL,
-  consumer   TEXT NOT NULL,
-  version    INTEGER NOT NULL,
-  kind       TEXT,
+-- ---------------------------------------------------------------------
+-- The profile: one row, and it is the project talking about itself
+-- ---------------------------------------------------------------------
+-- `brief` is identity — owner, style, doctrine — and changes rarely, behind
+-- the admin code. `specs` are the living facts (what used to be called the
+-- Perimeter): true today, false tomorrow without anyone having DECIDED
+-- anything, so they change on the reference code. They are two columns and
+-- not one because they are two gates.
+CREATE TABLE IF NOT EXISTS project_profile (
+  profile_id INTEGER PRIMARY KEY CHECK (profile_id = 1),
   brief      TEXT,
-  retired_at TEXT,
-  ts         TEXT NOT NULL,
+  specs      TEXT,
+  queue_cap  INTEGER,        -- NULL = unlimited, 0 = queue closed, N = N
+  updated_at TEXT NOT NULL,
+  actor      TEXT            -- who wrote last; the version trigger reads it
+);
+
+CREATE TABLE IF NOT EXISTS project_profile_version (
+  version    INTEGER PRIMARY KEY,
+  brief      TEXT,
+  specs      TEXT,
+  queue_cap  INTEGER,
+  timestamp  TEXT NOT NULL,
   action     TEXT NOT NULL,
-  PRIMARY KEY (project, consumer, version)
+  actor      TEXT
 );
 
--- Named sets of consumers. managed=1 means the row was generated (a consumer's
--- singleton, or _ALL_) and must keep telling the truth about its own name.
-CREATE TABLE IF NOT EXISTS scopes (
-  id      INTEGER PRIMARY KEY,
-  project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
-  name    TEXT NOT NULL,
-  managed INTEGER NOT NULL DEFAULT 0
+-- ---------------------------------------------------------------------
+-- Domains
+-- ---------------------------------------------------------------------
+-- `code` is printed inside every display ID this registry ever hands out, so
+-- it is written ONCE (a trigger says so): renaming it would relabel history.
+-- `description` is a gloss and is amendable. `reason` is why the domain
+-- exists at all, and it is required — a domain nobody can justify is a
+-- drawer, and drawers fill up.
+CREATE TABLE IF NOT EXISTS domain (
+  domain_id      INTEGER PRIMARY KEY,
+  code           TEXT NOT NULL CHECK (upper(code) <> 'TK'),
+  description    TEXT,
+  reason         TEXT NOT NULL,
+  created_at     TEXT NOT NULL,
+  retired_at     TEXT,
+  retired_reason TEXT,
+  actor          TEXT,
+  CHECK (retired_at IS NULL OR TRIM(IFNULL(retired_reason,'')) <> '')
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS ux_scopes_fold
-    ON scopes(project, lower(name));
+CREATE UNIQUE INDEX IF NOT EXISTS ux_domain_fold ON domain(lower(code));
 
--- Membership crosses the INTEGERS: the names stay in one place each, and a
--- spelling can never disagree with itself across a join.
-CREATE TABLE IF NOT EXISTS scope_members (
-  scope_id    INTEGER NOT NULL REFERENCES scopes(id)    ON DELETE CASCADE,
-  consumer_id INTEGER NOT NULL REFERENCES consumers(id) ON DELETE CASCADE,
-  PRIMARY KEY (scope_id, consumer_id)
+CREATE TABLE IF NOT EXISTS domain_version (
+  domain_id      INTEGER NOT NULL REFERENCES domain(domain_id),
+  version        INTEGER NOT NULL,
+  code           TEXT,
+  description    TEXT,
+  retired_at     TEXT,
+  retired_reason TEXT,
+  timestamp      TEXT NOT NULL,
+  action         TEXT NOT NULL,
+  actor          TEXT,
+  PRIMARY KEY (domain_id, version)
 );
 
-CREATE TABLE IF NOT EXISTS rules (
-  project       TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
-  id            TEXT NOT NULL,
-  domain        TEXT NOT NULL,
+-- ---------------------------------------------------------------------
+-- Consumers: whoever is under the rules
+-- ---------------------------------------------------------------------
+-- Chats, skills and — since rev. 5 — HUMANS. A human calls no tool, but is a
+-- valid owner of a task: the owner's mail is read from the overview and from
+-- the web UI, and that is exactly why opening a task for a human does not
+-- notify anybody.
+--
+-- `brief` is the mandate — the boundaries — and moves on the admin code, so a
+-- chat holding only the reference code cannot rewrite its own remit. `specs`
+-- are operational data and move on the reference code. `secret` is NULL
+-- until somebody decides that this consumer's gestures must be signed: set
+-- it, and every gesture in its name carries `consumer_key`. It is switched on
+-- one consumer at a time, without rewiring anything.
+CREATE TABLE IF NOT EXISTS consumer (
+  consumer_id    INTEGER PRIMARY KEY,
+  name           TEXT NOT NULL,   -- spelling is DATA; identity is the surrogate
+  kind           TEXT NOT NULL CHECK (kind IN ('chat','skill','human')),
+  brief          TEXT,
+  specs          TEXT,
+  secret         TEXT,
+  created_at     TEXT NOT NULL,
+  retired_at     TEXT,
+  retired_reason TEXT,
+  actor          TEXT,
+  CHECK (retired_at IS NULL OR TRIM(IFNULL(retired_reason,'')) <> '')
+);
+
+-- Identity is the casefolded name: `Architect` and `architect` are one
+-- consumer, and the spelling stays the author's.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_consumer_fold ON consumer(lower(name));
+
+CREATE TABLE IF NOT EXISTS consumer_version (
+  consumer_id INTEGER NOT NULL REFERENCES consumer(consumer_id),
+  version     INTEGER NOT NULL,
+  name        TEXT,              -- what it was called THAT DAY
+  kind        TEXT,
+  brief       TEXT,
+  specs       TEXT,
+  retired_at  TEXT,
+  timestamp   TEXT NOT NULL,
+  action      TEXT NOT NULL,     -- created/amended/renamed/retired/revived
+  actor       TEXT,
+  PRIMARY KEY (consumer_id, version)
+);
+
+-- ---------------------------------------------------------------------
+-- Groups: real ones only
+-- ---------------------------------------------------------------------
+-- The generated singletons, the `managed` column, the `_ALL_` row and their
+-- four triggers are gone: `_ALL_` was routing dressed up as data, and a
+-- singleton was a group invented so that the code would have something to
+-- join against. What is left is what a person would call a group.
+CREATE TABLE IF NOT EXISTS consumer_group (
+  group_id       INTEGER PRIMARY KEY,
+  name           TEXT NOT NULL,
+  created_at     TEXT NOT NULL,
+  retired_at     TEXT,
+  retired_reason TEXT,
+  actor          TEXT,
+  CHECK (retired_at IS NULL OR TRIM(IFNULL(retired_reason,'')) <> '')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_group_fold ON consumer_group(lower(name));
+
+CREATE TABLE IF NOT EXISTS consumer_group_version (
+  group_id       INTEGER NOT NULL REFERENCES consumer_group(group_id),
+  version        INTEGER NOT NULL,
+  name           TEXT,
+  retired_at     TEXT,
+  retired_reason TEXT,
+  timestamp      TEXT NOT NULL,
+  action         TEXT NOT NULL,
+  actor          TEXT,
+  PRIMARY KEY (group_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS consumer_group_member (
+  group_id    INTEGER NOT NULL REFERENCES consumer_group(group_id),
+  consumer_id INTEGER NOT NULL REFERENCES consumer(consumer_id),
+  PRIMARY KEY (group_id, consumer_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_group_member ON consumer_group_member(consumer_id);
+
+-- ---------------------------------------------------------------------
+-- The corpus
+-- ---------------------------------------------------------------------
+-- 'VA-0001' is not stored anywhere: UNIQUE(domain_id, seq) is the truth and
+-- the display ID is computed by the view. That is difficulty #2 of the nine,
+-- and it is why a domain's code can be printed everywhere without ever being
+-- copied.
+CREATE TABLE IF NOT EXISTS rule (
+  rule_id       INTEGER PRIMARY KEY,
+  domain_id     INTEGER NOT NULL REFERENCES domain(domain_id),
   seq           INTEGER NOT NULL,
   type          TEXT NOT NULL CHECK (type IN ('R','M','F')),
   title         TEXT NOT NULL,
-  body          TEXT NOT NULL,          -- free Markdown, rendered verbatim
+  body          TEXT NOT NULL,
   status        TEXT NOT NULL DEFAULT 'proposed'
                 CHECK (status IN ('proposed','active','retired','denied')),
   permanence    TEXT NOT NULL DEFAULT 'provisional'
                 CHECK (permanence IN ('provisional','permanent')),
-  expires_at    TEXT,                   -- NULL for permanent rules
-  superseded_by TEXT,                   -- set on the RETIRED rule: its heir
-  supersedes    TEXT,                   -- set on a PROPOSAL: the rule it will
-                                        -- retire at approval, atomically
-  denied_reason TEXT,
-  changelog     TEXT,
-  source        TEXT,                   -- where it came from: the renewal criterion
-  reason        TEXT NOT NULL DEFAULT 'created',
-                                        -- the why of the RULE: written at the
-                                        -- proposal, and no event rewrites it
-  event         TEXT,                   -- the last EVENT and its why: approved,
-                                        -- denied, renewed... written by the
-                                        -- lifecycle, never at the proposal
-  proposed_by   TEXT,
-  updated_at    TEXT NOT NULL,
-  PRIMARY KEY (project, id),
-  UNIQUE (project, domain, seq)
-);
-
--- Two PENDING proposals cannot claim the same victim: whoever approves would
--- be retiring one rule towards two heirs, and which one wins would be batch
--- order. Partial on status, so approval and denial free the slot by
--- themselves — the index watches the door, not the corpus. An INDEX and not a
--- Python check, so it holds no matter which door the write came through.
-CREATE UNIQUE INDEX IF NOT EXISTS ux_rules_supersedes
-    ON rules(project, supersedes) WHERE supersedes IS NOT NULL AND status='proposed';
-
--- A rule points to a SET of scopes: widening it is one more row, and the group
--- it already belonged to is not touched.
--- The foreign key is DEFERRED on purpose: the engine writes the perimeter
--- BEFORE the rule, inside one transaction, so the AFTER INSERT trigger on
--- rules already sees a complete perimeter to photograph.
-CREATE TABLE IF NOT EXISTS rule_scopes (
-  project  TEXT NOT NULL,
-  rule_id  TEXT NOT NULL,
-  scope_id INTEGER NOT NULL REFERENCES scopes(id)
-      DEFERRABLE INITIALLY DEFERRED,
-  PRIMARY KEY (project, rule_id, scope_id),
-  FOREIGN KEY (project, rule_id) REFERENCES rules(project, id)
-      ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
-);
-
-CREATE TABLE IF NOT EXISTS rule_refs (
-  project TEXT NOT NULL,
-  src     TEXT NOT NULL,
-  dst     TEXT NOT NULL,
-  PRIMARY KEY (project, src, dst),
-  FOREIGN KEY (project, src) REFERENCES rules(project, id)
-      ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
-);
-
-CREATE TABLE IF NOT EXISTS rule_versions (
-  project       TEXT NOT NULL,
-  rule_id       TEXT NOT NULL,
-  version       INTEGER NOT NULL,
-  type          TEXT,
-  title         TEXT,
-  body          TEXT,
-  status        TEXT,
-  permanence    TEXT,
   expires_at    TEXT,
-  superseded_by TEXT,
-  changelog     TEXT,
-  scopes        TEXT,                   -- declared
-  consumers     TEXT,                   -- reached, resolved
-  ts            TEXT NOT NULL,
-  action        TEXT NOT NULL,
-  reason        TEXT,
-  PRIMARY KEY (project, rule_id, version)
+  reach         TEXT NOT NULL CHECK (reach IN ('all','targeted')),
+  supersedes_rule_id    INTEGER REFERENCES rule(rule_id),  -- on the PROPOSAL
+  superseded_by_rule_id INTEGER REFERENCES rule(rule_id),  -- on the RETIRED one
+  source        TEXT,
+  reason        TEXT NOT NULL,   -- the why of the RULE, immutable
+  event         TEXT,            -- the last event of the lifecycle
+  proposed_by   TEXT,            -- the AUTHOR, on the rule, for good
+  actor         TEXT,            -- the hand on the LAST gesture; 'web ui' from
+                                 -- the batch page. Same column `task` has had
+                                 -- since 3.1.0, and the version trigger reads
+                                 -- it: without it `rule_version.actor` would
+                                 -- be a column nothing could ever fill
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  UNIQUE (domain_id, seq)
 );
 
-CREATE TABLE IF NOT EXISTS approvals (
-  project     TEXT NOT NULL,
-  digest      TEXT NOT NULL,
-  n_rules     INTEGER NOT NULL,
-  rule_ids    TEXT NOT NULL,
-  approved_at TEXT NOT NULL,
-  PRIMARY KEY (project, digest, approved_at)
+-- Two pending proposals cannot claim the same victim: whoever approves would
+-- be retiring one rule towards two heirs, and which one won would be batch
+-- order. Partial on `proposed`, so approval and denial free the slot by
+-- themselves.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_rule_supersedes ON rule(supersedes_rule_id)
+    WHERE supersedes_rule_id IS NOT NULL AND status = 'proposed';
+
+CREATE INDEX IF NOT EXISTS ix_rule_status ON rule(status);
+
+-- The audience, MIXED (rev. 6). `reach='all'` means NO rows in either table;
+-- `targeted` means at least one, and the audience is the UNION of the two.
+-- Groups are the normal case; the singles are called EXCEPTIONS because they
+-- stand next to the groups and can only ever ADD.
+--
+-- The two references to `rule` are DEFERRED on purpose, and it is the same
+-- reason the 3.x perimeter was deferred: the engine writes the audience
+-- BEFORE the rule, inside one transaction, so that the AFTER INSERT trigger
+-- on `rule` already has a complete perimeter to photograph. Written the
+-- obvious way round — rule first, audience after — version 1 of every
+-- targeted rule photographs NOBODY, and nothing complains.
+CREATE TABLE IF NOT EXISTS rule_audience_group (
+  rule_id  INTEGER NOT NULL REFERENCES rule(rule_id)
+      DEFERRABLE INITIALLY DEFERRED,
+  group_id INTEGER NOT NULL REFERENCES consumer_group(group_id),
+  PRIMARY KEY (rule_id, group_id)
 );
 
-CREATE INDEX IF NOT EXISTS ix_scope_members ON scope_members(consumer_id);
-CREATE INDEX IF NOT EXISTS ix_rule_scopes   ON rule_scopes(scope_id);
-CREATE INDEX IF NOT EXISTS ix_refs_dst      ON rule_refs(project, dst);
-CREATE INDEX IF NOT EXISTS ix_rules_status  ON rules(project, status);
+CREATE TABLE IF NOT EXISTS rule_audience_exception (
+  rule_id     INTEGER NOT NULL REFERENCES rule(rule_id)
+      DEFERRABLE INITIALLY DEFERRED,
+  consumer_id INTEGER NOT NULL REFERENCES consumer(consumer_id),
+  PRIMARY KEY (rule_id, consumer_id)
+);
 
--- History is written by the ENGINE, not by tool code.
-CREATE TRIGGER IF NOT EXISTS trg_rules_ins AFTER INSERT ON rules BEGIN
-  INSERT INTO rule_versions ({_VCOLS})
-  VALUES (NEW.project, NEW.id, {_f(_NEXT_VERSION, 'NEW')},
-          NEW.type, NEW.title, NEW.body, NEW.status, NEW.permanence, NEW.expires_at,
-          NEW.superseded_by, NEW.changelog,
-          {_f(_SCOPES_OF, 'NEW')}, {_f(_CONSUMERS_OF, 'NEW')},
-          NEW.updated_at, 'created', NEW.reason);
+CREATE INDEX IF NOT EXISTS ix_audience_group_g ON rule_audience_group(group_id);
+CREATE INDEX IF NOT EXISTS ix_audience_exc_c ON rule_audience_exception(consumer_id);
+
+-- Citation between rules, and it is a FOREIGN KEY. In 3.x this was text and
+-- an audit went looking for pointers that pointed nowhere; now the database
+-- refuses to write one. An audit that hunts for something the schema can
+-- forbid is a guarantee living in the wrong place.
+CREATE TABLE IF NOT EXISTS rule_ref (
+  src_rule_id INTEGER NOT NULL REFERENCES rule(rule_id),
+  dst_rule_id INTEGER NOT NULL REFERENCES rule(rule_id),
+  PRIMARY KEY (src_rule_id, dst_rule_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_rule_ref_dst ON rule_ref(dst_rule_id);
+
+-- ---------------------------------------------------------------------
+-- The history: whole snapshots written, diffs computed on read
+-- ---------------------------------------------------------------------
+-- No deltas with NULLs — "unchanged" and "cleared" would become
+-- indistinguishable, and they would become indistinguishable precisely on
+-- `expires_at`. What a reader actually wants ("show me the history with the
+-- date and only what changed") is a DISPLAY requirement, and it is met by
+-- computing N against N-1 at read time.
+CREATE TABLE IF NOT EXISTS rule_version (
+  rule_id               INTEGER NOT NULL REFERENCES rule(rule_id),
+  version               INTEGER NOT NULL,
+  type                  TEXT,
+  title                 TEXT,
+  body                  TEXT,
+  status                TEXT,
+  permanence            TEXT,
+  expires_at            TEXT,
+  reach                 TEXT,
+  superseded_by_rule_id INTEGER,
+  timestamp             TEXT NOT NULL,
+  action                TEXT NOT NULL,
+  reason                TEXT,
+  actor                 TEXT,
+  PRIMARY KEY (rule_id, version)
+);
+
+-- The audience photograph, relational. It has no date of its own on purpose:
+-- the date lives once, on the parent row.
+CREATE TABLE IF NOT EXISTS rule_version_audience (
+  rule_id      INTEGER NOT NULL,
+  version      INTEGER NOT NULL,
+  consumer_id  INTEGER NOT NULL REFERENCES consumer(consumer_id),
+  via_group_id INTEGER REFERENCES consumer_group(group_id),
+  PRIMARY KEY (rule_id, version, consumer_id),
+  FOREIGN KEY (rule_id, version) REFERENCES rule_version(rule_id, version)
+);
+
+-- ---------------------------------------------------------------------
+-- Decisions: one turn of the batch page
+-- ---------------------------------------------------------------------
+-- On that page approving and denying are the SAME gesture — ticked is
+-- approved, unticked is denied, against the digest — so what gets recorded is
+-- a DECISION with two verdicts, not an "approval" that forgets the noes.
+-- Denying costs a sentence and the CHECK is the guarantee; approving does
+-- not, because the yes is the tick and the rule's own `reason` is already
+-- written.
+CREATE TABLE IF NOT EXISTS decision (
+  decision_id INTEGER PRIMARY KEY,
+  digest      TEXT NOT NULL,      -- sha256 of what was LOOKED AT
+  decided_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS decision_rule (
+  decision_id INTEGER NOT NULL REFERENCES decision(decision_id),
+  rule_id     INTEGER NOT NULL REFERENCES rule(rule_id),
+  verdict     TEXT NOT NULL CHECK (verdict IN ('approved','denied')),
+  reason      TEXT,
+  PRIMARY KEY (decision_id, rule_id),
+  CHECK ((verdict = 'approved' AND reason IS NULL)
+      OR (verdict = 'denied' AND TRIM(IFNULL(reason,'')) <> ''))
+);
+
+-- ---------------------------------------------------------------------
+-- The task log: work, not law
+-- ---------------------------------------------------------------------
+-- `seq` is UNIQUE and never comes back, and it no longer needs a counter row
+-- to protect it: the prune ARCHIVES (`archived_at`) instead of deleting, so
+-- MAX(seq) reads every number ever handed out. The cure and the disease are
+-- the same story — in 3.1.0 the prune deleted, MAX(seq) went backwards, and
+-- TK-0004 came back after TK-0007.
+CREATE TABLE IF NOT EXISTS task (
+  task_id        INTEGER PRIMARY KEY,
+  seq            INTEGER NOT NULL UNIQUE,
+  title          TEXT NOT NULL,
+  body           TEXT NOT NULL,
+  consumer_id    INTEGER NOT NULL REFERENCES consumer(consumer_id),  -- the OWNER
+  created_by     TEXT NOT NULL,   -- a SIGNATURE, not a pointer: 'Alfredo' is valid
+  urgent         INTEGER NOT NULL DEFAULT 0 CHECK (urgent IN (0,1)),
+  status         TEXT NOT NULL DEFAULT 'pending'
+                 CHECK (status IN ('pending','completed','dropped')),
+  outcome        TEXT,
+  reason_dropped TEXT,
+  actor          TEXT,
+  idem_key       TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  closed_at      TEXT,
+  archived_at    TEXT,
+  -- The three states and what each one COSTS, in the schema and not only at
+  -- the door: this file is readable from the share.
+  CHECK ((status = 'pending'
+            AND outcome IS NULL AND reason_dropped IS NULL AND closed_at IS NULL)
+      OR (status = 'completed'
+            AND TRIM(IFNULL(outcome,'')) <> '' AND closed_at IS NOT NULL)
+      OR (status = 'dropped'
+            AND TRIM(IFNULL(reason_dropped,'')) <> '' AND closed_at IS NOT NULL))
+);
+
+-- Partial on `pending`, which is the whole semantics: the same key after the
+-- task is closed opens a NEW task, because the recurring audit that finds the
+-- same discrepancy again is reporting it again, not repeating itself.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_task_idem
+    ON task(consumer_id, idem_key)
+ WHERE idem_key IS NOT NULL AND status = 'pending';
+
+CREATE INDEX IF NOT EXISTS ix_task_owner  ON task(consumer_id, status);
+CREATE INDEX IF NOT EXISTS ix_task_closed ON task(closed_at);
+
+CREATE TABLE IF NOT EXISTS task_version (
+  task_id        INTEGER NOT NULL REFERENCES task(task_id),
+  version        INTEGER NOT NULL,
+  title          TEXT,
+  body           TEXT,
+  consumer_id    INTEGER,          -- the owner of THAT day
+  created_by     TEXT,
+  urgent         INTEGER,
+  status         TEXT,
+  outcome        TEXT,
+  reason_dropped TEXT,
+  timestamp      TEXT NOT NULL,
+  action         TEXT NOT NULL,    -- created/amended/reassigned/completed/
+                                   -- dropped/archived
+  actor          TEXT,
+  PRIMARY KEY (task_id, version)
+);
+
+-- ---------------------------------------------------------------------
+-- The one-time admin auth codes  (rev. 7 — RECONCILE THIS TABLE)
+-- ---------------------------------------------------------------------
+-- The web UI mints a row behind the web ui password; a structural gesture
+-- burns it in the SAME transaction, and only when the gesture SUCCEEDS — a
+-- refusal rolls back and does not consume it, so a typo does not cost a trip
+-- to the UI. Spent or expired it is nothing, and alone it elevates nobody.
+-- It lives in the project's own file, so a code minted for one project is
+-- not a code for another.
+CREATE TABLE IF NOT EXISTS auth_code (
+  code_id      INTEGER PRIMARY KEY,
+  code_hash    TEXT NOT NULL,       -- the code itself was shown once, on the page
+  minted_at    TEXT NOT NULL,
+  expires_at   TEXT NOT NULL,
+  spent_at     TEXT,
+  spent_action TEXT,                -- the gesture that burned it
+  CHECK (spent_at IS NULL OR TRIM(IFNULL(spent_action,'')) <> '')
+);
+
+CREATE INDEX IF NOT EXISTS ix_auth_code_live ON auth_code(expires_at) WHERE spent_at IS NULL;
+
+-- ---------------------------------------------------------------------
+-- The IDs everyone reads
+-- ---------------------------------------------------------------------
+CREATE VIEW IF NOT EXISTS v_rule AS
+SELECT r.*, d.code || '-' || printf('%04d', r.seq) AS display_id
+  FROM rule r JOIN domain d ON d.domain_id = r.domain_id;
+
+CREATE VIEW IF NOT EXISTS v_task AS
+SELECT t.*, 'TK-' || printf('%04d', t.seq) AS display_id FROM task t;
+
+-- =====================================================================
+-- The history is written by the DATABASE, not by tool code
+-- =====================================================================
+-- Same doctrine as every version of this schema: a row written by hand with
+-- sqlite3 is photographed too.
+
+CREATE TRIGGER IF NOT EXISTS trg_profile_ins AFTER INSERT ON project_profile BEGIN
+  INSERT INTO project_profile_version (version, brief, specs, queue_cap,
+                                       timestamp, action, actor)
+  VALUES ({_NEXT_PROFILE_V}, NEW.brief, NEW.specs, NEW.queue_cap,
+          NEW.updated_at, 'created', NEW.actor);
 END;
 
-CREATE TRIGGER IF NOT EXISTS trg_rules_upd AFTER UPDATE ON rules BEGIN
-  INSERT INTO rule_versions ({_VCOLS})
-  VALUES (NEW.project, NEW.id, {_f(_NEXT_VERSION, 'NEW')},
-          NEW.type, NEW.title, NEW.body, NEW.status, NEW.permanence, NEW.expires_at,
-          NEW.superseded_by, NEW.changelog,
-          {_f(_SCOPES_OF, 'NEW')}, {_f(_CONSUMERS_OF, 'NEW')},
-          NEW.updated_at, 'amended', NEW.event);
+CREATE TRIGGER IF NOT EXISTS trg_profile_upd AFTER UPDATE ON project_profile BEGIN
+  INSERT INTO project_profile_version (version, brief, specs, queue_cap,
+                                       timestamp, action, actor)
+  VALUES ({_NEXT_PROFILE_V}, NEW.brief, NEW.specs, NEW.queue_cap,
+          NEW.updated_at, 'amended', NEW.actor);
 END;
 
--- Safety net: if someone deletes by hand, the trace stays.
-CREATE TRIGGER IF NOT EXISTS trg_rules_del AFTER DELETE ON rules BEGIN
-  INSERT INTO rule_versions ({_VCOLS})
-  VALUES (OLD.project, OLD.id, {_f(_NEXT_VERSION, 'OLD')},
-          OLD.type, OLD.title, OLD.body, OLD.status, OLD.permanence, OLD.expires_at,
-          OLD.superseded_by, OLD.changelog, '', '',
-          strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'DELETED', 'DELETE outside the tools');
-END;
-
--- Changing a rule's perimeter is a change worth a version. The guard keeps the
--- trigger quiet while the rule itself does not exist yet (creation) or no
--- longer exists (cascade).
-CREATE TRIGGER IF NOT EXISTS trg_scope_link_ins AFTER INSERT ON rule_scopes
-WHEN EXISTS (SELECT 1 FROM rules WHERE project = NEW.project AND id = NEW.rule_id)
-BEGIN
-  INSERT INTO rule_versions ({_VCOLS})
-  SELECT r.project, r.id, {_f(_NEXT_VERSION, 'r')},
-         r.type, r.title, r.body, r.status, r.permanence, r.expires_at,
-         r.superseded_by, r.changelog,
-         {_f(_SCOPES_OF, 'r')}, {_f(_CONSUMERS_OF, 'r')},
-         strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'scope added', 'perimeter widened'
-    FROM rules r WHERE r.project = NEW.project AND r.id = NEW.rule_id;
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_scope_link_del AFTER DELETE ON rule_scopes
-WHEN EXISTS (SELECT 1 FROM rules WHERE project = OLD.project AND id = OLD.rule_id)
-BEGIN
-  INSERT INTO rule_versions ({_VCOLS})
-  SELECT r.project, r.id, {_f(_NEXT_VERSION, 'r')},
-         r.type, r.title, r.body, r.status, r.permanence, r.expires_at,
-         r.superseded_by, r.changelog,
-         {_f(_SCOPES_OF, 'r')}, {_f(_CONSUMERS_OF, 'r')},
-         strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'scope removed', 'perimeter narrowed'
-    FROM rules r WHERE r.project = OLD.project AND r.id = OLD.rule_id;
-END;
-
--- Every consumer needs a scope holding itself alone, or no rule could be
--- addressed to it. The database makes it, so it exists even for a consumer
--- inserted by hand. The singleton takes the consumer's OWN spelling, and the
--- membership is written by SELECT rather than last_insert_rowid(): inside a
--- trigger that value is not worth trusting.
-CREATE TRIGGER IF NOT EXISTS trg_consumer_scope AFTER INSERT ON consumers BEGIN
-  INSERT INTO scopes (project, name, managed) VALUES (NEW.project, NEW.name, 1);
-  INSERT INTO scope_members (scope_id, consumer_id)
-       SELECT s.id, NEW.id FROM scopes s
-        WHERE s.project = NEW.project AND s.managed = 1
-          AND lower(s.name) = lower(NEW.name);
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_consumers_ins AFTER INSERT ON consumers BEGIN
-  INSERT INTO consumer_versions (project, consumer, version, kind, brief, retired_at, ts, action)
-  VALUES (NEW.project, NEW.name,
-          (SELECT IFNULL(MAX(version),0)+1 FROM consumer_versions
-            WHERE project = NEW.project AND consumer = NEW.name),
-          NEW.kind, NEW.brief, NEW.retired_at,
-          strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'created');
+CREATE TRIGGER IF NOT EXISTS trg_domain_ins AFTER INSERT ON domain BEGIN
+  INSERT INTO domain_version (domain_id, version, code, description,
+                              retired_at, retired_reason, timestamp, action, actor)
+  VALUES (NEW.domain_id, {_f(_NEXT_DOMAIN_V, 'NEW')}, NEW.code, NEW.description,
+          NEW.retired_at, NEW.retired_reason,
+          NEW.created_at, 'created', NEW.actor);
 END;
 
 -- The action NAMES the retirement and the revival instead of calling both
--- 'amended': a role ending is the change this history exists to record, and a
--- word that covers everything covers nothing.
-CREATE TRIGGER IF NOT EXISTS trg_consumers_upd AFTER UPDATE ON consumers BEGIN
-  INSERT INTO consumer_versions (project, consumer, version, kind, brief, retired_at, ts, action)
-  VALUES (NEW.project, NEW.name,
-          (SELECT IFNULL(MAX(version),0)+1 FROM consumer_versions
-            WHERE project = NEW.project AND consumer = NEW.name),
-          NEW.kind, NEW.brief, NEW.retired_at,
-          strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+-- 'amended': a domain ending is the change this history exists to record, and
+-- a word that covers everything covers nothing.
+CREATE TRIGGER IF NOT EXISTS trg_domain_upd AFTER UPDATE ON domain BEGIN
+  INSERT INTO domain_version (domain_id, version, code, description,
+                              retired_at, retired_reason, timestamp, action, actor)
+  VALUES (NEW.domain_id, {_f(_NEXT_DOMAIN_V, 'NEW')}, NEW.code, NEW.description,
+          NEW.retired_at, NEW.retired_reason, {_NOW},
           CASE
             WHEN NEW.retired_at IS NOT NULL AND OLD.retired_at IS NULL THEN 'retired'
             WHEN NEW.retired_at IS NULL AND OLD.retired_at IS NOT NULL THEN 'revived'
             ELSE 'amended'
-          END);
+          END, NEW.actor);
 END;
 
--- A managed scope must keep telling the truth about its own name. The one
--- legitimate member of a singleton is the consumer whose spelling it carries;
--- _ALL_ is managed too and names no consumer, so it takes no member at all.
-CREATE TRIGGER IF NOT EXISTS trg_managed_no_extra_member
-BEFORE INSERT ON scope_members
-WHEN (SELECT managed FROM scopes WHERE id = NEW.scope_id) = 1
- AND NOT EXISTS (SELECT 1 FROM scopes s
-                   JOIN consumers c ON c.id = NEW.consumer_id
-                  WHERE s.id = NEW.scope_id AND s.project = c.project
-                    AND lower(s.name) = lower(c.name))
-BEGIN
-  SELECT RAISE(ABORT, 'managed scope: it is a consumer singleton and takes no other member');
+CREATE TRIGGER IF NOT EXISTS trg_consumer_ins AFTER INSERT ON consumer BEGIN
+  INSERT INTO consumer_version (consumer_id, version, name, kind, brief, specs,
+                                retired_at, timestamp, action, actor)
+  VALUES (NEW.consumer_id, {_f(_NEXT_CONSUMER_V, 'NEW')}, NEW.name, NEW.kind,
+          NEW.brief, NEW.specs, NEW.retired_at, NEW.created_at, 'created', NEW.actor);
 END;
 
-CREATE TRIGGER IF NOT EXISTS trg_managed_no_member_update
-BEFORE UPDATE ON scope_members
-WHEN (SELECT managed FROM scopes WHERE id = OLD.scope_id) = 1
-BEGIN
-  SELECT RAISE(ABORT, 'managed scope: its membership is not editable');
+CREATE TRIGGER IF NOT EXISTS trg_consumer_upd AFTER UPDATE ON consumer BEGIN
+  INSERT INTO consumer_version (consumer_id, version, name, kind, brief, specs,
+                                retired_at, timestamp, action, actor)
+  VALUES (NEW.consumer_id, {_f(_NEXT_CONSUMER_V, 'NEW')}, NEW.name, NEW.kind,
+          NEW.brief, NEW.specs, NEW.retired_at, {_NOW},
+          CASE
+            WHEN NEW.retired_at IS NOT NULL AND OLD.retired_at IS NULL THEN 'retired'
+            WHEN NEW.retired_at IS NULL AND OLD.retired_at IS NOT NULL THEN 'revived'
+            WHEN NEW.name <> OLD.name THEN 'renamed'
+            ELSE 'amended'
+          END, NEW.actor);
 END;
 
-CREATE TRIGGER IF NOT EXISTS trg_managed_no_rename
-BEFORE UPDATE OF name ON scopes
-WHEN OLD.managed = 1 AND NEW.name <> OLD.name
-BEGIN
-  SELECT RAISE(ABORT, 'managed scope: its name is its consumer''s and is not renamed here');
+CREATE TRIGGER IF NOT EXISTS trg_group_ins AFTER INSERT ON consumer_group BEGIN
+  INSERT INTO consumer_group_version (group_id, version, name, retired_at,
+                                      retired_reason, timestamp, action, actor)
+  VALUES (NEW.group_id, {_f(_NEXT_GROUP_V, 'NEW')}, NEW.name, NEW.retired_at,
+          NEW.retired_reason, NEW.created_at, 'created', NEW.actor);
 END;
 
--- A renamed consumer is a different consumer: the rules that reached it must be
--- reviewed, not dragged along behind a name. Same reasoning as rule IDs.
-CREATE TRIGGER IF NOT EXISTS trg_consumer_no_rename
-BEFORE UPDATE OF name ON consumers
-WHEN NEW.name <> OLD.name
-BEGIN
-  SELECT RAISE(ABORT, 'a consumer is not renamed: create the new one and retire the old');
+CREATE TRIGGER IF NOT EXISTS trg_group_upd AFTER UPDATE ON consumer_group BEGIN
+  INSERT INTO consumer_group_version (group_id, version, name, retired_at,
+                                      retired_reason, timestamp, action, actor)
+  VALUES (NEW.group_id, {_f(_NEXT_GROUP_V, 'NEW')}, NEW.name, NEW.retired_at,
+          NEW.retired_reason, {_NOW},
+          CASE
+            WHEN NEW.retired_at IS NOT NULL AND OLD.retired_at IS NULL THEN 'retired'
+            WHEN NEW.retired_at IS NULL AND OLD.retired_at IS NOT NULL THEN 'revived'
+            WHEN NEW.name <> OLD.name THEN 'renamed'
+            ELSE 'amended'
+          END, NEW.actor);
 END;
 
--- =====================================================================
--- The task log
--- =====================================================================
--- Work, not law. A task has no scope, no approval, no signature and no
--- expiry: what binds a consumer is a rule, what is waiting for it is a task,
--- and the two must not be able to be mistaken for one another. What it DOES
--- share with a rule is the doctrine that survived every revision here — no
--- DELETE, an ID never reused, whole versions written by triggers, and a
--- closing that costs a written why.
---
--- The owner is the surrogate `consumer_id` and not a name, which is what
--- makes reassignment (`tasks_amend`) a one-column write instead of a string
--- that has to agree with itself across a join.
-CREATE TABLE IF NOT EXISTS tasks (
-  project     TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
-  id          TEXT NOT NULL,             -- TK-NNNN, assigned by the counter
-  seq         INTEGER NOT NULL,
-  title       TEXT NOT NULL,
-  body        TEXT NOT NULL,
-  consumer_id INTEGER NOT NULL REFERENCES consumers(id),   -- the OWNER
-  created_by  TEXT NOT NULL,             -- and it is never blank: see propose
-  urgent      INTEGER NOT NULL DEFAULT 0 CHECK (urgent IN (0,1)),
-  status      TEXT NOT NULL DEFAULT 'pending'
-              CHECK (status IN ('pending','completed','dropped')),
-  outcome     TEXT,                      -- completed: what came of it
-  reason      TEXT,                      -- dropped: why it will not be done
-  actor       TEXT,                      -- who wrote last: amended or closed
-  idem_key    TEXT,                      -- the caller's own idempotency handle
-  created_at  TEXT NOT NULL,
-  updated_at  TEXT NOT NULL,
-  closed_at   TEXT,
-  PRIMARY KEY (project, id),
-  UNIQUE (project, seq),
-  -- The three states and what each one COSTS, in the SCHEMA and not only at
-  -- the door. `completed` with no outcome is the changelog quietly losing an
-  -- entry; `dropped` with no reason is a decision nobody recorded. Both are
-  -- refused with a talking message by the engine — this is what holds when
-  -- somebody writes with sqlite3 by hand.
-  CHECK ((status = 'pending'
-            AND outcome IS NULL AND reason IS NULL AND closed_at IS NULL)
-      OR (status = 'completed'
-            AND TRIM(IFNULL(outcome, '')) <> '' AND closed_at IS NOT NULL)
-      OR (status = 'dropped'
-            AND TRIM(IFNULL(reason, ''))  <> '' AND closed_at IS NOT NULL))
-);
-
--- The idempotency handle, and it is an INDEX rather than a lookup in Python
--- for the reason ux_rules_supersedes is one: a check that lives in the code
--- holds for the callers that go through the code. PARTIAL on `pending`, which
--- is the whole semantics the spec asked for — the same key after the task is
--- closed opens a NEW task, because the recurring audit that finds the same
--- discrepancy again is reporting it again, not repeating itself.
-CREATE UNIQUE INDEX IF NOT EXISTS ux_tasks_idem
-    ON tasks(project, consumer_id, idem_key)
- WHERE idem_key IS NOT NULL AND status = 'pending';
-
-CREATE INDEX IF NOT EXISTS ix_tasks_owner  ON tasks(project, consumer_id, status);
-CREATE INDEX IF NOT EXISTS ix_tasks_closed ON tasks(project, closed_at);
-
-CREATE TABLE IF NOT EXISTS task_versions (
-  project    TEXT NOT NULL,
-  task_id    TEXT NOT NULL,
-  version    INTEGER NOT NULL,
-  title      TEXT,
-  body       TEXT,
-  consumer   TEXT,                       -- the owner of that day, resolved
-  created_by TEXT,
-  urgent     INTEGER,
-  status     TEXT,
-  outcome    TEXT,
-  reason     TEXT,
-  ts         TEXT NOT NULL,
-  action     TEXT NOT NULL,
-  actor      TEXT,
-  PRIMARY KEY (project, task_id, version)
-);
-
--- THE HIGH-WATER MARK, and it exists because the obvious counter is wrong.
--- Deriving the next number from MAX(seq) over `tasks` reads only the rows
--- that are STILL THERE, so the first prune hands the freed numbers straight
--- back — and an ID that comes back makes an old citation point at somebody
--- else's work. Found by the suite, on the case that opens a task, closes it,
--- prunes and opens another: TK-0004 came back after TK-0007. A separate row
--- that only ever goes up is the fix, and it is a TRIGGER so it holds for a
--- row inserted by hand as well.
-CREATE TABLE IF NOT EXISTS task_counter (
-  project TEXT PRIMARY KEY REFERENCES projects(name) ON DELETE CASCADE,
-  last    INTEGER NOT NULL
-);
-
-CREATE TRIGGER IF NOT EXISTS trg_tasks_counter AFTER INSERT ON tasks BEGIN
-  INSERT INTO task_counter (project, last) VALUES (NEW.project, NEW.seq)
-  ON CONFLICT(project) DO UPDATE SET last = MAX(task_counter.last, excluded.last);
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_tasks_ins AFTER INSERT ON tasks BEGIN
-  INSERT INTO task_versions ({_TVCOLS})
-  VALUES (NEW.project, NEW.id, {_f(_NEXT_TVERSION, 'NEW')},
-          NEW.title, NEW.body, {_f(_TASK_OWNER, 'NEW')}, NEW.created_by, NEW.urgent,
-          NEW.status, NEW.outcome, NEW.reason,
-          NEW.created_at, 'created', NEW.created_by);
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_tasks_upd AFTER UPDATE ON tasks BEGIN
-  INSERT INTO task_versions ({_TVCOLS})
-  VALUES (NEW.project, NEW.id, {_f(_NEXT_TVERSION, 'NEW')},
-          NEW.title, NEW.body, {_f(_TASK_OWNER, 'NEW')}, NEW.created_by, NEW.urgent,
-          NEW.status, NEW.outcome, NEW.reason,
-          NEW.updated_at,
-          CASE NEW.status WHEN 'pending' THEN 'amended' ELSE NEW.status END,
+CREATE TRIGGER IF NOT EXISTS trg_rule_ins AFTER INSERT ON rule BEGIN
+  INSERT INTO rule_version (rule_id, version, type, title, body, status,
+                            permanence, expires_at, reach, superseded_by_rule_id,
+                            timestamp, action, reason, actor)
+  VALUES (NEW.rule_id, {_f(_NEXT_RULE_V, 'NEW')}, NEW.type, NEW.title, NEW.body,
+          NEW.status, NEW.permanence, NEW.expires_at, NEW.reach,
+          NEW.superseded_by_rule_id, NEW.created_at, 'created', NEW.reason,
           NEW.actor);
 END;
 
--- Safety net, same doctrine as the rules: if somebody deletes by hand, the
--- trace stays.
-CREATE TRIGGER IF NOT EXISTS trg_tasks_del AFTER DELETE ON tasks BEGIN
-  INSERT INTO task_versions ({_TVCOLS})
-  VALUES (OLD.project, OLD.id, {_f(_NEXT_TVERSION, 'OLD')},
-          OLD.title, OLD.body, NULL, OLD.created_by, OLD.urgent,
-          OLD.status, OLD.outcome, OLD.reason,
-          strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'DELETED',
-          'DELETE outside the tools');
+CREATE TRIGGER IF NOT EXISTS trg_rule_upd AFTER UPDATE ON rule BEGIN
+  INSERT INTO rule_version (rule_id, version, type, title, body, status,
+                            permanence, expires_at, reach, superseded_by_rule_id,
+                            timestamp, action, reason, actor)
+  VALUES (NEW.rule_id, {_f(_NEXT_RULE_V, 'NEW')}, NEW.type, NEW.title, NEW.body,
+          NEW.status, NEW.permanence, NEW.expires_at, NEW.reach,
+          NEW.superseded_by_rule_id, NEW.updated_at,
+          -- The action is the VERB, and the verbs worth having are the ones
+          -- the database can DERIVE: a transition of `status` is visible from
+          -- here, so approval, denial and retirement name themselves instead
+          -- of hiding inside a generic 'amended'. A perimeter change is not
+          -- derivable — narrowing a targeted rule to fewer groups leaves
+          -- `reach` exactly where it was — so it stays 'amended' and says what
+          -- it was in `reason`, next to a photograph that shows the audience
+          -- shrink. A verb that is right half the time is worse than one that
+          -- is always honest.
+          CASE
+            WHEN NEW.status = 'active'  AND OLD.status = 'proposed'  THEN 'approved'
+            WHEN NEW.status = 'denied'  AND OLD.status <> 'denied'   THEN 'denied'
+            WHEN NEW.status = 'retired' AND OLD.status <> 'retired'  THEN 'retired'
+            ELSE 'amended'
+          END,
+          NEW.event, NEW.actor);
 END;
 
--- CLOSED IS CLOSED. A completed or dropped task is not amended, not
--- re-closed, not reopened: the outcome and the reason are the two sentences
--- the whole log is read for, and a log whose past sentences can change is a
--- log nobody can quote. The only way on is a new task.
-CREATE TRIGGER IF NOT EXISTS trg_tasks_closed_is_closed
-BEFORE UPDATE ON tasks
+CREATE TRIGGER IF NOT EXISTS trg_task_ins AFTER INSERT ON task BEGIN
+  INSERT INTO task_version (task_id, version, title, body, consumer_id,
+                            created_by, urgent, status, outcome, reason_dropped,
+                            timestamp, action, actor)
+  VALUES (NEW.task_id, {_f(_NEXT_TASK_V, 'NEW')}, NEW.title, NEW.body,
+          NEW.consumer_id, NEW.created_by, NEW.urgent, NEW.status, NEW.outcome,
+          NEW.reason_dropped, NEW.created_at, 'created', NEW.created_by);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_task_upd AFTER UPDATE ON task BEGIN
+  INSERT INTO task_version (task_id, version, title, body, consumer_id,
+                            created_by, urgent, status, outcome, reason_dropped,
+                            timestamp, action, actor)
+  VALUES (NEW.task_id, {_f(_NEXT_TASK_V, 'NEW')}, NEW.title, NEW.body,
+          NEW.consumer_id, NEW.created_by, NEW.urgent, NEW.status, NEW.outcome,
+          NEW.reason_dropped, NEW.updated_at,
+          CASE
+            WHEN NEW.archived_at IS NOT NULL AND OLD.archived_at IS NULL
+              THEN 'archived'
+            WHEN NEW.consumer_id <> OLD.consumer_id THEN 'reassigned'
+            WHEN NEW.status = 'pending' THEN 'amended'
+            ELSE NEW.status
+          END, NEW.actor);
+END;
+
+-- THE PHOTOGRAPH OF THE AUDIENCE, and it hangs off the version row rather
+-- than off the rule: whatever door wrote the version — a tool, the batch
+-- page, sqlite3 by hand — the picture of who this rule reached that day gets
+-- taken with it.
+--
+-- Two things in here are not obvious and both are load-bearing:
+--
+--   * a consumer reached by TWO groups of the same rule gets ONE row, and it
+--     carries the LOWEST group_id. Group-with-group overlap is allowed on
+--     purpose (the structure changes on its own, and forbidding it would mean
+--     revalidating every rule at each tweak), so the picture has to survive
+--     it. What the snapshot answers is WHO WAS REACHED; the door is a detail
+--     that can legitimately be plural, and `via_group_id` here means "one of
+--     the groups that reached it", not "the only one".
+--   * an exception WINS over a group. An exception already covered by this
+--     rule's groups is refused at write time — but an overlap that forms
+--     LATER (the consumer joins the group afterwards) is deliberately NOT
+--     blocked, so it can and will be sitting here at photograph time. The
+--     exception was declared by hand, so it keeps the row and the group
+--     branch skips that consumer. Without this, a legal write would ABORT on
+--     a primary key.
+CREATE TRIGGER IF NOT EXISTS trg_rule_version_audience
+AFTER INSERT ON rule_version
+BEGIN
+  INSERT INTO rule_version_audience (rule_id, version, consumer_id, via_group_id)
+  SELECT NEW.rule_id, NEW.version, c.consumer_id, NULL
+    FROM consumer c
+   WHERE NEW.reach = 'all' AND c.retired_at IS NULL;
+
+  INSERT INTO rule_version_audience (rule_id, version, consumer_id, via_group_id)
+  SELECT NEW.rule_id, NEW.version, e.consumer_id, NULL
+    FROM rule_audience_exception e
+    JOIN consumer c ON c.consumer_id = e.consumer_id
+   WHERE NEW.reach = 'targeted' AND e.rule_id = NEW.rule_id
+     AND c.retired_at IS NULL;
+
+  INSERT INTO rule_version_audience (rule_id, version, consumer_id, via_group_id)
+  SELECT NEW.rule_id, NEW.version, m.consumer_id, MIN(m.group_id)
+    FROM rule_audience_group g
+    JOIN consumer_group_member m ON m.group_id = g.group_id
+    JOIN consumer c ON c.consumer_id = m.consumer_id
+   WHERE NEW.reach = 'targeted' AND g.rule_id = NEW.rule_id
+     AND c.retired_at IS NULL
+     AND m.consumer_id NOT IN (SELECT consumer_id FROM rule_audience_exception
+                                WHERE rule_id = NEW.rule_id)
+   GROUP BY m.consumer_id;
+END;
+
+-- =====================================================================
+-- The guarantees that live in the schema
+-- =====================================================================
+
+-- A domain's code is printed inside every ID it ever handed out.
+CREATE TRIGGER IF NOT EXISTS trg_domain_code_frozen
+BEFORE UPDATE OF code ON domain
+WHEN NEW.code <> OLD.code
+BEGIN
+  SELECT RAISE(ABORT, 'frozen field: a domain code is written once — it is printed inside every ID it ever handed out, and changing it would relabel history');
+END;
+
+-- Retiring a domain that still has rules in force would leave those rules
+-- with a dead label. The rules go first.
+CREATE TRIGGER IF NOT EXISTS trg_domain_retire_active
+BEFORE UPDATE ON domain
+WHEN NEW.retired_at IS NOT NULL AND OLD.retired_at IS NULL
+ AND EXISTS (SELECT 1 FROM rule
+              WHERE domain_id = OLD.domain_id AND status = 'active')
+BEGIN
+  SELECT RAISE(ABORT, 'domain still in force: it has active rules — retire or supersede them first');
+END;
+
+-- THE EXCLUSIVE ARC, and it is an INVARIANT: `all` means no audience rows,
+-- `targeted` means at least one. It is checked after every write to the rule
+-- because that is when both sides exist — the audience arrives first, the
+-- rule last — and because an invariant that only holds at creation is an
+-- invariant somebody will break with an amendment.
+--
+-- `reach` DECLARED and never deduced is the whole point: a targeted rule
+-- whose rows never arrived must FAIL, not quietly become universal.
+CREATE TRIGGER IF NOT EXISTS trg_rule_arc_ins
+AFTER INSERT ON rule
+WHEN (NEW.reach = 'all'
+        AND (EXISTS (SELECT 1 FROM rule_audience_group WHERE rule_id = NEW.rule_id)
+          OR EXISTS (SELECT 1 FROM rule_audience_exception WHERE rule_id = NEW.rule_id)))
+   OR (NEW.reach = 'targeted'
+        AND NOT EXISTS (SELECT 1 FROM rule_audience_group WHERE rule_id = NEW.rule_id)
+        AND NOT EXISTS (SELECT 1 FROM rule_audience_exception WHERE rule_id = NEW.rule_id))
+BEGIN
+  SELECT RAISE(ABORT, 'reach does not match the audience: all takes no group and no exception, targeted takes at least one — reach is declared, never deduced');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rule_arc_upd
+AFTER UPDATE ON rule
+WHEN (NEW.reach = 'all'
+        AND (EXISTS (SELECT 1 FROM rule_audience_group WHERE rule_id = NEW.rule_id)
+          OR EXISTS (SELECT 1 FROM rule_audience_exception WHERE rule_id = NEW.rule_id)))
+   OR (NEW.reach = 'targeted'
+        AND NOT EXISTS (SELECT 1 FROM rule_audience_group WHERE rule_id = NEW.rule_id)
+        AND NOT EXISTS (SELECT 1 FROM rule_audience_exception WHERE rule_id = NEW.rule_id))
+BEGIN
+  SELECT RAISE(ABORT, 'reach does not match the audience: all takes no group and no exception, targeted takes at least one — reach is declared, never deduced');
+END;
+
+-- And the same arc watched from the other side: an audience row added to a
+-- rule that is already universal. The two above fire on writes to `rule`, so
+-- without these a row could be slipped next to a live universal rule and
+-- nothing would notice until the rule was next touched.
+--
+-- The subquery returns NULL while the rule does not exist yet, and NULL is
+-- not `<> 'targeted'`, so the creation path — audience first, rule last —
+-- passes here and is caught by trg_rule_arc_ins instead. That is deliberate,
+-- and it is why the arc is enforced in two places rather than one.
+CREATE TRIGGER IF NOT EXISTS trg_audience_group_arc
+BEFORE INSERT ON rule_audience_group
+WHEN (SELECT reach FROM rule WHERE rule_id = NEW.rule_id) <> 'targeted'
+BEGIN
+  SELECT RAISE(ABORT, 'reach is not targeted: a universal rule takes no audience row — declare reach=targeted first');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_audience_exception_arc
+BEFORE INSERT ON rule_audience_exception
+WHEN (SELECT reach FROM rule WHERE rule_id = NEW.rule_id) <> 'targeted'
+BEGIN
+  SELECT RAISE(ABORT, 'reach is not targeted: a universal rule takes no audience row — declare reach=targeted first');
+END;
+
+-- CLOSED IS CLOSED. The outcome and the reason are the two sentences the
+-- whole log is read for, and a log whose past sentences can change is a log
+-- nobody can quote. The one exception is the prune, which only ever sets
+-- `archived_at` — see the next trigger for what it may not touch.
+CREATE TRIGGER IF NOT EXISTS trg_task_closed_is_closed
+BEFORE UPDATE ON task
 WHEN OLD.status <> 'pending'
+ AND NOT (NEW.archived_at IS NOT NULL AND OLD.archived_at IS NULL
+          AND NEW.status = OLD.status AND NEW.title = OLD.title
+          AND NEW.body = OLD.body AND IFNULL(NEW.outcome,'') = IFNULL(OLD.outcome,'')
+          AND IFNULL(NEW.reason_dropped,'') = IFNULL(OLD.reason_dropped,''))
 BEGIN
   SELECT RAISE(ABORT, 'closed task: a completed or dropped task is not amended and not reopened — open a new one');
 END;
 
--- What never changes while it is open. `urgent` is in here because of who
--- sets it: the CREATOR knows the condition that made the work urgent, and
+-- The prune archives what is finished. An open task is not clutter, it is
+-- work, and archiving it would hide it from the desk that owes it.
+CREATE TRIGGER IF NOT EXISTS trg_task_archive_closed_only
+BEFORE UPDATE ON task
+WHEN NEW.archived_at IS NOT NULL AND NEW.status = 'pending'
+BEGIN
+  SELECT RAISE(ABORT, 'open task: the prune archives what is closed — this one is still pending');
+END;
+
+-- What never changes while it is open. `urgent` is in here because of WHO
+-- sets it: the creator knows the condition that made the work urgent, and
 -- letting the receiver clear the flag would put the lever in the hand of
--- whoever has an interest in postponing. The identity columns are in here for
--- the ordinary reason — a task whose ID or author could drift is a task that
--- cannot be cited.
-CREATE TRIGGER IF NOT EXISTS trg_tasks_frozen
-BEFORE UPDATE ON tasks
-WHEN NEW.id <> OLD.id OR NEW.seq <> OLD.seq OR NEW.urgent <> OLD.urgent
+-- whoever has an interest in postponing.
+CREATE TRIGGER IF NOT EXISTS trg_task_frozen
+BEFORE UPDATE ON task
+WHEN NEW.task_id <> OLD.task_id OR NEW.seq <> OLD.seq OR NEW.urgent <> OLD.urgent
   OR NEW.created_by <> OLD.created_by OR NEW.created_at <> OLD.created_at
 BEGIN
   SELECT RAISE(ABORT, 'frozen field: the ID, the number, the author, the date and the urgent flag are written once — urgency is the creator''s and is not cleared by whoever receives it');
 END;
+
+-- A one-time code is one-time in the DATABASE, not only in the function that
+-- checks it: a second burn is refused even if the check is bypassed.
+CREATE TRIGGER IF NOT EXISTS trg_auth_code_spent_once
+BEFORE UPDATE ON auth_code
+WHEN OLD.spent_at IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'auth code already spent: a one-time code is spent once — mint another on the maintenance page');
+END;
 """
 
-TABLES = ("projects", "project_domains", "consumers", "consumer_versions",
-          "scopes", "scope_members",
-          "rules", "rule_scopes", "rule_refs", "rule_versions", "approvals",
-          "tasks", "task_versions", "task_counter")
-# Indexes the preflight has to see: only the ones that carry a GUARANTEE, never
-# the ones that carry speed. ux_rules_supersedes is what stops two pending
-# proposals claiming the same victim; the two fold indexes are what makes
-# `Architect` and `architect` one identity while the spelling stays the
-# author's. A constraint nobody checks is a constraint that is not there.
-# ux_tasks_idem is what makes a repeated
-# `idem_key` hand back the task that is already open instead of a second one.
-INDEXES = ("ux_rules_supersedes", "ux_consumers_fold", "ux_scopes_fold",
-           "ux_tasks_idem")
-TRIGGERS = ("trg_rules_ins", "trg_rules_upd", "trg_rules_del",
-            "trg_scope_link_ins", "trg_scope_link_del", "trg_consumer_scope",
-            "trg_consumers_ins", "trg_consumers_upd",
-            "trg_managed_no_extra_member", "trg_managed_no_member_update",
-            "trg_managed_no_rename", "trg_consumer_no_rename",
-            "trg_tasks_counter", "trg_tasks_ins", "trg_tasks_upd", "trg_tasks_del",
-            "trg_tasks_closed_is_closed", "trg_tasks_frozen")
+# Counted from the code, never written twice. The preflight counts these by
+# itself and compares against what the database actually holds.
+TABLES = ("project_profile", "project_profile_version",
+          "domain", "domain_version",
+          "consumer", "consumer_version",
+          "consumer_group", "consumer_group_version", "consumer_group_member",
+          "rule", "rule_audience_group", "rule_audience_exception", "rule_ref",
+          "rule_version", "rule_version_audience",
+          "decision", "decision_rule",
+          "task", "task_version",
+          "auth_code")
+
+VIEWS = ("v_rule", "v_task")
+
+# Only the indexes that carry a GUARANTEE, never the ones that carry speed.
+INDEXES = ("ux_domain_fold", "ux_consumer_fold", "ux_group_fold",
+           "ux_rule_supersedes", "ux_task_idem")
+
+TRIGGERS = ("trg_profile_ins", "trg_profile_upd",
+            "trg_domain_ins", "trg_domain_upd",
+            "trg_consumer_ins", "trg_consumer_upd",
+            "trg_group_ins", "trg_group_upd",
+            "trg_rule_ins", "trg_rule_upd",
+            "trg_task_ins", "trg_task_upd",
+            "trg_rule_version_audience",
+            "trg_domain_code_frozen", "trg_domain_retire_active",
+            "trg_rule_arc_ins", "trg_rule_arc_upd",
+            "trg_audience_group_arc", "trg_audience_exception_arc",
+            "trg_task_closed_is_closed", "trg_task_archive_closed_only",
+            "trg_task_frozen",
+            "trg_auth_code_spent_once")
+
 
 
 # =====================================================================
