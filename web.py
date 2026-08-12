@@ -40,12 +40,12 @@ Configuration, all through environment variables:
   WEB_PORT          the port this server listens on (default 9443). It must be
                     one the Funnel CANNOT publish and it must not collide with
                     the MCP port — the preflight refuses both at the edge
-  WEB_MASTER_CODE   the master. Read by the preflight, which refuses a missing
-                    one, a placeholder and anything under 12 characters; handed
-                    to build() by server.py, never read from here
-  WEB_ACTION_CAP    how many proposals may be approved in ONE action (default
-                    5). The mechanical form of "at the twelfth in a row a
-                    person signs without reading"
+  WEB_UI_PASSWORD   the password of this whole UI. Read by the preflight,
+                    which refuses a missing one, a placeholder and anything
+                    under 12 characters; handed to build() by server.py, never
+                    read from here. It was WEB_MASTER_CODE until v4.0.0, and
+                    the name changed because what it opens is the UI, not a
+                    "master" level that no longer exists
 """
 from __future__ import annotations
 
@@ -92,14 +92,6 @@ SESSION_COOKIE = "codifier_admin"
 # the twelfth signature in a row a person signs without reading", and it is a
 # knob rather than a constant for the reason every knob here is one: a ceiling
 # that is not in the template does not exist.
-#
-# The default is FIVE, which is the pending queue's own default, and the
-# consequence is worth stating rather than discovering: out of the box this
-# ceiling never refuses, because PENDING_CAP has already refused the sixth
-# proposal at the door. It starts to bite the day the queue is widened — which
-# is exactly the day somebody would otherwise approve eleven things in one
-# gesture — and the preflight refuses a value it cannot mean.
-DEFAULT_ACTION_CAP = 5
 
 # How many lines the maintenance page can show, and the ONLY place the number
 # lives: the page renders it from here rather than spelling it out a second
@@ -151,18 +143,6 @@ def port_from_env() -> int:
         return DEFAULT_PORT
     if not raw.isdigit() or not (1 <= int(raw) <= 65535):
         raise ValueError(f"WEB_PORT={raw!r}: a whole port number between 1 and 65535")
-    return int(raw)
-
-
-def action_cap_from_env() -> int:
-    """The per-action ceiling. Born optional with a working default in the
-    code, like the port and like PENDING_CAP: Unraid does not propagate new
-    variables to containers that are already installed."""
-    raw = (os.environ.get("WEB_ACTION_CAP") or "").strip()
-    if not raw:
-        return DEFAULT_ACTION_CAP
-    if not raw.isdigit() or int(raw) < 1:
-        raise ValueError(f"WEB_ACTION_CAP={raw!r}: a positive whole number of proposals")
     return int(raw)
 
 
@@ -312,7 +292,7 @@ of the service.</p>""")
 # The application
 # =====================================================================
 
-def build(*, registry, log, master: str, action_cap: int, refusal,
+def build(*, registry, log, master: str, refusal,
           backup_dir: str = ""):
     """The Starlette application. Handed the engine, the service's own logger,
     the master and the ceiling: a web layer that reached for any of them itself
@@ -371,6 +351,17 @@ def build(*, registry, log, master: str, action_cap: int, refusal,
 
     def _client(request) -> str:
         return request.client.host if request.client else "unknown"
+
+    def _cap(code):
+        """How many proposals ONE action may carry, read from the project.
+
+        It was WEB_ACTION_CAP in the container's template until v4.0.0, next
+        to PENDING_CAP — two knobs the contract of this very page forced to be
+        equal, since an unticked proposal is a denied one and a queue has to
+        be answered whole. Two numbers that must agree are one number, and it
+        is policy of the PROJECT: this container is multi-tenant. None means
+        no ceiling."""
+        return registry.project(code).queue_cap()
 
     def _guest(request):
         """Not signed in: the login page, and nothing about what is behind
@@ -591,10 +582,11 @@ def build(*, registry, log, master: str, action_cap: int, refusal,
         if unknown:
             return _lot_page(name, code, status=400, message=(
                 f"Not in this batch: {', '.join(unknown)}. Nothing was changed."))
-        if len(ticked) > action_cap:
+        cap = _cap(code)
+        if cap is not None and len(ticked) > cap:
             return _lot_page(name, code, status=400, message=(
                 f"{len(ticked)} ticked and the ceiling for one action is "
-                f"{action_cap}. Nothing was changed: do it in more than one "
+                f"{cap}. Nothing was changed: do it in more than one "
                 f"pass, which is the point of the ceiling."))
         rest = [i for i in current["ids"] if i not in ticked]
         if not ticked and not rest:
@@ -1082,9 +1074,10 @@ def build(*, registry, log, master: str, action_cap: int, refusal,
             return say("Unknown action. Nothing was changed.", "bad", 400)
         if not ticked:
             return say("Nothing ticked, nothing done.", "bad", 400)
-        if len(ticked) > action_cap:
+        cap = _cap(code)
+        if cap is not None and len(ticked) > cap:
             return say(f"{len(ticked)} ticked and the ceiling for one action "
-                       f"is {action_cap}. Nothing was changed: do it in more "
+                       f"is {cap}. Nothing was changed: do it in more "
                        f"than one pass, which is the point of the ceiling.",
                        "bad", 400)
         try:

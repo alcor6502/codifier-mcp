@@ -57,6 +57,7 @@ break history in silence.
 """
 from __future__ import annotations
 
+import contextlib
 import difflib
 import functools
 import hashlib
@@ -174,12 +175,6 @@ RE_SLUG_CHAR = re.compile(r"[a-z0-9-]")
 FILE_MODE = 0o644                       # root writes, everyone else reads
 DIR_MODE = 0o755
 DEFAULT_PROVISIONAL_DAYS = 90
-# The owner reads and decides in batches of 3-4: that rhythm is the
-# deliberate bottleneck of the whole approval flow, and this is the number
-# that imposes it. It used to be a rule (the dead AM domain) and died at gate
-# two, rightly: a machine-checkable constraint lives in the tool, not in the
-# corpus. Deliberately generous; a deployment can lower it.
-DEFAULT_PENDING_CAP = 5
 MAX_BODY_BYTES = 64_000
 MAX_GET_IDS = 50
 
@@ -231,13 +226,25 @@ ERR_PROJECT = ("project not specified: this needs the project CODE, the one at t
                "of its instructions. Without it the registry does not answer — and there "
                "is no way to list projects: either you have it, or you ask for it.")
 
-# One message for every way maintenance can fail to open — wrong code, wrong
-# key, missing either. Which half was wrong is not said, on purpose: telling
-# them apart would confirm a valid code to whoever holds only that.
-ERR_MAINT = ("maintenance refused: the project code or the architect key is missing "
-             "or wrong — and which one is not said, on purpose. Maintenance is done "
-             "by the chat that maintains this project, with the key Alfredo gives "
-             "it. Do not guess it: ask.")
+# One message for every way administration can fail to open — wrong reference
+# code, wrong admin code, missing either. Which half was wrong is not said, on
+# purpose: telling them apart would confirm a valid code to whoever holds only
+# that. "Architect key" left the vocabulary in v4.0.0: it was this, under a
+# name that said a ROLE where what is meant is a POSSESSION. The role does not
+# elevate; the code does.
+ERR_MAINT = ("administration refused: the project code or the admin code is missing "
+             "or wrong — and which one is not said, on purpose. Administration is done "
+             "by the chat Alfredo hands the admin code to at launch. Do not guess it: "
+             "ask.")
+
+# The second factor, missing. Its cure is the whole point of the sentence: a
+# one-time code cannot be reasoned out, it has to be minted, and the page that
+# mints it is named here so nobody goes looking.
+ERR_AUTH_CODE = ("this gesture changes something that already exists, so it takes a "
+                 "one-time auth_code as well as the admin code. Mint one on the "
+                 "maintenance page of the administration UI — it lives minutes and it "
+                 "is spent by the gesture that succeeds. No live code is not a door to "
+                 "force: it is a door that is shut.")
 
 # What the registry GENERATES. The code is the door and lives at the top of
 # the project instructions; the architect key is the maintenance privilege
@@ -249,6 +256,23 @@ ERR_MAINT = ("maintenance refused: the project code or the architect key is miss
 CODE_LEN = 16
 KEY_LEN = 24
 _ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"
+
+# The TEMPORARY admin auth code: the second factor on every modification of
+# something that already exists. Shorter than the others because its whole life
+# is measured in minutes and it is read off a page and typed into a chat once —
+# and out of the same alphabet, for the same reason: it gets retyped by a
+# person, and I/l and O/0 are where that goes wrong.
+#
+# It does not exist to stop malice. A chat is not a burglar; what a chat has is
+# FOGA — the pull to get the problem off its desk now — and a code somebody has
+# to go and mint is a breath it cannot skip.
+AUTH_CODE_LEN = 12
+# Minutes. Five and not one, because with the flat ladder gestures come in
+# chains and a code per gesture at one minute is a person running. Overridable
+# at minting time from the page, and by ADMIN_AUTH_CODE_DURATION in the
+# template — born optional with a working default HERE, because Unraid does not
+# propagate a new variable to containers already installed.
+DEFAULT_AUTH_CODE_MINUTES = 5
 
 
 def _gen(n: int) -> str:
@@ -310,6 +334,11 @@ def _now() -> str:
 
 def _plus_days(days: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _plus_minutes(minutes: int) -> str:
+    return (datetime.now(timezone.utc)
+            + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _day_bound(s: str, what: str, end: bool) -> str:
@@ -1356,11 +1385,11 @@ class Registry:
 
     def __init__(self, root: str = DB_ROOT, *,
                  provisional_days: int = DEFAULT_PROVISIONAL_DAYS,
-                 pending_cap: int = DEFAULT_PENDING_CAP) -> None:
+                 auth_code_minutes: int = DEFAULT_AUTH_CODE_MINUTES) -> None:
         self.root = root
         self.file = os.path.join(root, REGISTRY_FILE)
         self.provisional_days = int(provisional_days or DEFAULT_PROVISIONAL_DAYS)
-        self.pending_cap = int(pending_cap or DEFAULT_PENDING_CAP)
+        self.auth_code_minutes = int(auth_code_minutes or DEFAULT_AUTH_CODE_MINUTES)
         self._lock = threading.RLock()
         self._open: dict[str, Project] = {}      # by slug
         self._by_code: dict[str, Project] = {}   # by REFERENCE code
@@ -1422,7 +1451,7 @@ class Registry:
                         # different project on disk even when the slug matches.
                         p = Project(name, self.root,
                                     provisional_days=self.provisional_days,
-                                    pending_cap=self.pending_cap)
+                                    auth_code_minutes=self.auth_code_minutes)
                         born.append(p)
                     p.reference_code, p.admin_code = ref, adm
                     keep[slug] = p
@@ -1500,6 +1529,107 @@ class Registry:
 
 
 # =====================================================================
+# The three gates
+# =====================================================================
+# Three credentials, two gates for the tools and one for the page:
+#
+#   reference code  every chat of the project — working: rules, proposals,
+#                   tasks. It is `project` on every call, and it is the whole
+#                   of the boundary between projects.
+#   admin code      the chat Alfredo hands it to at launch — CREATING things,
+#                   closing someone else's task, the cross views, and the
+#                   manual in full. Travels in `key`, LAST, on every call:
+#                   elevation is per call because MCP has no session and there
+#                   is no `su` that persists.
+#   auth_code       minted on the page, minutes to live, spent once — the
+#                   second factor on every MODIFICATION of what exists.
+#   ui password     the administration UI, and NO TOOL ASKS FOR IT. That is
+#                   the shape of "what is catastrophic has no tool": approving
+#                   is not gated from a chat, it is out of reach of one.
+#
+# The ladder is FLAT, and it fits in a line: creating takes the admin code,
+# modifying takes the admin code plus a one-time code, proposing takes the
+# reference code. A criterion with a case list grows exceptions that rot; this
+# one has exactly one, declared — someone else's task, which reopens as a new
+# task if it is closed wrong.
+
+
+def check_admin(registry: Registry, project: str, key: str) -> Project:
+    """The admin gate: a reference code that resolves AND the admin code of
+    that same line.
+
+    One refusal for both halves. A message that told them apart would confirm
+    a valid reference code to whoever holds only that — and the pair is worth
+    more than its halves, which is the entire reason there are two."""
+    try:
+        prj = registry.project(project)
+    except RulesFault:
+        # A registry that will not parse is not a wrong password: swallowing it
+        # into ERR_MAINT would hide a broken file behind "wrong code", and
+        # somebody would spend an evening retyping credentials at it.
+        raise
+    except RulesError:
+        raise RulesError(ERR_MAINT) from None
+    if not secrets.compare_digest((key or "").strip(), prj.admin_code):
+        raise RulesError(ERR_MAINT)
+    return prj
+
+
+def check_auth_code(prj: Project, auth_code: str, action: str) -> int:
+    """The second factor, SPENT — and it must be called inside the gesture's
+    own transaction.
+
+    That is the whole of "burned in the same transaction as the SUCCEEDED
+    gesture": the burn is written first and rolls back with everything else if
+    the gesture is refused, so a typo further down the call does not cost a
+    trip to the page. A code still inside its minutes and already spent is
+    refused too — expiry alone would leave a spent code working, and the
+    database says so as well (trg_auth_code_spent_once), because a guarantee
+    that lives only in the function that checks it is a habit.
+
+    The refusals say which of the four it was, on purpose: whoever gets here
+    already holds the admin code, so there is nothing left to reveal, and the
+    difference between "expired" and "already spent" is the difference between
+    minting another and going to look for what spent it."""
+    given = (auth_code or "").strip()
+    if not given:
+        raise RulesError(ERR_AUTH_CODE)
+    row = prj.cx.execute(
+        "SELECT code_id, expires_at, spent_at, spent_action FROM auth_code "
+        "WHERE code_hash=?", (_key_hash(given),)).fetchone()
+    if row is None:
+        live = prj.cx.execute("SELECT COUNT(*) FROM auth_code WHERE spent_at IS NULL "
+                              "AND expires_at > ?", (_now(),)).fetchone()[0]
+        raise RulesError(
+            f"that auth_code is not one of this project's. {live} live right now — "
+            "mint one on the maintenance page, and check you are on the right project: "
+            "a code belongs to the database it was minted in, by construction.")
+    if row["spent_at"]:
+        raise RulesError(
+            f"that auth_code was already spent on {row['spent_at']}, by "
+            f"{row['spent_action']!r}. One code, one gesture: mint another.")
+    if row["expires_at"] <= _now():
+        raise RulesError(
+            f"that auth_code expired on {row['expires_at']}. They live minutes on "
+            "purpose — mint another, and mint it for the gesture you are about to "
+            "make rather than in advance.")
+    prj.cx.execute("UPDATE auth_code SET spent_at=?, spent_action=? WHERE code_id=?",
+                   (_now(), action, row["code_id"]))
+    return row["code_id"]
+
+
+def check_web(given: str, expected: str) -> bool:
+    """The administration UI's password, compared in constant time.
+
+    The expected value is HANDED IN and not read from the environment here:
+    every secret of this service is read in one place, server.py, and a layer
+    that reached for its own configuration would be a second place where it is
+    decided. No tool calls this — and `test_surface` fixes that as a case."""
+    return bool(expected) and secrets.compare_digest((given or "").strip(),
+                                                     (expected or "").strip())
+
+
+# =====================================================================
 # One project, one file
 # =====================================================================
 
@@ -1553,7 +1683,7 @@ class Project:
     def __init__(self, name: str, root: str = DB_ROOT, *,
                  reference_code: str = "", admin_code: str = "",
                  provisional_days: int = DEFAULT_PROVISIONAL_DAYS,
-                 pending_cap: int = DEFAULT_PENDING_CAP) -> None:
+                 auth_code_minutes: int = DEFAULT_AUTH_CODE_MINUTES) -> None:
         self.name = (name or "").strip()
         self.slug = _slug(self.name)
         self.reference_code = reference_code
@@ -1561,7 +1691,7 @@ class Project:
         self.dir = os.path.join(root, self.name)
         self.path = os.path.join(self.dir, self.slug + ".db")
         self.provisional_days = int(provisional_days or DEFAULT_PROVISIONAL_DAYS)
-        self.pending_cap = int(pending_cap or DEFAULT_PENDING_CAP)
+        self.auth_code_minutes = int(auth_code_minutes or DEFAULT_AUTH_CODE_MINUTES)
         # Re-entrant, and it must exist before anything else: every public
         # method acquires it (see _serialised).
         self._lock = threading.RLock()
@@ -1636,6 +1766,79 @@ class Project:
 
     def close(self) -> None:
         self.cx.close()
+
+    @contextlib.contextmanager
+    def _transaction(self):
+        """BEGIN IMMEDIATE … COMMIT, and ROLLBACK on any refusal.
+
+        Private, and that is not tidiness: `_serialised` wraps only the public
+        names, and a context manager it wrapped would take the lock while the
+        generator was being BUILT and drop it before the body ran — the exact
+        opposite of what it looks like. Every caller is a public method that
+        already holds the lock.
+
+        IMMEDIATE and not DEFERRED because the write lock is taken at BEGIN:
+        a transaction that only discovers the database is busy halfway through
+        is a transaction that fails after having decided something."""
+        self.cx.execute("BEGIN IMMEDIATE")
+        try:
+            yield self.cx
+        except BaseException:
+            self.cx.execute("ROLLBACK")
+            raise
+        self.cx.execute("COMMIT")
+
+    # ---------- the one-time codes ----------
+
+    def mint_auth_code(self, minutes: int = 0) -> dict:
+        """Mint one. The page's gesture, behind the UI password, on the project
+        it has open — which is why a code belongs to its project by
+        CONSTRUCTION rather than by a check: it is a row in that database.
+
+        The code is handed back ONCE, here. What is stored is its hash, so a
+        registry file, a backup or a stolen database yields nothing that can be
+        spent — and the spent rows are left where they are, because they are
+        the audit of every structural gesture this project has had."""
+        minutes = int(minutes or self.auth_code_minutes)
+        if minutes < 1:
+            raise RulesError("an auth_code that lives less than a minute is a code "
+                             "nobody can carry from the page to a chat")
+        code = _gen(AUTH_CODE_LEN)
+        expires = _plus_minutes(minutes)
+        self.cx.execute(
+            "INSERT INTO auth_code (code_hash, minted_at, expires_at) VALUES (?,?,?)",
+            (_key_hash(code), _now(), expires))
+        return {"auth_code": code, "expires_at": expires, "minutes": minutes,
+                "project": self.name,
+                "note": "shown once, and once is all it is good for: it is spent by the "
+                        "gesture that succeeds, and a refused gesture rolls it back."}
+
+    def auth_codes(self) -> dict:
+        """What the maintenance page shows: the live ones with their expiry,
+        and the spent ones with what spent them."""
+        now = _now()
+        live = [dict(r) for r in self.cx.execute(
+            "SELECT code_id, minted_at, expires_at FROM auth_code "
+            "WHERE spent_at IS NULL AND expires_at > ? ORDER BY expires_at", (now,))]
+        spent = [dict(r) for r in self.cx.execute(
+            "SELECT code_id, minted_at, spent_at, spent_action FROM auth_code "
+            "WHERE spent_at IS NOT NULL ORDER BY spent_at DESC LIMIT 50")]
+        return {"live": live, "spent": spent, "count_live": len(live),
+                "default_minutes": self.auth_code_minutes}
+
+    def queue_cap(self) -> int | None:
+        """The proposal ceiling, and it is POLICY OF THE PROJECT: NULL means
+        unlimited, 0 means the queue is closed, N means N.
+
+        It used to be two knobs in the container's template — PENDING_CAP for
+        whoever writes and WEB_ACTION_CAP for whoever reads — which the batch
+        page's own contract forced to be equal (unticked means denied, so a
+        queue of 100 has to be approved in one go). Two numbers that must
+        agree are one number, and it belongs to the project rather than to the
+        container: the container is multi-tenant."""
+        row = self.cx.execute("SELECT queue_cap FROM project_profile "
+                              "WHERE profile_id=1").fetchone()
+        return None if row is None else row["queue_cap"]
 
     def _record_approval(self, project: str, digest: str, ids: list[str]) -> None:
         """One row per approval, written by the lifecycle. What it records is
@@ -3046,11 +3249,12 @@ class Project:
             pend = self.cx.execute(
                 "SELECT title FROM rules WHERE project=? AND status='proposed' "
                 "ORDER BY id", (p,)).fetchall()
-            if len(pend) >= self.pending_cap:
+            cap = self.queue_cap()
+            if cap is not None and len(pend) >= cap:
                 queue = " · ".join(r[0] for r in pend)
                 raise RulesError(
                     f"there are already {len(pend)} pending proposals in this project "
-                    f"and the ceiling is {self.pending_cap}: wait for them to be "
+                    f"and the ceiling is {cap}: wait for them to be "
                     f"approved or denied before filing more. In the queue: {queue}")
             # The number is read and taken in one go, and
             # UNIQUE(project, domain, seq) is the net underneath.

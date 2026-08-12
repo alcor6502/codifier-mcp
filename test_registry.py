@@ -119,6 +119,22 @@ def yields(name, gesture, want):
     equals(name, got, want)
 
 
+def gesture(name, fn):
+    """A gesture that must go THROUGH. The mirror of `refused`, and it exists
+    for the same reason `yields` does: a guard taken away must come back as a
+    red line, and a bare call in the body of this file comes back as a
+    traceback that stops every case after it."""
+    global _passed
+    try:
+        fn()
+    except Exception as exc:                       # noqa: BLE001
+        _failed.append(f"{name}: refused — {exc}")
+        print(f"  FAIL  {name}: refused — {str(exc)[:70]}")
+        return
+    _passed += 1
+    print(f"  ok    {name}")
+
+
 def says(name, ears, expect):
     global _passed
     hit = [ln for ln in ears.lines if expect.lower() in ln.lower()]
@@ -382,6 +398,137 @@ cx.close()
 reg = rules.Registry(r)
 yields("the trigger somebody dropped comes back, and it is named",
        reg.repaired, {"Financial Portfolio": [rules.TRIGGERS[0]]})
+reg.close()
+
+# =====================================================================
+print("\n— THE ADMIN GATE: A PAIR, AND ONE ANSWER FOR BOTH HALVES —")
+r = _root()
+_write(r, _line())
+reg = rules.Registry(r)
+yields("the pair opens administration",
+       lambda: rules.check_admin(reg, REF, ADM).name, "Financial Portfolio")
+bad_key = bad_code = ""
+try:
+    rules.check_admin(reg, REF, "wrongadmincode1")
+except rules.RulesError as exc:
+    bad_key = str(exc)
+try:
+    rules.check_admin(reg, "wrongrefcode001", ADM)
+except rules.RulesError as exc:
+    bad_code = str(exc)
+equals("a wrong admin code and a wrong project code get the SAME answer",
+       (bad_key == bad_code, "admin code" in bad_key), (True, True))
+refused("an admin code left empty is not a default",
+        lambda: rules.check_admin(reg, REF, ""), "admin code")
+# A registry that will not parse must NOT come back as "wrong code": that is
+# how an evening goes into retyping credentials at a broken file.
+_write(r, "Financial Portfolio | broken\n")
+refused("a broken registry is not a wrong password, and says so",
+        lambda: rules.check_admin(reg, REF, ADM), "line 1")
+_write(r, _line())
+
+# =====================================================================
+print("\n— THE ONE-TIME CODE: MINTED, SPENT ONCE, ROLLED BACK ON A REFUSAL —")
+prj = reg.project(REF)
+minted = prj.mint_auth_code()
+equals("a code is minted with the default life", minted["minutes"],
+       rules.DEFAULT_AUTH_CODE_MINUTES)
+equals("what is stored is the hash, never the code",
+       prj.cx.execute("SELECT COUNT(*) FROM auth_code WHERE code_hash=?",
+                      (minted["auth_code"],)).fetchone()[0], 0)
+yields("and the page can see it live", lambda: prj.auth_codes()["count_live"], 1)
+refused("a code that would not survive the walk from page to chat is refused",
+        lambda: prj.mint_auth_code(0.5), "less than a minute")
+
+# ADMIN_AUTH_CODE_DURATION is read once, at boot, in server.py — like every
+# other piece of configuration — and travels down. The page shows it, so the
+# person minting knows how long they have.
+_r2 = _root()
+_write(_r2, _line())
+_reg2 = rules.Registry(_r2, auth_code_minutes=17)
+yields("the life of a code is decided at boot, not by a constant in here",
+       lambda: _reg2.project(REF).mint_auth_code()["minutes"], 17)
+yields("and the maintenance page is told what it will hand out",
+       lambda: _reg2.project(REF).auth_codes()["default_minutes"], 17)
+_reg2.close()
+
+refused("no code at all is answered with where to get one",
+        lambda: rules.check_auth_code(prj, "", "rules_retire"), "maintenance page")
+refused("a code from nowhere is refused, and the count of live ones is given",
+        lambda: rules.check_auth_code(prj, "notacodeatall", "rules_retire"),
+        "not one of this project's")
+
+# The refusal rolls back: an error further down the gesture must not cost a
+# trip to the page. This is the whole meaning of "burned in the same
+# transaction as the SUCCEEDED gesture".
+
+
+def _gesture_that_fails():
+    with prj._transaction():
+        rules.check_auth_code(prj, minted["auth_code"], "rules_retire")
+        raise rules.RulesError("the gesture itself is refused")
+
+
+def _gesture_that_works():
+    with prj._transaction():
+        rules.check_auth_code(prj, minted["auth_code"], "rules_retire")
+
+
+refused("the burn happens first, and the gesture after it can still refuse",
+        _gesture_that_fails, "the gesture itself is refused")
+yields("a gesture refused after the burn leaves the code alive",
+       lambda: prj.auth_codes()["count_live"], 1)
+
+gesture("the gesture that succeeds spends it", _gesture_that_works)
+yields("and the code leaves the live ones", lambda: prj.auth_codes()["count_live"], 0)
+equals("the spent row is the audit: what spent it, and when",
+       [(r["spent_action"], bool(r["spent_at"])) for r in prj.auth_codes()["spent"]],
+       [("rules_retire", True)])
+# The expected words are the FUNCTION'S, not the trigger's. An injection
+# proved why: with the check taken out of check_auth_code the case stayed
+# green, because the schema refused the second burn on its own and its message
+# also says "already spent". Two guarantees are wanted here — the file is
+# readable from the share — but a case has to name which of them it is
+# measuring, or removing one of the two is free.
+refused("a code spent is nothing to the gate, even inside its minutes",
+        lambda: rules.check_auth_code(prj, minted["auth_code"], "rules_retire"),
+        "one code, one gesture")
+
+# Expiry is not the same refusal as spending, and the difference is the cure:
+# one says mint another, the other says go and find what spent it.
+stale = prj.mint_auth_code(1)
+prj.cx.execute("UPDATE auth_code SET expires_at='2020-01-01T00:00:00Z' "
+               "WHERE spent_at IS NULL")
+refused("a code past its minutes is refused, and the date is in the message",
+        lambda: rules.check_auth_code(prj, stale["auth_code"], "rules_retire"),
+        "expired on 2020-01-01")
+
+# The one-time-ness lives in the DATABASE too, not only in the function that
+# checks it: this file is readable from the share.
+refused("a second burn is refused by the schema, function or no function",
+        lambda: prj.cx.execute(
+            "UPDATE auth_code SET spent_at=?, spent_action='by hand' "
+            "WHERE spent_at IS NOT NULL", (rules._now(),)),
+        "already spent")
+
+# =====================================================================
+print("\n— THE UI PASSWORD OPENS NO TOOL, AND NO EMPTY DOOR —")
+equals("the password compares equal to itself",
+       rules.check_web("a long password", "a long password"), True)
+equals("and to nothing else", rules.check_web("a long passworD", "a long password"),
+       False)
+equals("a password that was never configured opens NOTHING, empty included",
+       (rules.check_web("", ""), rules.check_web("anything", "")), (False, False))
+
+# =====================================================================
+print("\n— THE CEILING IS THE PROJECT'S, NOT THE CONTAINER'S —")
+equals("a project with no profile row yet has no ceiling", prj.queue_cap(), None)
+prj.cx.execute("INSERT INTO project_profile (profile_id,queue_cap,updated_at) "
+               "VALUES (1,?,?)", (3, rules._now()))
+yields("and once written, the ceiling is read from the project", prj.queue_cap, 3)
+prj.cx.execute("UPDATE project_profile SET queue_cap=0 WHERE profile_id=1")
+yields("zero is a closed queue, and it is not the same as no ceiling",
+       prj.queue_cap, 0)
 reg.close()
 
 # =====================================================================

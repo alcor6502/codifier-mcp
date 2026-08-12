@@ -47,7 +47,7 @@ import sys
 import web
 from mcp_common_engine import (RESULTS, SKIP, check, cidrs_from_env,
                                describe_cidrs, is_placeholder)
-from rules import DB_ROOT
+from rules import DB_ROOT, DEFAULT_AUTH_CODE_MINUTES
 
 # `import web` and not `from web import ...`: this file must keep running on an
 # image where the web stack is broken, and web.py earns that by importing
@@ -162,13 +162,19 @@ def c_approval():
     if days:
         if not days.isdigit() or int(days) < 1:
             raise RuntimeError(f"PROVISIONAL_DAYS={days!r}: a positive whole number of days")
-    cap = os.environ.get("PENDING_CAP", "").strip()
-    if cap:
-        if not cap.isdigit() or int(cap) < 1:
-            raise RuntimeError(f"PENDING_CAP={cap!r}: a positive whole number of "
-                               "pending proposals")
-    return (f"provisional {days or 90} days · pending cap {cap or 5} · "
-            "the UI approves, behind the master")
+    # PENDING_CAP is gone: the proposal ceiling is `queue_cap`, policy of each
+    # project, because the container is multi-tenant. What is validated here in
+    # its place is the life of a one-time auth code — the same reason, at the
+    # same edge: a bad number caught at boot is a line with a name on it, and
+    # caught at the first minting it is a traceback in a browser.
+    mins = os.environ.get("ADMIN_AUTH_CODE_DURATION", "").strip()
+    if mins:
+        if not mins.isdigit() or int(mins) < 1:
+            raise RuntimeError(f"ADMIN_AUTH_CODE_DURATION={mins!r}: a positive whole "
+                               "number of minutes")
+    return (f"provisional {days or 90} days · auth codes live "
+            f"{mins or DEFAULT_AUTH_CODE_MINUTES} minutes · the UI approves, behind "
+            "its password")
 
 
 @check("web")
@@ -192,13 +198,13 @@ def c_web():
     And a UI on the MCP's own port is a service that comes up half-started:
     whichever of the two binds second dies, and the log line above it has
     already said everything is fine."""
-    v = os.environ.get("WEB_MASTER_CODE", "")
+    v = os.environ.get("WEB_UI_PASSWORD", "")
     if not v or is_placeholder(v):
-        raise RuntimeError("WEB_MASTER_CODE missing or still a placeholder: the "
-                           "administration UI is what approves rules, and without a master "
-                           "its pages would be open to whoever reaches the port")
+        raise RuntimeError("WEB_UI_PASSWORD missing or still a placeholder: the "
+                           "administration UI is what approves rules, and without a "
+                           "password its pages would be open to whoever reaches the port")
     if len(v) < 12:
-        raise RuntimeError(f"WEB_MASTER_CODE is {len(v)} characters: too short (>=12)")
+        raise RuntimeError(f"WEB_UI_PASSWORD is {len(v)} characters: too short (>=12)")
     try:
         port = web.port_from_env()
     except ValueError as e:

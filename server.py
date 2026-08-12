@@ -37,10 +37,12 @@ Configuration, all through environment variables:
                           optional with a working default in the code
   BACKUP_DIR              VACUUM INTO copies (default: <db dir>/backup)
   PROVISIONAL_DAYS        how long an approved rule lives (default 90)
-  PENDING_CAP             pending proposals a project may hold (default 5).
-                          Born optional with a working default in the code:
-                          Unraid does not propagate new variables to
-                          containers already installed
+  ADMIN_AUTH_CODE_DURATION  how long a one-time auth code lives, in minutes
+                          (default 5). Born optional with a working default in
+                          the code: Unraid does not propagate new variables to
+                          containers already installed. The proposal ceiling is
+                          NOT here any more — it is `queue_cap`, policy of each
+                          project, because this container is multi-tenant
   BASE_URL                public URL (e.g. https://host.tailnet.ts.net)
   GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET / ALLOWED_GITHUB_LOGIN / JWT_SIGNING_KEY
   PORT                    default 3001
@@ -57,12 +59,13 @@ Configuration, all through environment variables:
   WEB_PORT                the port the administration UI listens on (default
                           9443). Resolved in web.port_from_env so the service
                           and the preflight cannot disagree about it
-  WEB_MASTER_CODE         the master of the administration UI — the root of
-                          the deployment: it opens every page, approves,
-                          creates projects, rekeys, backs up. It never
-                          leaves the browser: no tool carries it
-  WEB_ACTION_CAP          how many proposals the UI may approve in one action
-                          (default 5)
+  WEB_UI_PASSWORD         the password of the administration UI: it opens
+                          every page, approves, mints the one-time auth codes,
+                          backs up. It never leaves the browser — NO TOOL
+                          carries it, and that is the shape of "what is
+                          catastrophic has no tool". It was WEB_MASTER_CODE
+                          until v4.0.0: the name said a level, and the level
+                          is gone
 
 Nothing here switches the argument redaction on or off, and that is deliberate:
 a knob for it would be a knob for printing credentials into the log.
@@ -150,9 +153,13 @@ WEB_PORT = web.port_from_env()
 # handed to the web layer: a layer that read its own configuration would be a
 # second place where it is decided. The preflight has already refused a
 # missing one, a placeholder and anything under 12 characters.
-WEB_MASTER = env("WEB_MASTER_CODE")
-# Resolved in web.action_cap_from_env, once, for the reason the port is.
-WEB_ACTION_CAP = web.action_cap_from_env()
+WEB_UI_PASSWORD = env("WEB_UI_PASSWORD")
+# How long a one-time auth code lives when the maintenance page mints one.
+# Optional, with the working default in the engine — and validated at the edge
+# by the preflight, because a bad number found here is one line with a name and
+# found at the first minting is a traceback in a browser.
+ADMIN_AUTH_CODE_DURATION = int(os.environ.get("ADMIN_AUTH_CODE_DURATION")
+                               or rules.DEFAULT_AUTH_CODE_MINUTES)
 BACKUP_DIR = os.environ.get("BACKUP_DIR") or os.path.join(DB_DIR, "backup")
 # Resolved in the engine's cidrs_from_env so the service and the preflight can
 # never disagree about what the filter is.
@@ -160,7 +167,7 @@ ALLOWED_CIDRS = cidrs_from_env()
 
 registry = Registry(DB_DIR,
                     provisional_days=int(os.environ.get("PROVISIONAL_DAYS") or 90),
-                    pending_cap=int(os.environ.get("PENDING_CAP") or 5))
+                    auth_code_minutes=ADMIN_AUTH_CODE_DURATION)
 for _name, _objects in registry.repaired().items():
     log.warning("schema rebuilt at open for %s: %s — somebody had removed these objects",
                 _name, ", ".join(_objects))
@@ -987,8 +994,8 @@ async def _serve() -> None:
 
     servers = (
         uvicorn.Server(cfg(mcp.http_app(), BIND_HOST, PORT)),
-        uvicorn.Server(cfg(web.build(registry=registry, log=log, master=WEB_MASTER,
-                                     action_cap=WEB_ACTION_CAP, refusal=RulesError,
+        uvicorn.Server(cfg(web.build(registry=registry, log=log,
+                                     master=WEB_UI_PASSWORD, refusal=RulesError,
                                      backup_dir=BACKUP_DIR),
                            WEB_BIND_HOST, WEB_PORT)),
     )
