@@ -931,7 +931,7 @@ print("\n== the manual's ceilings are rendered from the engine's constants ==")
 # — silently never runs.
 import rules as _rules                                          # noqa: E402
 
-for _label, _attr, _unit in (("IDs per `rules_get`", "MAX_GET_IDS", ""),
+for _label, _attr, _unit in (("IDs per `rules_get`", "GET_IDS", ""),
                              ("body of one rule", "MAX_BODY_BYTES", " bytes"),
                              ("numbers in one domain", "MAX_SEQ", "")):
     _v = getattr(_rules, _attr, None)
@@ -1096,8 +1096,8 @@ if _REF is not None:
 # manual added tomorrow cannot be forgotten in a list nobody remembers to
 # extend. The defect has been paid once already, with reference_guide pointing
 # at a file that did not exist.
-ok(SERVED_FILES == ["reference-guide.md"],
-   "server.py serves exactly the one manual", SERVED_FILES)
+ok(SERVED_FILES == ["reference-guide-admin.md", "reference-guide.md"],
+   "server.py serves exactly the two manuals", SERVED_FILES)
 for _f in SERVED_FILES:
     ok(os.path.exists(os.path.join(HERE, _f)), f"{_f} exists in the repository")
 # And the derived set is the same set the prose checks read. If a file is
@@ -1251,12 +1251,15 @@ for var, value, why in [
     ok(re.search(rf"^ENV {var}={re.escape(value)}\s*$", DOCKERFILE, re.MULTILINE) is not None,
        f"Dockerfile: ENV {var}={value} — {why}")
 
-DOCKER_COPIES = [l for l in DOCKERFILE.splitlines() if l.startswith("COPY ")]
+# Backslash continuations joined first: a COPY spread over two lines is ONE
+# instruction to docker, and reading it as two loses whatever is on the second.
+DOCKER_COPIES = [l for l in DOCKERFILE.replace("\\\n", " ").splitlines()
+                 if l.startswith("COPY ")]
 ok(not any("*" in l for l in DOCKER_COPIES),
    "Dockerfile: no wildcard COPY — the test files do not belong in the image",
    [l for l in DOCKER_COPIES if "*" in l])
 for f in ("rules.py", "server.py", "preflight.py", "entrypoint.sh",
-          "reference-guide.md"):
+          "reference-guide.md", "reference-guide-admin.md"):
     ok(any(re.search(rf"\b{re.escape(f)}\b", l) for l in DOCKER_COPIES),
        f"Dockerfile: {f} is copied in")
 
@@ -2562,8 +2565,23 @@ ok(str(_rules.TASKS_STALE_DAYS) in GUIDE_SRC
 # And it NAMES every task tool. The witness elsewhere in this file checks the
 # other direction — that a name in the prose is still a tool — which stays
 # green on a tool the manual never mentioned at all.
-_UNDOCUMENTED = sorted(t for t in _TASK_TOOLS if t not in GUIDE_SRC)
-ok(not _UNDOCUMENTED, "the manual names every task tool", _UNDOCUMENTED)
+# Split by GATE, not lumped together, and that is the "no forward pointer"
+# decision made checkable: a working chat's manual must name every tool it can
+# call and NONE it cannot — a manual that sends the reader to a tool the reader
+# has no key for is a manual that mentions a door it cannot describe.
+_ADMIN_SRC = MANUALS.get("reference-guide-admin.md") or ""
+_WORK_TASKS = [t for t in _TASK_TOOLS if t not in WITH_KEY or t in ADMIN_IF_KEY]
+_ADMIN_TASKS = [t for t in _TASK_TOOLS if t in WITH_KEY and t not in ADMIN_IF_KEY]
+_UNDOCUMENTED = sorted(t for t in _WORK_TASKS if t not in GUIDE_SRC)
+ok(not _UNDOCUMENTED, "the work manual names every task tool a chat can call",
+   _UNDOCUMENTED)
+ok(not sorted(t for t in _ADMIN_TASKS if t not in _ADMIN_SRC),
+   "and the administration manual names the ones it cannot",
+   sorted(t for t in _ADMIN_TASKS if t not in _ADMIN_SRC))
+_LEAKED = sorted(t for t in (WITH_KEY - set(ADMIN_IF_KEY)) if t in GUIDE_SRC)
+ok(not _LEAKED,
+   "and the work manual names no administration tool: no pointer forward to a "
+   "door the reader has no key for", _LEAKED)
 
 print("\n== the web layer speaks to the engine, and never to the database ==")
 

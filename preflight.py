@@ -308,7 +308,7 @@ def c_dns():
     return f"{host} resolves"
 
 
-MANUALS = ("reference-guide.md",)
+MANUALS = ("reference-guide.md", "reference-guide-admin.md")
 
 
 @check("manuals")
