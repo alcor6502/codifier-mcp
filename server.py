@@ -744,6 +744,7 @@ async def _serve() -> None:
         uvicorn.Server(cfg(mcp.http_app(), BIND_HOST, PORT)),
         uvicorn.Server(cfg(web.build(registry=registry, log=log,
                                      master=WEB_UI_PASSWORD, refusal=RulesError,
+                                     fault=RulesFault,
                                      backup_dir=BACKUP_DIR),
                            WEB_BIND_HOST, WEB_PORT)),
     )

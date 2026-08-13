@@ -2749,8 +2749,8 @@ if _WEB_CHECK:
        "and it resolves WEB_PORT through web.port_from_env, not a second time")
     ok("web.FUNNEL_PORTS" in _WSRC,
        "and the three publishable ports are the engine's constant, not a literal list")
-    ok("WEB_MASTER_CODE" in _WSRC and "is_placeholder" in _WSRC,
-       "and it refuses a master that is missing or still a placeholder")
+    ok("WEB_UI_PASSWORD" in _WSRC and "is_placeholder" in _WSRC,
+       "and it refuses a password that is missing or still a placeholder")
 _PF_READS_PORT = [n for n in ast.walk(_PF_TREE)
                   if isinstance(n, ast.Call)
                   and ast.unparse(n.func) in ("os.environ.get", "os.getenv")
@@ -2760,37 +2760,125 @@ ok(not _PF_READS_PORT,
    "preflight.py does not read WEB_PORT on its own — it comes from web.py",
    [ast.unparse(n) for n in _PF_READS_PORT])
 
-print("\n== web.py -> rules.py: every call lands ==")
+print("\n== web.py -> rules.py: every call lands, and on the right class ==")
 
 # The SECOND seam, and it is the same class of defect as the first: a renamed
 # parameter between these two files goes unnoticed until somebody clicks. The
-# engine's own suites cannot see it — they call Registry directly — and
+# engine's own suites cannot see it — they call the engine directly — and
 # nothing in the browser would report it as anything but a 500.
-WEB_CALLS = [n for n in ast.walk(WEB_TREE)
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-             and isinstance(n.func.value, ast.Name) and n.func.value.id == "registry"]
-ok(len(WEB_CALLS) >= 3, f"{len(WEB_CALLS)} calls into the engine found in web.py")
-for call in WEB_CALLS:
-    name = call.func.attr
-    where = f"web.py line {call.lineno}"
-    if name not in METHODS:
-        ok(False, f"registry.{name} exists", where)
+#
+# Since v4.0.0 the seam has TWO sides, and telling them apart is the whole of
+# this section: `registry` is the ROUTER — one method to list what is served,
+# one to open a project by name — and everything else happens on a PROJECT.
+# Which class a call belongs to is not guessable from the method name, so the
+# file carries a convention instead: the handle a door hands back is always
+# called `prj`. That is checked here first, because every check below rests on
+# it — a handle under any other name would be an engine call nobody can
+# attribute to a class, which is the defect this section exists to catch.
+WEB_DOOR = "_open"
+
+_HANDLES = []
+for _a in ast.walk(WEB_TREE):
+    if not isinstance(_a, ast.Assign):
         continue
-    pos, kwonly, required = signature(METHODS[name])
-    given_pos = len(call.args)
-    given_kw = {k.arg for k in call.keywords if k.arg}
-    problems = []
-    if given_pos > len(pos):
-        problems.append(f"{given_pos} positional arguments for {len(pos)} parameters")
-    unknown = given_kw - set(pos) - set(kwonly)
-    if unknown:
-        problems.append(f"unknown keywords: {', '.join(sorted(unknown))}")
-    covered = set(pos[:given_pos]) | given_kw
-    missing = required - covered
-    if missing:
-        problems.append(f"missing required: {', '.join(sorted(missing))}")
-    ok(not problems, f"web.py: registry.{name}(...) matches its signature",
-       f"{where}: {'; '.join(problems)}")
+    if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+           and n.func.id == WEB_DOOR for n in ast.walk(_a.value)):
+        _HANDLES += [t.id for t in _a.targets if isinstance(t, ast.Name)]
+ok(len(_HANDLES) >= 3,
+   f"web.py opens projects through {WEB_DOOR}(): {len(_HANDLES)} bindings")
+ok(set(_HANDLES) == {"prj"},
+   "and every one of them is bound to the name `prj` — one name for the handle, "
+   "so a call on it can be attributed to a class", sorted(set(_HANDLES)))
+# And the door itself is the router's, not a second way in: a `_open` that
+# built a Project by hand would leave the registry's re-read out of the loop.
+_DOOR_FN = [n for n in ast.walk(WEB_TREE)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name == WEB_DOOR]
+ok(len(_DOOR_FN) == 1, f"web.py defines {WEB_DOOR}() exactly once", len(_DOOR_FN))
+if _DOOR_FN:
+    ok("registry.by_name" in ast.unparse(_DOOR_FN[0]),
+       "and it goes through registry.by_name(): the router re-reads its file, "
+       "so a project served a minute ago is not served from a closure")
+
+# THE FAULT IS CAUGHT FIRST, EVERYWHERE. RulesFault is a SUBCLASS of
+# RulesError, so a single `except refusal` swallows both — and a registry that
+# does not parse, or a database from another generation, comes back to the
+# person as `no project called that`, which is the sentence for a typo. Every
+# handler that catches here has to name the fault first and re-raise it, in the
+# same order make_tool uses on the MCP side. Counted, because a block whose
+# receiver is spelt differently would go green on a file that catches nothing.
+_CATCHES = [n for n in ast.walk(WEB_TREE) if isinstance(n, ast.Try)
+            and any(isinstance(h.type, ast.Name) and h.type.id == "refusal"
+                    for h in n.handlers)]
+ok(len(_CATCHES) >= 5, f"{len(_CATCHES)} places in web.py catch a refusal")
+for _t in _CATCHES:
+    _names = [h.type.id for h in _t.handlers if isinstance(h.type, ast.Name)]
+    _first = _t.handlers[0]
+    ok(_names[:2] == ["fault", "refusal"]
+       and any(isinstance(x, ast.Raise) for x in _first.body),
+       f"web.py line {_t.lineno}: the fault is caught FIRST and re-raised — "
+       f"RulesFault is a RulesError, and a broken registry must not read as a "
+       f"missing project", _names)
+# And build() is HANDED both classes: deducing either one here would be this
+# file deciding what the engine means by a fault.
+_BUILD_ARGS = {a.arg for a in (_BUILD.args.posonlyargs + _BUILD.args.args
+                               + _BUILD.args.kwonlyargs)} if _BUILD else set()
+ok({"refusal", "fault"} <= _BUILD_ARGS,
+   "and build() is handed both classes, never guessing which is which",
+   sorted(_BUILD_ARGS))
+_BUILD_CALL = [n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
+               and ast.unparse(n.func) == "web.build"]
+ok(bool(_BUILD_CALL) and {k.arg for k in _BUILD_CALL[0].keywords} >= {"refusal", "fault"},
+   "and server.py hands them over, both",
+   sorted(k.arg for k in _BUILD_CALL[0].keywords) if _BUILD_CALL else "no call")
+
+
+def _seam(calls, table, label):
+    """Every call in `calls` exists in `table` with a compatible signature."""
+    for call in calls:
+        name = call.func.attr
+        where = f"web.py line {call.lineno}"
+        if name not in table:
+            ok(False, f"{label}.{name} exists", where)
+            continue
+        pos, kwonly, required = signature(table[name])
+        given_pos = len(call.args)
+        given_kw = {k.arg for k in call.keywords if k.arg}
+        problems = []
+        if given_pos > len(pos):
+            problems.append(f"{given_pos} positional arguments for {len(pos)} parameters")
+        unknown = given_kw - set(pos) - set(kwonly)
+        if unknown:
+            problems.append(f"unknown keywords: {', '.join(sorted(unknown))}")
+        covered = set(pos[:given_pos]) | given_kw
+        missing = required - covered
+        if missing:
+            problems.append(f"missing required: {', '.join(sorted(missing))}")
+        ok(not problems, f"web.py: {label}.{name}(...) matches its signature",
+           f"{where}: {'; '.join(problems)}")
+
+
+def _calls_on(name: str) -> list:
+    return [n for n in ast.walk(WEB_TREE)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and isinstance(n.func.value, ast.Name) and n.func.value.id == name]
+
+
+ROUTER_WEB, PROJECT_WEB = _calls_on("registry"), _calls_on("prj")
+ok(len(ROUTER_WEB) >= 2, f"{len(ROUTER_WEB)} calls into the router from web.py")
+ok(len(PROJECT_WEB) >= 10, f"{len(PROJECT_WEB)} calls into a project from web.py")
+_seam(ROUTER_WEB, ROUTES, "registry")
+_seam(PROJECT_WEB, METHODS, "prj")
+
+# THE DEAD, BY NAME, on this side too. The equality of the live above cannot
+# see a resurrection that lands on a method the engine still has under another
+# class, and these seven are the ones this page used to call: five that the
+# declarative registry took away with the deployment page, and two that folded
+# into calls the engine now answers in one.
+WEB_DEAD = {"create_project", "rekey_project", "approve", "deny", "pending",
+            "history", "compare"}
+_back = {c.func.attr for c in ROUTER_WEB + PROJECT_WEB} & WEB_DEAD
+ok(not _back, "and not one of the methods that went is called again", sorted(_back))
 
 print("\n== the lot page: what you saw, what you ticked, and one master ==")
 
@@ -2809,39 +2897,51 @@ ok(re.search(r"type=[\"']hidden[\"'][^>]*name=[\"']digest[\"']"
              r"|name=[\"']digest[\"'][^>]*type=[\"']hidden[\"']", WEB_SRC) is not None,
    "the digest travels as a hidden field of the form")
 
-# The ORDER inside the action, and it is the whole of "one round": the ones
-# left unticked are DENIED first, and only then is what remains approved.
-# Approving first would approve the whole pending batch — the engine's
-# approve() takes no list — which is the unticked ones let in by the very
-# gesture that meant to keep them out. Read from the AST because the two calls
-# are three lines apart and swapping them looks like tidying.
+# ONE TURN, ONE CALL. The page used to deny the unticked and then approve the
+# rest — two writes, in an order that mattered — and v4.0.0 folded them into
+# `decide()`, which records the yes and the no as a single decision. What is
+# pinned here is that the page did not keep half of the old dance: a second
+# engine call in this handler would be a write outside the decision, and the
+# corpus would hold a verdict the decision does not name.
 _ACT = _WEB_FUNCS.get("batch_action")
 ok(_ACT is not None, "web.py defines the lot page's action")
 if _ACT is not None:
-    # By LINE, not by ast.walk's order, which is breadth-first and had these
-    # two the wrong way round while the code was right — a check that reports
-    # the order of a tree traversal as the order of the source is a check that
-    # cannot see the defect it exists for.
     _seq = [n.func.attr for n in sorted(
         (n for n in ast.walk(_ACT)
          if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-         and isinstance(n.func.value, ast.Name) and n.func.value.id == "registry"
-         and n.func.attr in ("deny", "approve")),
+         and isinstance(n.func.value, ast.Name) and n.func.value.id == "prj"),
         key=lambda n: (n.lineno, n.col_offset))]
-    ok(_seq == ["deny", "approve"],
-       "and it denies the unticked BEFORE approving the rest: approve() takes "
-       "the whole batch, so the other order lets in exactly what was refused",
-       _seq)
+    ok(_seq == ["decide"],
+       "and the lot is decided in exactly ONE call: approving and denying are "
+       "the same gesture, so a page that made two of them could record half of "
+       "what happened", _seq)
 
-# The CEILING is a knob of the template with a default in the code, resolved
-# once like the port, and refused at the edge rather than at the click.
-ok(getattr(__import__("web"), "DEFAULT_ACTION_CAP", None) is not None,
-   "web.py declares the per-action ceiling's default")
-ok(hasattr(__import__("web"), "action_cap_from_env"),
-   "and resolves it in one expression, for the preflight to share")
-if _WEB_CHECK:
-    ok("web.action_cap_from_env" in ast.unparse(_WEB_CHECK[0]),
-       "and the preflight validates it at the edge, like the port")
+# The CEILING has no home in this file any anymore, and that is the check: it is
+# `queue_cap`, policy of the PROJECT, asked of the project the page already
+# holds. A default here would be a container-wide opinion in a multi-tenant
+# container — and the two knobs that used to carry it, which this page's own
+# contract forced to be equal, are gone from the template with it.
+_WEBMOD_CAP = __import__("web")
+ok(getattr(_WEBMOD_CAP, "DEFAULT_ACTION_CAP", None) is None
+   and not hasattr(_WEBMOD_CAP, "action_cap_from_env"),
+   "web.py declares no ceiling of its own: the ceiling belongs to the project")
+_CAP_ENV = sorted({n.args[0].value for n in ast.walk(WEB_TREE)
+                   if isinstance(n, ast.Call)
+                   and ast.unparse(n.func) in ("os.environ.get", "os.getenv")
+                   and n.args and isinstance(n.args[0], ast.Constant)
+                   and n.args[0].value in ("PENDING_CAP", "WEB_ACTION_CAP")}
+                  | {n.args[0].value for n in ast.walk(_PF_TREE)
+                     if isinstance(n, ast.Call)
+                     and ast.unparse(n.func) in ("os.environ.get", "os.getenv")
+                     and n.args and isinstance(n.args[0], ast.Constant)
+                     and n.args[0].value in ("PENDING_CAP", "WEB_ACTION_CAP")})
+ok(not _CAP_ENV,
+   "and neither it nor the preflight reads a ceiling from the environment: "
+   "those two knobs left the template when they became one number", _CAP_ENV)
+_CAP_FN = _WEB_FUNCS.get("_cap")
+ok(_CAP_FN is not None and "prj.queue_cap()" in ast.unparse(_CAP_FN),
+   "and the one expression that resolves it asks the project",
+   ast.unparse(_CAP_FN)[:80] if _CAP_FN is not None else "absent")
 
 print("\n== the consultation reads, and only reads ==")
 
@@ -2849,19 +2949,30 @@ print("\n== the consultation reads, and only reads ==")
 # Naming the METHOD and not the route is the point: a page that quietly built
 # its own answer instead of asking the engine would be a second reading of the
 # corpus, and two readings of a corpus disagree.
-for _m, _what in (("list_rules", "the rules in force for a consumer"),
-                  ("history", "a rule's history"),
-                  ("compare", "the diff between two of its versions"),
-                  ("pending", "the pendings and the expiring"),
-                  ("status", "the state of the registry")):
-    ok(any(n.func.attr == _m for n in WEB_CALLS),
-       f"the UI serves {_what} from registry.{_m}()")
+for _m, _what in (("project_info", "the living structure of a project"),
+                  ("list_rules", "the rules in force for a consumer"),
+                  ("get_rules", "a rule with its dated history"),
+                  ("batch", "the lot as it is now"),
+                  ("decide", "one turn of the lot page"),
+                  ("renew", "another term for a rule about to expire"),
+                  ("promote", "a rule made permanent"),
+                  ("status", "the state of the project, the retired included"),
+                  ("queue_cap", "the ceiling on one action"),
+                  ("mint_auth_code", "a one-time code, minted"),
+                  ("auth_codes", "the live codes and the spent ones"),
+                  ("backup", "a quiescent copy of one project")):
+    ok(any(n.func.attr == _m for n in PROJECT_WEB),
+       f"the UI serves {_what} from prj.{_m}()")
+ok(any(n.func.attr == "projects" for n in ROUTER_WEB),
+   "and the menu of what is served from registry.projects()")
 
-# The brief LEADS the list, and the legend travels with it: that is the shape
-# rules_list promises, and a page that dropped either would be showing a
-# consumer something different from what its chat reads.
+# The brief LEADS the list: that is the shape rules_list promises, and a page
+# that dropped it would be showing a consumer something different from what
+# its chat reads. The legend of the domains lives on the project page now,
+# where `project_info` puts it — with the gloss and the count, not as a bare
+# mapping the page has to know how to read.
 ok("brief" in WEB_SRC, "and the rules page carries the brief, as rules_list does")
-ok("domains" in WEB_SRC, "and the legend of the domains present")
+ok("description" in WEB_SRC, "and the gloss of each live domain")
 
 # Every route is GET except the three that act, and those three are the whole
 # of what this UI writes. A read page that answered POST would be a door
@@ -2877,16 +2988,23 @@ for _n in ast.walk(WEB_TREE):
         _ROUTES.append((_path, _meth, ast.unparse(_n.args[1]) if len(_n.args) > 1 else "?"))
 ok(bool(_ROUTES), f"web.py declares its routes explicitly: {len(_ROUTES)}")
 _POSTS = sorted(r for r in _ROUTES if "POST" in r[1])
-ok([(r[0], r[2]) for r in _POSTS] == [("/admin/create", "admin_create"),
-                                      ("/admin/rekey", "admin_rekey"),
-                                      ("/login", "login"), ("/logout", "logout"),
-                                      ("/maintenance/backup", "maintenance_backup"),
+ok([(r[0], r[2]) for r in _POSTS] == [("/login", "login"), ("/logout", "logout"),
+                                      ("/p/{project}/backup", "project_backup"),
                                       ("/p/{project}/batch", "batch_action"),
-                                      ("/p/{project}/pending", "pending_action")],
-   "and exactly seven of them take POST: the door, the exit, and the five "
-   "actions — the lot, renewal/promotion, the two master operations, and the "
-   "backup, which is on maintenance because it handles no secret",
+                                      ("/p/{project}/codes", "codes_mint"),
+                                      ("/p/{project}/renewals", "renewals_action")],
+   "and exactly six of them take POST: the door, the exit, and the four "
+   "gestures — the lot, renewal/promotion, minting a one-time code, and the "
+   "backup, which asks for no master because it handles no secret. Creating a "
+   "project and rekeying it are NOT here: a project is a line in a file now",
    [(r[0], r[2]) for r in _POSTS])
+# Every writing route is UNDER a project, and that is the shape of "a project
+# is a database": a gesture that named no project would be a gesture on all of
+# them, and this container is multi-tenant.
+ok(all(r[0].startswith("/p/{project}/") for r in _POSTS
+       if r[2] not in ("login", "logout")),
+   "and every gesture names the project it acts on, in its path",
+   [r[0] for r in _POSTS])
 ok(all(r[1] in (("GET",), ("POST",)) for r in _ROUTES),
    "and no route answers both — a page that reads and writes at one address is "
    "a page whose method is the only thing between the two",
@@ -2951,19 +3069,36 @@ ok(set(NO_SESSION_ON_PURPOSE) <= set(_ENDPOINTS),
    sorted(set(NO_SESSION_ON_PURPOSE) - set(_ENDPOINTS)))
 
 # And the writing ones behind the master as well, retyped for the action.
+#
+# ⚠ The receiver is `prj` and not `registry`, and that one word is the whole
+# check: since v4.0.0 every write happens on a Project, so a set derived from
+# calls on `registry` would have come back EMPTY — no handler writing, no
+# handler to guard, and this whole block green with nothing to say. A check
+# that stops counting what it watches is the one kind that fails silently.
+def _engine_reached(fn) -> set[str]:
+    return {n.func.attr for n in ast.walk(fn)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and isinstance(n.func.value, ast.Name) and n.func.value.id == "prj"}
+
+
+_GUARDED = 0
 for _name, _fn in _BUILD_FUNCS.items():
-    _reached = {n.func.attr for n in ast.walk(_fn)
-                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                and isinstance(n.func.value, ast.Name) and n.func.value.id == "registry"}
-    _writes = _reached & MUTATING
+    _writes = _engine_reached(_fn) & MUTATING
     if not _writes:
         continue
+    _GUARDED += 1
     ok(_reaches(_name, "_session_ok"),
        f"{_name} writes ({', '.join(sorted(_writes))}) and is behind the session")
     ok(any(ast.unparse(n.func) == "secrets.compare_digest" for n in ast.walk(_fn)
            if isinstance(n, ast.Call)),
        f"{_name} writes and retypes the master — a session alone is a browser "
        f"left open on the iPad")
+# And the block COUNTS what it guarded. Without this line the loop above is
+# green on a file where nothing writes at all, which is exactly what it looked
+# like the moment the writes moved from one class to another.
+ok(_GUARDED >= 3,
+   f"{_GUARDED} writing handlers found and guarded: the lot, the renewals and "
+   f"the minting", _GUARDED)
 
 # And the mirror image, because the interesting half of a rule is its
 # exceptions. `backup` is NOT in MUTATING — VACUUM INTO produces a file and
@@ -2973,11 +3108,11 @@ for _name, _fn in _BUILD_FUNCS.items():
 # with its reason, and the day somebody puts the master back the suite says so
 # and the decision gets taken again instead of drifting.
 NO_MASTER_ON_PURPOSE = {
-    "maintenance_backup": "VACUUM INTO is a reading: it changes nothing and the "
-                          "copy lands on the server's disk, not in the browser, "
-                          "so the master would have defended against one extra "
-                          "file in a directory — and a master typed where it "
-                          "guards nothing is a master typed without looking",
+    "project_backup": "VACUUM INTO is a reading: it changes nothing and the "
+                      "copy lands on the server's disk, not in the browser, "
+                      "so the master would have defended against one extra "
+                      "file in a directory — and a master typed where it "
+                      "guards nothing is a master typed without looking",
 }
 ok(set(NO_MASTER_ON_PURPOSE) <= set(_ENDPOINTS),
    "every master-free endpoint named here exists",
@@ -2988,9 +3123,7 @@ for _name, _why in NO_MASTER_ON_PURPOSE.items():
                                 and ast.unparse(n.func) == "secrets.compare_digest"],
        f"{_name} asks for no master ON PURPOSE — {_why[:56]}...",
        "it now compares one: if that is the new decision, drop the exception")
-    _reached = {n.func.attr for n in ast.walk(_fn or ast.Module(body=[], type_ignores=[]))
-                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                and isinstance(n.func.value, ast.Name) and n.func.value.id == "registry"}
+    _reached = _engine_reached(_fn or ast.Module(body=[], type_ignores=[]))
     ok(not (_reached & MUTATING),
        f"and the exception holds only while {_name} writes nothing",
        sorted(_reached & MUTATING))
@@ -3011,28 +3144,50 @@ for _e in _ENDPOINTS:
        f"{_e}: the session check is the first thing it does, or it delegates to "
        f"the page that does", _first[:60])
 
-# THE THREE GUARDS OF THE ACTION, pinned AS WRITTEN. Everything above pins
-# that they are called; these pin what they say, which is the half that a
-# plausible-looking edit changes. Each was injected and each named its
-# defect: the master check turned into a no-op, the digest comparison
-# removed, the ceiling shifted by one.
+# THE GUARDS OF THE TWO ACTIONS, pinned AS WRITTEN. Everything above pins that
+# they are called; these pin what they say, which is the half that a
+# plausible-looking edit changes. Each was injected and each named its defect:
+# the master check turned into a no-op, the digest passed as anything but what
+# came back, the ceiling shifted by one.
 if _ACT is not None:
     _TESTS = [ast.unparse(n.test) for n in ast.walk(_ACT) if isinstance(n, ast.If)]
     ok("not secrets.compare_digest((form.get('master') or '').strip(), master)"
        in _TESTS,
-       "the action's master check is the constant-time comparison, as written",
+       "the lot action's master check is the constant-time comparison, as written",
        [t[:60] for t in _TESTS])
-    ok("seen != current['digest']" in _TESTS,
-       "and the digest it was handed is compared with the batch's, before "
-       "anything is written", [t[:60] for t in _TESTS])
-    ok("len(ticked) > action_cap" in _TESTS,
-       "and the ceiling refuses MORE than the cap, not as many — one character "
-       "either way is the whole knob", [t[:60] for t in _TESTS])
+    # The digest is no longer COMPARED here — `decide()` does that, in the
+    # transaction — so what this file owes is that the one the browser sent
+    # travels in untouched. A page that passed the batch's own digest instead
+    # would compare a reading with itself and never be stale.
+    _DEC = [ast.unparse(n) for n in ast.walk(_ACT) if isinstance(n, ast.Call)
+            and ast.unparse(n.func) == "prj.decide"]
+    ok(_DEC == ["prj.decide(seen, ticked, denials)"],
+       "and it hands decide() the digest it was GIVEN, the ticks and the "
+       "reasons — nothing computed here", _DEC)
+    ok("seen = (form.get('digest') or '').strip()" in ast.unparse(_ACT),
+       "and `seen` is that hidden field and nothing else",
+       [x[:60] for x in ast.unparse(_ACT).splitlines() if "seen" in x])
+_REN = _WEB_FUNCS.get("renewals_action")
+ok(_REN is not None, "web.py defines the renewals action")
+if _REN is not None:
+    _TESTS = [ast.unparse(n.test) for n in ast.walk(_REN) if isinstance(n, ast.If)]
+    ok("not secrets.compare_digest((form.get('master') or '').strip(), master)"
+       in _TESTS,
+       "the renewals action's master check is the constant-time comparison too",
+       [t[:60] for t in _TESTS])
+    # THE ONE PLACE the ceiling is still enforced by this file, because renew
+    # and promote have no engine method that does it. MORE than the cap, not as
+    # many — one character either way is the whole knob — and `cap > 0` because
+    # zero means the queue is closed to PROPOSING, not that nothing may be
+    # renewed. The engine spells it the same way in decide().
+    ok("cap is not None and cap > 0 and (len(ticked) > cap)" in _TESTS,
+       "and the ceiling refuses MORE than the cap, reading zero the way the "
+       "engine reads it", [t[:60] for t in _TESTS])
 
 # The session's own machinery is pinned by NAME too: `_session_ok = lambda r:
 # True` further down, under a flag, leaves every check above green and the UI
 # open. Python gives the name to whatever was bound last, in silence.
-for _n in ("_session_ok", "_sign", "_issue", "_code_of"):
+for _n in ("_session_ok", "_sign", "_issue", "_open"):
     _defs = [x for x in ast.walk(_BUILD) if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef))
              and x.name == _n] if _BUILD is not None else []
     ok(len(_defs) == 1, f"build() defines `{_n}` exactly once", len(_defs))
@@ -3183,30 +3338,71 @@ import sqlite3 as _sq3                                          # noqa: E402
 import subprocess                                               # noqa: E402
 import tempfile                                                 # noqa: E402
 
+def _pf_db(root: str) -> str:
+    """Run the db check in a process of its own, against `root`, and hand back
+    the verdict line. A subprocess because the check imports the engine and
+    opens files: doing that in here would leave this suite holding them."""
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import preflight; preflight.c_db(); "
+         "from mcp_common_engine import RESULTS; "
+         "print(RESULTS[-1])"],
+        capture_output=True, text=True, cwd=HERE, timeout=60,
+        env=dict(os.environ, DB_DIR=root))
+    return out.stdout or out.stderr
+
+
+# A registry in the v4 SHAPE — a line, a folder, a file — carrying a database
+# from an earlier generation. The layout matters: a check that walked one path
+# would not even find this file.
 _md = tempfile.mkdtemp(prefix="preflight-oldschema-")
-_mdb = os.path.join(_md, "rules.db")
-_cx0 = _sq3.connect(_mdb)
+with open(os.path.join(_md, "projects.txt"), "w", encoding="utf-8") as _fh:
+    _fh.write("Old One | REFCODE12345678 | ADMCODE12345678\n")
+os.makedirs(os.path.join(_md, "Old One"), exist_ok=True)
+_cx0 = _sq3.connect(os.path.join(_md, "Old One", "old-one.db"))
 _cx0.executescript("""
-  CREATE TABLE projects (name TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE,
-                         description TEXT, created TEXT NOT NULL);
-  CREATE TABLE consumers (project TEXT NOT NULL, name TEXT NOT NULL,
-                          kind TEXT NOT NULL, brief TEXT, created TEXT NOT NULL,
-                          PRIMARY KEY (project, name));
   CREATE TABLE rules (project TEXT NOT NULL, id TEXT NOT NULL,
                       PRIMARY KEY (project, id));
+  PRAGMA user_version = 3;
 """)
 _cx0.close()
-_env = dict(os.environ, DB_PATH=_mdb)
-_out = subprocess.run(
-    [sys.executable, "-c",
-     "import preflight; preflight.c_db(); "
-     "from mcp_common_engine import RESULTS; "
-     "print(RESULTS[-1])"],
-    capture_output=True, text=True, env=_env, cwd=HERE, timeout=60)
-ok("False" in _out.stdout, "the db check goes RED on an earlier schema",
-   _out.stdout[:200])
-ok("earlier schema" in _out.stdout and "wipe" in _out.stdout,
-   "and the red line names the disease AND the cure", _out.stdout[:200])
+_out = _pf_db(_md)
+ok("False" in _out, "the db check goes RED on an earlier schema", _out[:200])
+ok("schema generation 3" in _out and "no migration" in _out
+   and "old-one.db" in _out,
+   "and the red line names the disease, the cure AND the file: with several "
+   "databases served, which one is the half that used not to be needed",
+   _out[:300])
+
+# And the mirror image, which is the half that proves the check above measures
+# anything: the SAME shape, at the generation this server speaks, goes green
+# and says what it served. A check only ever seen red is a check that might be
+# refusing everything.
+_gd = tempfile.mkdtemp(prefix="preflight-goodschema-")
+with open(os.path.join(_gd, "projects.txt"), "w", encoding="utf-8") as _fh:
+    _fh.write("New One | REFCODE12345678 | ADMCODE12345678\n")
+_out = _pf_db(_gd)
+ok("True" in _out and "New One" in _out,
+   "and it goes GREEN on a registry it can serve, naming what it opened",
+   _out[:300])
+
+# AND IT WALKS THEM ALL. From v4.0.0 the registry names several databases, and
+# a check that opened the first one would pass on a boot where the second is
+# corrupt. Two projects in, two names out — measured, because "for p in
+# served" is one line away from being "served[0]" and neither version fails.
+_2d = tempfile.mkdtemp(prefix="preflight-two-")
+with open(os.path.join(_2d, "projects.txt"), "w", encoding="utf-8") as _fh:
+    _fh.write("First One | REFCODE12345678 | ADMCODE12345678\n"
+              "Second One | REFCODE87654321 | ADMCODE87654321\n")
+_out = _pf_db(_2d)
+# On the FILE names, and that is not pedantry: the line also carries a
+# born-empty list which names every project on a fresh directory, so a check
+# written on the project names passes with the walk cut down to `served[:1]`.
+# Measured — the injection came back green and this is the repair.
+ok("True" in _out and "2 served" in _out
+   and "first-one.db" in _out and "second-one.db" in _out,
+   "and it opens EVERY project the registry names, not the first",
+   _out[:300])
 
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

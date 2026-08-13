@@ -14,19 +14,27 @@ mcp-common-engine — the twins had written them twice — and importing the
 engine's ROOT drags no FastMCP in, by its own contract: a preflight has to be
 able to run, and to report, on an image where fastmcp is missing or broken.
 
-Its own, because this service keeps a database instead of files:
-  db          it opens, it is whole, it is in WAL — and a database from an
-              earlier schema goes RED here, with the cure in the line: there
-              is no migration, a schema change means a wipe
-  schema      every table AND trigger is there — a missing trigger raises no
-              error, it just stops writing history, and nobody notices
-  ownership   the process is root and the database is NOT writable by anyone
-              else: a write from the share would bypass the triggers
-  approval    the one knob the approval lifecycle reads, PROVISIONAL_DAYS,
-              validated at the edge instead of at the first approval
-  web         the administration UI: its master present, long enough and not a
-              placeholder, its port neither publishable by the Funnel nor the
-              MCP's own, and its per-action ceiling a number it can mean
+Its own, because this service keeps databases instead of files — and since
+v4.0.0 there are SEVERAL of them: the registry file says which, and every one
+of these checks walks the whole list rather than the one file there used to be.
+A registry that names four projects and a preflight that looks at one is a
+preflight that passes while three databases are broken.
+  db          the registry parses, and every project it serves opens, is whole
+              and is in WAL — and a file from an earlier schema goes RED here,
+              with the cure in the line: there is no migration, the corpus goes
+              back in by hand
+  schema      every table AND trigger is there, in every served file — a
+              missing trigger raises no error, it just stops writing history,
+              and nobody notices
+  ownership   the process is root, no database is writable by anyone else — a
+              write from the share would bypass the triggers — and the registry
+              file, which holds the codes in clear, is readable by root alone
+  approval    the two knobs the lifecycle reads, PROVISIONAL_DAYS and
+              ADMIN_AUTH_CODE_DURATION, validated at the edge instead of at the
+              first approval and the first minting
+  web         the administration UI: its password present, long enough and not
+              a placeholder, and its port neither publishable by the Funnel nor
+              the MCP's own
 
 ADMIN_ACCESS_CODE has no check any more because it has no reader any more:
 the maintenance credential is the per-project architect key, a hash on the
@@ -63,7 +71,23 @@ from rules import DB_ROOT, DEFAULT_AUTH_CODE_MINUTES
 # variable, so that opening the registry cannot land on a path that was a file
 # name until yesterday.
 DBDIR = os.environ.get("DB_DIR") or DB_ROOT
-DB = os.environ.get("DB_PATH") or os.path.join(DBDIR, "rules.db")
+
+
+def _served() -> list[dict]:
+    """Every project the registry serves, opened. ONE reading, used by three
+    checks, and it is the reading the service itself will do a second later:
+    the parse refusal, the generation refusal and the create-if-missing line
+    all happen HERE, before anything binds a port.
+
+    The registry is opened and closed around each check rather than held: a
+    preflight that kept a connection open would be holding the WAL of a
+    database the service is about to open for itself."""
+    from rules import Registry            # applies the schema if a file is new
+    r = Registry(DBDIR)
+    try:
+        return list(r.projects()["projects"]), r.repaired(), r.born_empty(), r.file
+    finally:
+        r.close()
 
 
 # =====================================================================
@@ -72,59 +96,79 @@ DB = os.environ.get("DB_PATH") or os.path.join(DBDIR, "rules.db")
 
 @check("db")
 def c_db():
-    from rules import Registry            # applies the schema if the file is new
-    r = Registry(DBDIR)
-    try:
-        integrity = r.cx.execute("PRAGMA integrity_check").fetchone()[0]
-        if integrity != "ok":
-            raise RuntimeError(f"integrity_check: {integrity} — restore from the ZFS snapshot")
-        journal = r.cx.execute("PRAGMA journal_mode").fetchone()[0]
-        if journal.lower() != "wal":
-            raise RuntimeError(f"journal_mode={journal}: WAL expected "
-                               "(does the mount support locking?)")
-        rules = r.cx.execute("SELECT COUNT(*) FROM rules").fetchone()[0]
-        projects = r.cx.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
-        repaired = r.repaired
-        migrated = r.migrated
-    finally:
-        r.close()
-    tail = f" — REBUILT: {', '.join(repaired)}" if repaired else ""
-    # THIS open is the one that migrates: the preflight touches the database
-    # before the server does, so by the time the server opens it there is
-    # nothing left to declare — at v1.6.0 the "schema migrated at open" line
-    # never appeared, because its only possible reader ran second. Whoever
-    # performs a one-way change on a database in service is the one who says
-    # so, and here that is this check.
-    if migrated:
-        tail += f" — migrated: {', '.join(migrated)}"
-    # Not a fault (the schema repaired itself) but it must not be silent:
-    # somebody had removed those objects from the database.
-    return f"{DB}: whole, WAL, {projects} projects, {rules} rules{tail}"
+    """The registry parses and every file it names opens, whole and in WAL.
+
+    Since v4.0.0 this is a LIST and not a file, and the difference matters at
+    exactly one moment: the schema generation. A file from an earlier
+    generation is refused by the engine — not migrated, by decision — and the
+    refusal has to arrive HERE, where it is one red line with the path in it,
+    rather than in a chat three hours later."""
+    served, repaired, born_empty, registry_file = _served()
+    if not served:
+        # Not a failure: a fresh installation has an empty registry, and the
+        # engine has just written the template into it. Silence would be the
+        # wrong answer, though — a service that serves nothing looks exactly
+        # like a service that is fine.
+        return (f"{registry_file}: parses, and serves NO project yet — add a "
+                f"line `name | reference code | admin code`")
+    notes = []
+    for p in served:
+        cx = sqlite3.connect(p["path"], timeout=10)
+        try:
+            integrity = cx.execute("PRAGMA integrity_check").fetchone()[0]
+            if integrity != "ok":
+                raise RuntimeError(f"{p['path']}: integrity_check says {integrity} — "
+                                   "restore from the ZFS snapshot")
+            journal = cx.execute("PRAGMA journal_mode").fetchone()[0]
+            if journal.lower() != "wal":
+                raise RuntimeError(f"{p['path']}: journal_mode={journal}, WAL expected "
+                                   "(does the mount support locking?)")
+            rules = cx.execute("SELECT COUNT(*) FROM rule").fetchone()[0]
+        finally:
+            cx.close()
+        notes.append(f"{p['name']} ({p['slug']}.db, schema {p['schema']}, "
+                     f"{rules} rules)")
+    tail = ""
+    # Not a fault — the schema repaired itself — but it must not be silent:
+    # somebody had removed those objects from that database.
+    for name, objects in sorted(repaired.items()):
+        tail += f" — REBUILT in {name}: {', '.join(objects)}"
+    # The signature of ONE specific accident: a folder renamed without its
+    # registry line, or the other way round. The project answers every call
+    # with an empty corpus and nothing else says so.
+    if born_empty:
+        tail += (f" — BORN EMPTY this boot: {', '.join(born_empty)}. If any of "
+                 f"those already existed, its folder was not renamed along with "
+                 f"its registry line")
+    return f"{len(served)} served: {'; '.join(notes)}{tail}"
 
 
 @check("schema")
 def c_schema():
-    """Post-condition on what the engine says it needs — TABLES and TRIGGERS are
-    imported, never retyped here. A list copied into a second file is a list that
-    drifts, and this one would drift silently."""
+    """Post-condition on what the engine says it needs, in EVERY served file —
+    TABLES, INDEXES and TRIGGERS are imported, never retyped here. A list
+    copied into a second file is a list that drifts, and this one would drift
+    silently.
+
+    A raw connection on purpose: opening through the engine would re-apply the
+    schema and this check would be observing its own repair."""
     from rules import INDEXES, TABLES, TRIGGERS
-    cx = sqlite3.connect(DB, timeout=10)
-    try:
-        present = {r[0] for r in cx.execute("SELECT name FROM sqlite_master")}
-        columns = {r[1] for r in cx.execute("PRAGMA table_info(projects)")}
-    finally:
-        cx.close()
-    if "code" not in columns or "architect_key_hash" not in columns:
-        raise RuntimeError("table `projects` belongs to an earlier schema. There is no "
-                           "migration, by decision: wipe the database and reseed — the "
-                           "corpus goes back in by hand.")
-    missing = [x for x in TABLES + INDEXES + TRIGGERS if x not in present]
-    if missing:
-        raise RuntimeError(f"missing from the schema: {', '.join(missing)} — "
-                           "the automatic repair did not work")
+    served, _, _, registry_file = _served()
+    if not served:
+        return f"no project served by {registry_file}: nothing to check"
+    for p in served:
+        cx = sqlite3.connect(p["path"], timeout=10)
+        try:
+            present = {r[0] for r in cx.execute("SELECT name FROM sqlite_master")}
+        finally:
+            cx.close()
+        missing = [x for x in TABLES + INDEXES + TRIGGERS if x not in present]
+        if missing:
+            raise RuntimeError(f"{p['path']} is missing {', '.join(missing)} — "
+                               "the automatic repair did not work")
     return (f"{len(TABLES)} tables + {len(INDEXES)} unique "
             f"{'index' if len(INDEXES) == 1 else 'indexes'} + "
-            f"{len(TRIGGERS)} triggers, all present")
+            f"{len(TRIGGERS)} triggers, in each of {len(served)}")
 
 
 @check("writable")
@@ -143,13 +187,28 @@ def c_ownership():
     if os.geteuid() != 0:
         raise RuntimeError(f"the process runs as uid {os.geteuid()}, not root: the database "
                            "files would be born owned by somebody else")
-    st = os.stat(DB)
-    if st.st_uid != 0:
-        raise RuntimeError(f"{DB} belongs to uid {st.st_uid}, not to root")
-    if st.st_mode & 0o022:
-        raise RuntimeError(f"{DB} is {oct(st.st_mode & 0o777)}: writable by group or others. "
-                           "It must be 644 — from the share you read, and nothing else.")
-    return f"root, {oct(st.st_mode & 0o777)} (read-only from the share)"
+    served, _, _, registry_file = _served()
+    for p in served:
+        st = os.stat(p["path"])
+        if st.st_uid != 0:
+            raise RuntimeError(f"{p['path']} belongs to uid {st.st_uid}, not to root")
+        if st.st_mode & 0o022:
+            raise RuntimeError(
+                f"{p['path']} is {oct(st.st_mode & 0o777)}: writable by group or "
+                "others. It must be 644 — from the share you read, and nothing else.")
+    # AND THE REGISTRY, which is the file the databases do not protect: it
+    # holds every reference code and every admin code IN CLEAR, so it is the
+    # one file here that must not be readable from the share at all. The engine
+    # re-applies 0600 at every reload and `entrypoint.sh` leaves it out of the
+    # 644 sweep; this is where a mount that ignored both says so.
+    st = os.stat(registry_file)
+    if st.st_mode & 0o077:
+        raise RuntimeError(
+            f"{registry_file} is {oct(st.st_mode & 0o777)}: it carries every code "
+            "of every project in clear and must be 600 — readable by root alone")
+    return (f"root · {len(served)} database"
+            f"{'' if len(served) == 1 else 's'} 644 (read-only from the share) · "
+            f"the registry 600")
 
 
 @check("approval")
@@ -221,12 +280,14 @@ def c_web():
         raise RuntimeError(f"WEB_PORT={port} is the MCP's own port: two servers cannot bind "
                            "the same one, and the one that loses dies after the startup "
                            "line has already said everything is fine")
-    try:
-        cap = web.action_cap_from_env()
-    except ValueError as e:
-        raise RuntimeError(str(e)) from e
-    return (f"master present ({len(v)} characters) · UI on {port}, "
-            f"which the Funnel cannot publish · {cap} approvals per action")
+    # There is NO ceiling to validate here any more, and its absence is the
+    # point rather than an omission: WEB_ACTION_CAP left the template with
+    # PENDING_CAP when the two became one number, `queue_cap`, which is policy
+    # of each PROJECT and lives in that project's database. A number in the
+    # environment would be a container-wide opinion about a multi-tenant
+    # container, and there is nowhere left to put it.
+    return (f"password present ({len(v)} characters) · UI on {port}, "
+            f"which the Funnel cannot publish")
 
 
 @check("oauth")

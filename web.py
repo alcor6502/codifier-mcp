@@ -8,11 +8,22 @@ here. One process, one asyncio loop, two `uvicorn.Server`: the MCP app from
 `mcp.http_app()` on the MCP port, this one on WEB_PORT.
 
 WHAT IT MAY TOUCH. **The contract towards the engine is the methods of
-`Registry`, and nothing else: not one line of SQL lives in this file.** That is
-the constraint that keeps the other road open — the UI as a second MCP client,
-in a container of its own — because a layer that only ever calls the methods
-the tools call can be moved behind them later without being rewritten. A query
-in here would quietly close that road, and nothing at runtime would complain.
+`Registry` and `Project`, and nothing else: not one line of SQL lives in this
+file.** That is the constraint that keeps the other road open — the UI as a
+second MCP client, in a container of its own — because a layer that only ever
+calls the methods the tools call can be moved behind them later without being
+rewritten. A query in here would quietly close that road, and nothing at
+runtime would complain.
+
+TWO CLASSES SINCE v4.0.0, and the split is the whole shape of this file.
+`Registry` is the ROUTER — `projects.txt` in, one `Project` out — and every
+reading and every gesture happens on the `Project`. The page's door is
+`by_name()` and not `project(code)`: on the MCP side a code is what proves you
+may speak at all, here the person has already proved it with the UI password,
+and the NAME is what a URL may carry. The codes stay in the file and in the
+instructions of whoever holds them — `registry.projects()` does not hand them
+out any more, which is why the deployment page that used to print them is gone
+rather than emptied.
 
 ZERO NEW DEPENDENCIES, and it is measured rather than hoped: the image already
 carries starlette (via fastmcp[server]), uvicorn, python-multipart for the form
@@ -27,13 +38,20 @@ there is one person. The hidden username field on the form is for the password
 managers, which key an entry on a user and fill a password-only form wrong, in
 silence.
 
-TWO PAGES THAT LOOK ALIKE AND ARE NOT. `/admin` handles SECRETS — it creates
-projects, regenerates pairs and prints the codes — so the master is retyped for
-every action there. `/maintenance` handles none: the backup is a `VACUUM INTO`
-that changes nothing and drops a file on the server's disk, and the log is a
-ring in memory. A master retyped where it defends nothing does not add a guard,
-it teaches the hand to type it without looking — which is the habit the lot
-page was invented to prevent.
+WHERE THE MASTER IS RETYPED, AND WHERE IT IS NOT. Every gesture that WRITES
+asks for it again — deciding the lot, renewing, promoting, minting a one-time
+code — because a session alone is a browser left open on the iPad. The backup
+does not, and the log page does not: a `VACUUM INTO` changes nothing and drops
+a file on the server's disk, and the log is a ring in memory. A master retyped
+where it defends nothing does not add a guard, it teaches the hand to type it
+without looking — which is the habit the lot page was invented to prevent.
+
+WHAT IS NOT HERE ANY MORE. The deployment page: it created projects, rekeyed
+them and printed their codes, and all three died with the declarative registry
+— a project is now a line in `projects.txt`, written from Unraid by the person
+who chooses its codes. What took its place is the codes page, one per project,
+where the one-time codes are minted: that is the one thing the design gives to
+this UI and to nothing else.
 
 
 Configuration, all through environment variables:
@@ -88,10 +106,14 @@ SESSION_MAX_IDLE = 3600
 
 SESSION_COOKIE = "codifier_admin"
 
-# How many proposals may enter in ONE action. It is the mechanical form of "at
-# the twelfth signature in a row a person signs without reading", and it is a
-# knob rather than a constant for the reason every knob here is one: a ceiling
-# that is not in the template does not exist.
+# There is NO ceiling constant here any more, and its absence is a decision.
+# It was WEB_ACTION_CAP in the container's template, next to PENDING_CAP —
+# two knobs this page's own contract forced to be equal, since an unticked
+# proposal is a denied one and a queue has to be answered whole. Two numbers
+# that must agree are one number, and it belongs to the PROJECT rather than to
+# the container, which is multi-tenant: it is `queue_cap`, asked of the project
+# the page already has in hand. A default in this file would be a second
+# opinion about a policy that is not this file's.
 
 # How many lines the maintenance page can show, and the ONLY place the number
 # lives: the page renders it from here rather than spelling it out a second
@@ -292,18 +314,25 @@ of the service.</p>""")
 # The application
 # =====================================================================
 
-def build(*, registry, log, master: str, refusal,
+def build(*, registry, log, master: str, refusal, fault,
           backup_dir: str = ""):
-    """The Starlette application. Handed the engine, the service's own logger,
-    the master and the ceiling: a web layer that reached for any of them itself
-    would be a second place where the configuration is decided, and a second
-    logger is how a refusal stops appearing in the log everybody reads.
+    """The Starlette application. Handed the engine, the service's own logger
+    and the master: a web layer that reached for any of them itself would be a
+    second place where the configuration is decided, and a second logger is how
+    a refusal stops appearing in the log everybody reads.
 
-    `refusal` is the engine's designed-refusal class, handed in for the same
-    reason `make_tool` is handed it on the MCP side: which exception is a
-    refusal and which is a genuine fault is the one thing neither the engine
-    nor this file can know on its own. A refusal becomes a sentence on the
-    page; a fault is left to rise, with its traceback, at ERROR."""
+    `refusal` and `fault` are the engine's two classes, handed in for the same
+    reason `make_tool` is handed them on the MCP side: which exception is a
+    designed refusal and which is a genuine fault is the one thing neither the
+    engine nor this file can know on its own. A refusal becomes a sentence on
+    the page; a fault is left to rise, with its traceback, at ERROR.
+
+    ⚠ BOTH, and not just the first, because `fault` is a SUBCLASS of `refusal`:
+    caught with one name this file would answer a broken registry — a file that
+    does not parse, a database from another generation — with a polite `no
+    project called that`, which is the sentence for a typo. Every place that
+    catches here catches the fault FIRST and re-raises it, in the same order
+    make_tool uses."""
     from starlette.applications import Starlette
     from starlette.responses import HTMLResponse, RedirectResponse, Response
     from starlette.routing import Route
@@ -352,23 +381,23 @@ def build(*, registry, log, master: str, refusal,
     def _client(request) -> str:
         return request.client.host if request.client else "unknown"
 
-    def _cap(code):
-        """How many proposals ONE action may carry, read from the project.
+    def _cap(prj):
+        """How many rules ONE action may carry, asked of the project.
 
-        It was WEB_ACTION_CAP in the container's template until v4.0.0, next
-        to PENDING_CAP — two knobs the contract of this very page forced to be
-        equal, since an unticked proposal is a denied one and a queue has to
-        be answered whole. Two numbers that must agree are one number, and it
-        is policy of the PROJECT: this container is multi-tenant. None means
-        no ceiling."""
-        return registry.project(code).queue_cap()
+        ONE expression, and it is the engine's: `decide()` asks the same
+        method before it writes, so the page never holds a second opinion
+        about the ceiling — it holds the same one, early, to say so on the
+        page the person is looking at. `None` means no ceiling and `0` means
+        the queue is closed, which is a policy about proposing rather than
+        about approving: both readings live in `queue_cap`, not here."""
+        return prj.queue_cap()
 
     def _guest(request):
         """Not signed in: the login page, and nothing about what is behind
         it."""
         return HTMLResponse(_login_page(), status_code=401)
 
-    NAV = ("<a href='/'>projects</a><a href='/admin'>deployment</a>"
+    NAV = ("<a href='/'>projects</a>"
            "<a href='/maintenance'>maintenance</a>"
            "<form class='inline' method='post' action='/logout'>"
            "<button type='submit'>sign out</button></form>")
@@ -378,21 +407,33 @@ def build(*, registry, log, master: str, refusal,
     async def home(request):
         if not _session_ok(request):
             return _guest(request)
-        # The projects menu. `registry.projects()` is the door codes come out
-        # of — the same door `rules_registry` is on the MCP side, and it wants
-        # the maintenance code there for the same reason it wants the master
-        # here. The code itself never leaves this process: the pages address a
-        # project by its NAME, and the name is resolved back to the code on
-        # every request.
+        # The projects menu, and it is EVERYTHING this page can say about a
+        # project without opening it: what the registry file declares plus
+        # what the router found on disk. No codes — `projects()` stopped
+        # handing them out in v4.0.0 — and no counts, because a count is a
+        # query per project on a menu nobody reads for counts.
+        #
+        # `born_empty` is on it because it is the signature of one specific
+        # accident: a folder renamed without its registry line, which serves a
+        # project that answers every call with an empty corpus.
         data = registry.projects()
         rows = "".join(
             f"<tr><td><a href='/p/{_esc(p['name'])}/'>{_esc(p['name'])}</a></td>"
-            f"<td>{_esc(p['active_rules'])}</td>"
-            f"<td class='note'>{_esc(p['description'])}</td></tr>"
-            for p in data["projects"])
-        body = (f"<table><thead><tr><th>Project</th><th>In force</th><th></th></tr>"
-                f"</thead><tbody>{rows}</tbody></table>"
-                if rows else "<p class='note'>No project in the registry yet.</p>")
+            f"<td class='note'>{_esc(p['slug'])}.db · schema {_esc(p['schema'])}</td>"
+            f"<td class='bad'>{'born empty this boot' if p['born_empty'] else ''}</td>"
+            f"</tr>" for p in data["projects"])
+        body = ((f"<table><thead><tr><th>Project</th><th>File</th><th></th></tr>"
+                 f"</thead><tbody>{rows}</tbody></table>"
+                 f"<p class='note'>{_esc(data['count'])} served, from "
+                 f"{_esc(data['registry'])} — the file is edited from Unraid, and "
+                 f"a project is created by adding a line to it. This page has no "
+                 f"button that writes there, by decision: the registry is "
+                 f"declarative.</p>")
+                if rows else
+                (f"<p class='note'>No project is served. Add a line to "
+                 f"{_esc(data['registry'])} — <code>name | reference code | admin "
+                 f"code</code> — and the database is created on the next "
+                 f"read.</p>"))
         response = HTMLResponse(_page("Projects", body, nav=NAV))
         _issue(response)
         return response
@@ -422,63 +463,110 @@ def build(*, registry, log, master: str, refusal,
 
     # ---------- a project ----------
 
-    def _code_of(name: str) -> str | None:
-        """Name to code, resolved on EVERY request. The code is the door and it
-        stays in this process: it is never put in a URL, in a cookie or in a
-        page, so a screenshot of the browser and a link sent to somebody are
-        both harmless."""
-        for p in registry.projects()["projects"]:
-            if p["name"] == name:
-                return p["code"]
-        return None
+    def _open(name: str):
+        """Name to PROJECT, resolved on EVERY request, or None.
+
+        `by_name` is the router's door for this page and only for this page:
+        the codes never leave the file, so they are never in a URL, in a
+        cookie or in a page, and a screenshot of the browser and a link sent
+        to somebody are both harmless. Resolved every time rather than held,
+        because the registry is re-read when its file changes and a Project
+        kept in a closure would outlive the line that declared it.
+
+        ⚠ The FAULT is re-raised before the refusal is swallowed. `by_name`
+        re-reads the registry, so what comes out of here is not only "no such
+        name": it is also a file that does not parse and a database from
+        another generation. Those are faults, and answering them with a 404
+        would tell whoever is looking that they typed the name wrong."""
+        try:
+            return registry.by_name(name)
+        except fault:
+            raise
+        except refusal:
+            return None
 
     def _no_project(name: str):
         return HTMLResponse(_page("Not found",
                                   f"<p class='bad'>No project called "
-                                  f"{_esc(name)}.</p>", nav=NAV), status_code=404)
+                                  f"{_esc(name)} is served. The registry file is "
+                                  f"what decides, and it is edited from "
+                                  f"Unraid.</p>", nav=NAV), status_code=404)
 
     def _project_nav(name: str) -> str:
         n = _esc(name)
         return (f"<a href='/p/{n}/batch'>lot</a><a href='/p/{n}/rules'>rules</a>"
-                f"<a href='/p/{n}/pending'>pending</a>"
+                f"<a href='/p/{n}/renewals'>renewals</a>"
+                f"<a href='/p/{n}/codes'>codes</a>"
                 f"<a href='/p/{n}/status'>state</a><a href='/'>projects</a>"
                 "<form class='inline' method='post' action='/logout'>"
                 "<button type='submit'>sign out</button></form>")
 
-    def _consumer_picker(name: str, code: str, chosen: str, where: str) -> str:
+    def _consumer_picker(name: str, prj, chosen: str, where: str) -> str:
         """The consumer is a MENU and not a text field, and the list comes from
-        the registry. Typed by hand it would be one more place a name can be
+        the engine. Typed by hand it would be one more place a name can be
         spelt wrong, and the engine's refusal for an unknown consumer is not
         the answer to a typo — it is the answer to asking about somebody who
-        does not exist."""
-        names = [c["name"] for c in registry.project_info(code)["consumers"]]
+        does not exist.
+
+        Since v4.0.0 `project_info` returns the LIVE ones only, so a retired
+        consumer cannot be picked here at all: the menu offers what still
+        exists rather than offering a name that every call behind it would
+        refuse."""
         opts = "".join(
             f"<option value='{_esc(n)}'{' selected' if n == chosen else ''}>"
-            f"{_esc(n)}</option>" for n in names)
+            f"{_esc(n)}</option>" for n in _consumers(prj))
         return (f"<form method='get' action='/p/{_esc(name)}/{where}'>"
                 f"<label for='consumer'>Consumer</label>"
                 f"<select id='consumer' name='consumer'>{opts}</select> "
                 f"<button type='submit'>show</button></form>")
 
-    def _consumers(code: str) -> list[str]:
-        return [c["name"] for c in registry.project_info(code)["consumers"]]
+    def _consumers(prj) -> list[str]:
+        return [c["name"] for c in prj.project_info()["consumers"]]
 
     async def project_home(request):
         if not _session_ok(request):
             return _guest(request)
         name = request.path_params["project"]
-        code = _code_of(name)
-        if code is None:
+        prj = _open(name)
+        if prj is None:
             return _no_project(name)
-        info = registry.project_info(code)
-        waiting = len(registry.pending(code)["waiting"])
+        # ONE call, and it carries the three counts a caller cannot work out
+        # from the payload — the queue among them. The old page asked a second
+        # method for the length of the waiting list, which was a second reading
+        # of a number this one already knows.
+        info = prj.project_info()
+        waiting = info["counts"]["proposed"]
+        # `domains` is a LIST of dicts and not a mapping: code, gloss, why it
+        # exists, and how many rules are in force in it. It was a mapping until
+        # v4.0.0 and this page read it as one — nothing said otherwise, because
+        # no suite renders a page.
         body = (f"<p><a href='/p/{_esc(name)}/batch'>The lot</a> — "
-                f"{waiting} proposal{'' if waiting == 1 else 's'} waiting.</p>"
+                f"{waiting} proposal{'' if waiting == 1 else 's'} waiting. "
+                f"{_esc(info['counts']['rules_in_force'])} in force · "
+                f"{_esc(info['counts']['tasks_open'])} open tasks.</p>"
                 f"<h2>Consumers</h2><p>"
-                + " · ".join(_esc(c["name"]) for c in info["consumers"])
-                + f"</p><h2>Domains</h2><p class='note'>"
-                + " · ".join(f"{_esc(d)} {_esc(t)}" for d, t in info["domains"].items())
-                + "</p>")
+                + " · ".join(f"{_esc(c['name'])} <span class='note'>{_esc(c['kind'])}"
+                             f"</span>" for c in info["consumers"])
+                + "</p><h2>Groups</h2><p class='note'>"
+                + (" · ".join(f"{_esc(g['name'])} ({_esc(', '.join(g['members']))})"
+                              for g in info["groups"]) or "None.")
+                + "</p><h2>Domains</h2><p class='note'>"
+                + " · ".join(f"{_esc(d['code'])} {_esc(d['description'])} "
+                             f"[{_esc(d['rules_in_force'])}]"
+                             for d in info["domains"])
+                + "</p><p class='note'>Everything here is ALIVE: a retired "
+                  "consumer, group or domain is not in these lists — it is on "
+                  f"the <a href='/p/{_esc(name)}/status'>state</a> page, which "
+                  "is where a revive finds its target.</p>"
+                + f"<form method='post' action='/p/{_esc(name)}/backup'>"
+                  f"<p><button type='submit'>VACUUM INTO a quiescent copy of "
+                  f"this project</button></p></form>"
+                  f"<p class='note'>No password, and that is a decision rather "
+                  f"than an omission: a backup changes nothing and the copy "
+                  f"lands on the server's disk, not in this browser. It is per "
+                  f"PROJECT because a project is a folder — the file, its -wal "
+                  f"and its -shm — and copying one of the three is a corrupt "
+                  f"backup.</p>")
         response = HTMLResponse(_page(name, body, nav=_project_nav(name)))
         _issue(response)
         return response
@@ -488,46 +576,80 @@ def build(*, registry, log, master: str, refusal,
     def _proposal_html(d: dict) -> str:
         sup = d.get("supersedes")
         # BOTH HALVES of the move, where the decision is taken. The engine
-        # hands the field back EXPANDED — the victim's ID with its current
-        # title, and a mark when the victim is no longer in force — so what is
-        # read here is what is being retired and not an ID to go and look up.
+        # hands the victim back as ID AND current title, so what is read here
+        # is what is being retired and not an ID to go and look up.
         sup_html = (f"<p class='bad'>Approving this also RETIRES "
-                    f"{_esc(sup)} — one transaction, no window in which both "
-                    f"are in force.</p>") if sup else ""
+                    f"{_esc(sup['id'])} — {_esc(sup['title'])} — in the same "
+                    f"transaction, so there is no window in which both are in "
+                    f"force.</p>") if sup else ""
+        # THREE ROWS, and the third is the one that used to be missing. The
+        # perimeter as DECLARED is what the proposer wrote; the consumers it
+        # EFFECTIVELY reaches are that perimeter expanded a moment ago, because
+        # a group is a label and a chat can have filled it since; and what
+        # already binds that same audience is the commonest thing worth
+        # catching at this door — a rule that says again what is already in
+        # force. All three are computed by the engine: a page that worked out
+        # an audience by itself would be a second reading of the corpus.
+        dec = d["declared"]
+        perimeter = dec["reach"]
+        if dec["groups"]:
+            perimeter += " · groups: " + ", ".join(dec["groups"])
+        if dec["exceptions"]:
+            perimeter += " · plus: " + ", ".join(dec["exceptions"])
+        already = "".join(f"<li>{_esc(x)}</li>" for x in d["already_bound_by"])
+        already_html = (f"<p class='bad'>Already binding every one of them:</p>"
+                        f"<ul>{already}</ul>") if already else ""
         return (f"<article><label><input type='checkbox' name='approve' "
                 f"value='{_esc(d['id'])}'> <b>{_esc(d['id'])}</b> · "
                 f"{_esc(d['title'])} <span class='note'>{_esc(d['type'])} · "
-                f"{_esc(d['permanence'])} · v{_esc(d['version'])} · "
-                f"proposed by {_esc(d['source'])}</span></label>"
+                f"proposed by {_esc(d['proposed_by'])} ({_esc(d['source'])}) · "
+                f"{_esc(d['proposed_at'])}</span></label>"
                 f"<p class='note'>why: {_esc(d.get('reason'))}</p>"
                 f"{sup_html}"
                 f"<pre>{_esc(d['body'])}</pre>"
-                f"<p class='note'>perimeter: "
-                f"{_esc(', '.join(d['scopes']) or 'none')}</p></article>")
+                f"<p class='note'>declared: {_esc(perimeter)}</p>"
+                f"<p class='note'>reaches {_esc(d['reaches_count'])}: "
+                f"{_esc(', '.join(d['reaches']) or 'nobody')}</p>"
+                f"{already_html}"
+                # ONE REASON PER PROPOSAL, and it is not a form nicety: the
+                # engine refuses the whole decision if an unticked rule has no
+                # sentence to go with it. A single field for all of them would
+                # file the same excuse against proposals that were refused for
+                # different reasons, which is exactly what the proposer reads.
+                f"<label for='why-{_esc(d['id'])}'>If you leave it unticked it "
+                f"is DENIED — say why</label>"
+                f"<input id='why-{_esc(d['id'])}' type='text' "
+                f"name='reason:{_esc(d['id'])}'></article>")
 
-    def _lot_page(name: str, code: str, *, message: str = "", good: str = "",
+    def _lot_page(name: str, prj, *, message: str = "", good: str = "",
                   status: int = 200):
-        current = registry.batch(code)
+        current = prj.batch()
         head = (f"<p class='bad'>{_esc(message)}</p>" if message else "") + \
                (f"<p class='ok'>{_esc(good)}</p>" if good else "")
-        if not current["ids"]:
+        if not current["pending"]:
             return HTMLResponse(_page(f"{name} — the lot",
                                       head + "<p class='note'>Nothing is waiting.</p>",
                                       nav=_project_nav(name)), status_code=status)
         # The WHOLE pending batch, side by side. That is where three proposals
         # saying the same thing become visible as what they are, and it is why
         # ticking does not break the lot: it completes it.
-        blocks = "".join(_proposal_html(d) for d in current["proposals"])
+        blocks = "".join(_proposal_html(d) for d in current["pending"])
+        cap = current["queue_cap"]
+        ceiling = ("<p class='note'>No ceiling on this project: every proposal "
+                   "in the queue may be approved in one go.</p>" if cap is None
+                   else f"<p class='note'>At most {_esc(cap)} ticks in one "
+                        f"action — the ceiling is policy of this project, and "
+                        f"the point of it is that at the twelfth signature in a "
+                        f"row a person signs without reading.</p>")
         body = (f"{head}<form method='post' action='/p/{_esc(name)}/batch'>"
                 f"<input type='hidden' name='digest' value='{_esc(current['digest'])}'>"
                 f"{blocks}"
                 f"<p class='note'>The digest covers what you are LOOKING AT — all "
-                f"{current['count']} of them — not what you tick. If a proposal "
-                f"arrives while you read, this comes back refused and you read "
-                f"again.</p>"
-                f"<label for='reason'>Reason for the ones you leave unticked "
-                f"(they are denied)</label>"
-                f"<input id='reason' type='text' name='reason'>"
+                f"{_esc(current['count'])} of them — not what you tick. If a "
+                f"proposal arrives while you read, this comes back refused and "
+                f"you read again.</p>"
+                f"{ceiling}"
+                f"<p class='note'>{_esc(current['contract'])}</p>"
                 f"<label for='master'>Master — once for this action, never once "
                 f"per rule</label>"
                 f"<input id='master' type='password' name='master' "
@@ -541,10 +663,10 @@ def build(*, registry, log, master: str, refusal,
         if not _session_ok(request):
             return _guest(request)
         name = request.path_params["project"]
-        code = _code_of(name)
-        if code is None:
+        prj = _open(name)
+        if prj is None:
             return _no_project(name)
-        response = _lot_page(name, code)
+        response = _lot_page(name, prj)
         _issue(response)
         return response
 
@@ -552,8 +674,8 @@ def build(*, registry, log, master: str, refusal,
         if not _session_ok(request):
             return _guest(request)
         name = request.path_params["project"]
-        code = _code_of(name)
-        if code is None:
+        prj = _open(name)
+        if prj is None:
             return _no_project(name)
         form = await request.form()
         # The master, ONCE for the action and never once per rule: four rules
@@ -562,230 +684,235 @@ def build(*, registry, log, master: str, refusal,
         # avoid.
         if not secrets.compare_digest((form.get("master") or "").strip(), master):
             log.warning("refused web approval: wrong master, from %s", _client(request))
-            return _lot_page(name, code, status=401,
+            return _lot_page(name, prj, status=401,
                              message="Wrong master. Nothing was changed.")
         seen = (form.get("digest") or "").strip()
         ticked = [i.strip() for i in form.getlist("approve") if i.strip()]
-        reason = (form.get("reason") or "").strip()
-        current = registry.batch(code)
-        # THE SAME CONTRACT AS rules_approve, and checked BEFORE anything is
-        # written: what came back must be the batch that was read. Checked
-        # here rather than left to approve() because the denials happen first,
-        # and denying on a stale reading would refuse proposals nobody saw.
-        if seen != current["digest"]:
-            log.info("refused web approval: stale digest, from %s", _client(request))
-            return _lot_page(name, code, status=409, message=(
-                "The batch changed after you read it — something was proposed, "
-                "approved or denied meanwhile. Nothing was changed. This is the "
-                "page as it is now: read it again."))
-        unknown = [i for i in ticked if i not in current["ids"]]
-        if unknown:
-            return _lot_page(name, code, status=400, message=(
-                f"Not in this batch: {', '.join(unknown)}. Nothing was changed."))
-        cap = _cap(code)
-        if cap is not None and len(ticked) > cap:
-            return _lot_page(name, code, status=400, message=(
-                f"{len(ticked)} ticked and the ceiling for one action is "
-                f"{cap}. Nothing was changed: do it in more than one "
-                f"pass, which is the point of the ceiling."))
-        rest = [i for i in current["ids"] if i not in ticked]
-        if not ticked and not rest:
-            return _lot_page(name, code, status=400,
-                             message="Nothing to do.")
+        # One reason per proposal, carried on a field named after the ID it
+        # belongs to. The page collects them ALL and hands them over: which of
+        # them are needed is the engine's to say, because "unticked" is a fact
+        # about this post and "denied costs a sentence" is a law of the corpus.
+        denials = {k.split(":", 1)[1]: (v or "").strip()
+                   for k, v in form.items()
+                   if isinstance(k, str) and k.startswith("reason:")}
+        # ONE CALL, ONE TRANSACTION, and the whole of the old dance is gone
+        # with it. There used to be four checks here — stale digest, an ID
+        # from outside the lot, the ceiling, then deny-before-approve — and
+        # every one of them was a second copy of a law that lives in the
+        # engine. `decide()` holds all four, refuses before it writes
+        # anything, and records the yes and the no as a single decision: a
+        # page that re-decided them would be a page that can disagree with
+        # the corpus about what just happened.
         try:
-            # DENY FIRST. approve() takes no list — it approves the whole
-            # pending batch — so the unticked have to leave the queue before
-            # it is called. The other order would let in exactly the ones the
-            # gesture meant to keep out.
-            denied = registry.deny(code, rest, reason)["denied"] if rest else []
-            verdict = None
-            if ticked:
-                again = registry.batch(code)
-                if again["ids"] != sorted(ticked):
-                    # Somebody proposed in the moment between the denials and
-                    # the approval. Nothing is approved: what enters must be
-                    # what was read, and this is the one place where saying so
-                    # costs a half-done action rather than a wrong one.
-                    log.info("web approval stopped after the denials: the batch "
-                             "moved again, from %s", _client(request))
-                    return _lot_page(name, code, status=409, message=(
-                        f"Denied {', '.join(denied) or 'nothing'}, and then a "
-                        f"proposal arrived: NOTHING was approved, because what "
-                        f"enters has to be what you read. Here is the batch now."))
-                verdict = registry.approve(code, again["digest"])
+            verdict = prj.decide(seen, ticked, denials)
+        except fault:
+            raise
         except refusal as e:
             # A designed refusal of the engine becomes a sentence on the page.
             # It is the same conversion the MCP side does in make_tool, for the
-            # same reason: without it a wrong reason or an empty batch arrives
-            # as a 500, which teaches the person nothing and the log a
-            # traceback that is not a fault.
-            log.info("refused web approval: %s", e)
-            return _lot_page(name, code, status=400, message=str(e))
+            # same reason: without it a missing reason or a stale digest
+            # arrives as a 500, which teaches the person nothing and the log a
+            # traceback that is not a fault. The page comes back as it is NOW,
+            # because a refusal here always means "read it again".
+            log.info("refused web decision: %s", e)
+            return _lot_page(name, prj, status=400, message=str(e))
         return HTMLResponse(_page(f"{name} — done",
-                                  _verdict_html(name, verdict, denied, reason),
+                                  _verdict_html(name, verdict),
                                   nav=_project_nav(name)))
 
-    def _verdict_html(name: str, verdict, denied, reason: str) -> str:
+    def _verdict_html(name: str, verdict) -> str:
         out = []
-        if verdict:
-            out.append(f"<p class='ok'>In force: <b>"
-                       f"{_esc(', '.join(verdict['approved']))}</b> — provisional, "
-                       f"until {_esc(verdict['expires_at'])}. Staying costs a "
-                       f"decision; going is free.</p>")
-            for s in verdict["superseded"]:
-                out.append(f"<p class='ok'>Retired {_esc(s['retired'])}, pointing at "
-                           f"{_esc(s['by'])} — the same transaction.</p>")
-            for s in verdict["supersede_skipped"]:
-                out.append(f"<p class='bad'>{_esc(s['id'])} was to retire "
-                           f"{_esc(s['target'])}, and did not: {_esc(s['why'])}. "
-                           f"Somebody else had already retired it, and that is "
-                           f"not rewritten behind their back.</p>")
-        if denied:
-            out.append(f"<p>Denied: <b>{_esc(', '.join(denied))}</b> — "
-                       f"{_esc(reason)}. The refusal and its reason are on the "
-                       f"noticeboard of whoever filed them: silence became an "
-                       f"answer.</p>")
+        for a in verdict["approved"]:
+            line = (f"<p class='ok'>In force: <b>{_esc(a['id'])}</b> — "
+                    f"provisional, until {_esc(a['expires_at'])}. Staying costs "
+                    f"a decision; going is free.")
+            if a.get("retired"):
+                line += (f" It retired {_esc(a['retired'])} in the same "
+                         f"transaction, so there was no moment in which both "
+                         f"were in force.")
+            out.append(line + "</p>")
+        for d in verdict["denied"]:
+            out.append(f"<p>Denied <b>{_esc(d['id'])}</b> — {_esc(d['reason'])}. "
+                       f"The refusal and its reason are on the noticeboard of "
+                       f"whoever filed it: silence became an answer.</p>")
+        if not verdict["approved"] and not verdict["denied"]:
+            out.append("<p class='note'>Nothing was decided.</p>")
+        out.append(f"<p class='note'>Decision {_esc(verdict['decision'])}, "
+                   f"provisional term {_esc(verdict['provisional_days'])} "
+                   f"days.</p>")
         out.append(f"<p><a href='/p/{_esc(name)}/batch'>Back to the lot</a></p>")
         return "".join(out)
 
-    # ---------- the master operations: the deployment page ----------
+    # ---------- the one-time codes: the second factor, minted here ----------
     #
-    # Create, the registry index (codes included) and rekey — the operations
-    # that left the MCP surface in v3.0.0 so that no master-level secret would
-    # ever travel in a conversation. Same contract as the lot: a session to see
-    # the page, the master RETYPED once per action to act. The backup used to
-    # be here and is not any more: it handles no secret, so it went where the
-    # things that handle none live.
+    # The deployment page is GONE, and it is worth saying what left with it:
+    # creating a project and regenerating its pair were machinery for a
+    # registry that lived in a table. From v4.0.0 the registry is a declarative
+    # FILE, edited from Unraid — a project is a line, its codes are chosen by
+    # the person who writes it — so those two buttons had nothing left to call,
+    # and `projects()` no longer hands a code out to print.
+    #
+    # What this page does instead is the one thing the design says belongs to
+    # the UI and to nothing else: minting the one-time codes that every
+    # MODIFICATION of something that already exists asks for, on top of the
+    # admin code. It sits on the PROJECT because that is what it is — a row in
+    # that project's database, so a code belongs to its project by
+    # construction rather than by a check — and behind the master retyped,
+    # because a browser left open on the iPad must not be able to mint the
+    # second factor of every structural gesture.
+    #
+    # It is copied by hand from here into the chat that needs it. That is not
+    # a limitation to route around: the point of a code somebody has to go and
+    # fetch is the breath it forces — it guards against haste, not malice.
 
-    def _receipt_html(name: str, code: str, key: str) -> str:
-        """TWO secrets, TWO destinations, shown ONCE — and the destinations
-        are written on the page, not left to prose elsewhere: sending a
-        secret to the wrong home is the mistake you make once and pay for
-        twice."""
-        return (f"<p class='ok'>Project <b>{_esc(name)}</b>.</p>"
-                f"<table><tbody>"
-                f"<tr><td>project code</td><td><code>{_esc(code)}</code></td>"
-                f"<td class='note'>goes at the TOP of the project's "
-                f"instructions</td></tr>"
-                f"<tr><td>architect key</td><td><code>{_esc(key)}</code></td>"
-                f"<td class='note'>goes in the PASSWORD MANAGER — it never "
-                f"enters a conversation</td></tr>"
-                f"</tbody></table>"
-                f"<p class='bad'>Shown ONCE: neither can be read back. Leaving "
-                f"this page without copying BOTH costs another rekey.</p>"
-                f"<p><a href='/admin'>Back to the deployment page</a></p>")
+    def _codes_html(name: str, prj, *, minted=None, message: str = "") -> str:
+        data = prj.auth_codes()
+        head = f"<p class='bad'>{_esc(message)}</p>" if message else ""
+        if minted:
+            # SHOWN ONCE, and once is all it is good for. What the database
+            # keeps is a hash, so this is not a value that can be read back
+            # from anywhere — leaving the page without copying it costs
+            # another minting, which is cheap and is the whole reason this is
+            # not treated as a secret to store.
+            head += (f"<p class='ok'>Copy it now — it is not shown again and "
+                     f"it cannot be read back:</p>"
+                     f"<p><code>{_esc(minted['auth_code'])}</code></p>"
+                     f"<p class='note'>Good until {_esc(minted['expires_at'])} "
+                     f"({_esc(minted['minutes'])} minutes), for ONE gesture on "
+                     f"<b>{_esc(minted['project'])}</b>. A refused gesture rolls "
+                     f"it back and does not spend it.</p>")
+        live = "".join(f"<tr><td>#{_esc(r['code_id'])}</td>"
+                       f"<td class='note'>minted {_esc(r['minted_at'])}</td>"
+                       f"<td>expires {_esc(r['expires_at'])}</td></tr>"
+                       for r in data["live"])
+        spent = "".join(f"<tr><td>#{_esc(r['code_id'])}</td>"
+                        f"<td class='note'>minted {_esc(r['minted_at'])}</td>"
+                        f"<td class='note'>spent {_esc(r['spent_at'])}</td>"
+                        f"<td>{_esc(r['spent_action'])}</td></tr>"
+                        for r in data["spent"])
+        return (head
+                + "<form method='post' action='/p/" + _esc(name) + "/codes'>"
+                  "<label for='minutes'>Minutes it lives (blank = "
+                + _esc(data["default_minutes"]) + ")</label>"
+                  "<input id='minutes' type='text' name='minutes' inputmode='numeric'>"
+                  "<label for='cmaster'>Master — once for this action</label>"
+                  "<input id='cmaster' type='password' name='master' "
+                  "autocomplete='current-password' required>"
+                  "<p><button type='submit'>Mint a one-time code</button></p></form>"
+                + f"<h2>Live — {_esc(data['count_live'])}</h2>"
+                + (f"<table><tbody>{live}</tbody></table>" if live
+                   else "<p class='note'>None. A gesture that needs one is "
+                        "refused until somebody mints it, and the refusal says "
+                        "so.</p>")
+                + "<h2>Spent — the audit</h2>"
+                + (f"<table><tbody>{spent}</tbody></table>" if spent
+                   else "<p class='note'>None yet.</p>")
+                + "<p class='note'>The spent rows are not rubbish: they are the "
+                  "record of every structural gesture this project has had, "
+                  "with what spent them. Nothing here shows a code — the "
+                  "database keeps hashes.</p>")
 
-    async def admin_page(request):
+    async def codes_page(request):
         if not _session_ok(request):
             return _guest(request)
-        data = registry.projects()
-        rows = "".join(
-            f"<tr><td>{_esc(p['name'])}</td><td><code>{_esc(p['code'])}</code></td>"
-            f"<td>{_esc(p['active_rules'])}</td>"
-            f"<td class='note'>{_esc(p['created'])}</td></tr>"
-            for p in data["projects"])
-        opts = "".join(f"<option value='{_esc(p['name'])}'>{_esc(p['name'])}</option>"
-                       for p in data["projects"])
-        body = (
-            "<h2>The registry — codes included</h2>"
-            + (f"<table><thead><tr><th>Project</th><th>Code</th><th>In force</th>"
-               f"<th>Created</th></tr></thead><tbody>{rows}</tbody></table>"
-               if rows else "<p class='note'>No project yet.</p>")
-            + "<p class='note'>The architect keys are NOT here: they exist as "
-              "hashes. Recovering one is a rekey, which regenerates the pair.</p>"
-            + "<h2>Create a project</h2>"
-              "<form method='post' action='/admin/create'>"
-              "<label for='cname'>Name</label>"
-              "<input id='cname' type='text' name='name' required>"
-              "<label for='cdesc'>Description (optional)</label>"
-              "<input id='cdesc' type='text' name='description'>"
-              "<label for='cmaster'>Master — once for this action</label>"
-              "<input id='cmaster' type='password' name='master' "
-              "autocomplete='current-password' required>"
-              "<p><button type='submit'>Create — the receipt shows the two "
-              "secrets once</button></p></form>"
-              "<p class='note'>Born empty: domains, consumers and rules are the "
-              "Architect's seeding, done with the key on the receipt.</p>"
-            + ("<h2>Rekey</h2>"
-               "<form method='post' action='/admin/rekey'>"
-               f"<label for='rproj'>Project</label>"
-               f"<select id='rproj' name='project'>{opts}</select>"
-               "<label for='rmaster'>Master — once for this action</label>"
-               "<input id='rmaster' type='password' name='master' "
-               "autocomplete='current-password' required>"
-               "<p><button type='submit'>Regenerate the pair</button></p></form>"
-               "<p class='note'>Code AND key, always together: the old pair "
-               "dies the moment you click.</p>" if rows else "")
-            + "<p class='note'>The backup has moved to "
-              "<a href='/maintenance'>maintenance</a>: it handles no secret, so "
-              "it does not belong on the page that does.</p>")
-        response = HTMLResponse(_page("Deployment", body, nav=NAV))
+        name = request.path_params["project"]
+        prj = _open(name)
+        if prj is None:
+            return _no_project(name)
+        response = HTMLResponse(_page(f"{name} — one-time codes",
+                                      _codes_html(name, prj),
+                                      nav=_project_nav(name)))
         _issue(response)
         return response
 
-    async def admin_create(request):
+    async def codes_mint(request):
         if not _session_ok(request):
             return _guest(request)
-        form = await request.form()
-        # The master, RETYPED for the action, compared in constant time —
-        # inline, not delegated: the guard is pinned as written, and a
-        # session alone is a browser left open on the iPad.
-        if not secrets.compare_digest((form.get("master") or "").strip(), master):
-            log.warning("refused web create: wrong master, from %s",
-                        _client(request))
-            return HTMLResponse(
-                _page("Deployment", "<p class='bad'>Wrong master. Nothing was "
-                                    "changed.</p>", nav=NAV), status_code=401)
-        try:
-            out = registry.create_project((form.get("name") or "").strip(),
-                                          description=(form.get("description")
-                                                       or "").strip())
-        except refusal as e:
-            log.info("refused web create: %s", e)
-            return HTMLResponse(_page("Deployment",
-                                      f"<p class='bad'>{_esc(e)}</p>", nav=NAV),
-                                status_code=400)
-        return HTMLResponse(_page("Deployment — receipt",
-                                  _receipt_html(out["created"], out["code"],
-                                                out["architect_key"]), nav=NAV))
-
-    async def admin_rekey(request):
-        if not _session_ok(request):
-            return _guest(request)
-        form = await request.form()
-        # The master, RETYPED for the action, compared in constant time —
-        # inline, not delegated: the guard is pinned as written, and a
-        # session alone is a browser left open on the iPad.
-        if not secrets.compare_digest((form.get("master") or "").strip(), master):
-            log.warning("refused web rekey: wrong master, from %s",
-                        _client(request))
-            return HTMLResponse(
-                _page("Deployment", "<p class='bad'>Wrong master. Nothing was "
-                                    "changed.</p>", nav=NAV), status_code=401)
-        name = (form.get("project") or "").strip()
-        code = _code_of(name)
-        if code is None:
+        name = request.path_params["project"]
+        prj = _open(name)
+        if prj is None:
             return _no_project(name)
+        form = await request.form()
+        # The master, RETYPED for the action, compared in constant time —
+        # inline, not delegated: the guard is pinned as written, and a session
+        # alone is a browser left open on the iPad.
+        if not secrets.compare_digest((form.get("master") or "").strip(), master):
+            log.warning("refused web minting: wrong master, from %s", _client(request))
+            return HTMLResponse(
+                _page(f"{name} — one-time codes",
+                      _codes_html(name, prj,
+                                  message="Wrong master. Nothing was minted."),
+                      nav=_project_nav(name)), status_code=401)
+        raw = (form.get("minutes") or "").strip()
+        if raw and not raw.isdigit():
+            return HTMLResponse(
+                _page(f"{name} — one-time codes",
+                      _codes_html(name, prj, message=(
+                          f"{raw!r} is not a whole number of minutes. Nothing "
+                          f"was minted.")),
+                      nav=_project_nav(name)), status_code=400)
         try:
-            out = registry.rekey_project(code)
+            minted = prj.mint_auth_code(int(raw) if raw else 0)
+        except fault:
+            raise
         except refusal as e:
-            log.info("refused web rekey: %s", e)
-            return HTMLResponse(_page("Deployment",
-                                      f"<p class='bad'>{_esc(e)}</p>", nav=NAV),
-                                status_code=400)
-        return HTMLResponse(_page("Deployment — receipt",
-                                  _receipt_html(out["project"], out["code"],
-                                                out["architect_key"]), nav=NAV))
+            log.info("refused web minting: %s", e)
+            return HTMLResponse(
+                _page(f"{name} — one-time codes",
+                      _codes_html(name, prj, message=str(e)),
+                      nav=_project_nav(name)), status_code=400)
+        # The MINTING is logged and the code is not: what a log is for here is
+        # answering "who let that gesture through", and the answer is the row,
+        # not the secret.
+        log.info("one-time code minted for %s, %s minutes", name, minted["minutes"])
+        return HTMLResponse(_page(f"{name} — one-time codes",
+                                  _codes_html(name, prj, minted=minted),
+                                  nav=_project_nav(name)))
 
-    # ---------- maintenance: what needs no secret ----------
+    async def project_backup(request):
+        if not _session_ok(request):
+            return _guest(request)
+        name = request.path_params["project"]
+        prj = _open(name)
+        if prj is None:
+            return _no_project(name)
+        # NO MASTER HERE, and it is written down rather than left to be
+        # noticed. `VACUUM INTO` is a READING: it changes nothing, and the file
+        # it produces lands on the server's disk. The session is the whole of
+        # what this needs. `test_surface` pins the exception BY NAME, so
+        # putting the master back is a decision somebody has to take on purpose
+        # rather than a line that drifts back in.
+        try:
+            out = prj.backup(backup_dir)
+        except fault:
+            raise
+        except refusal as e:
+            log.info("refused web backup: %s", e)
+            return HTMLResponse(_page(f"{name} — backup",
+                                      f"<p class='bad'>{_esc(e)}</p>",
+                                      nav=_project_nav(name)), status_code=400)
+        # Logged, and therefore visible on the maintenance page: a copy taken
+        # off-site is the kind of thing you want to be able to date afterwards.
+        log.info("backup written: %s — %s bytes", out["backup"], out["bytes"])
+        return HTMLResponse(_page(
+            f"{name} — backup",
+            f"<p class='ok'>Quiescent copy written: {_esc(out['backup'])} — "
+            f"{_esc(out['bytes'])} bytes. It opens without recovery, and it is "
+            f"the one to take off-site.</p>"
+            f"<p class='note'>{_esc(out['note'])}</p>"
+            f"<p><a href='/p/{_esc(name)}/'>Back to the project</a></p>",
+            nav=_project_nav(name)))
+
+    # ---------- maintenance: what needs no secret and no project ----------
     #
-    # The page for the operations that touch NO secret — the backup, which is
-    # a reading, and the log, which is a reading of a reading. Kept apart from
-    # deployment on purpose: that page creates projects, regenerates pairs and
-    # shows the codes, so the master retyped there means something. A page
-    # where the master would defend nothing is a page where retyping it teaches
-    # the habit of typing it without looking, which is the habit the lot exists
-    # to prevent.
+    # What is left here is the LOG, and that is the whole page: a reading of a
+    # reading, with no secret in it and no project behind it. The backup left
+    # for the project pages when a backup became per-project — a project is a
+    # folder now, and a copy of one of them is a gesture on one — and the
+    # deployment page left the service altogether with the declarative
+    # registry. A page where the master would defend nothing is a page where
+    # retyping it teaches the habit of typing it without looking, which is the
+    # habit the lot exists to prevent.
 
     def _maintenance_html(*, message: str = "", good: str = "") -> str:
         head = ((f"<p class='bad'>{_esc(message)}</p>" if message else "")
@@ -799,16 +926,6 @@ def build(*, registry, log, master: str, refusal,
                 else "<p class='note'>Nothing logged since the service "
                      "started.</p>")
         return (head
-                + "<h2>Backup</h2>"
-                  "<form method='post' action='/maintenance/backup'>"
-                  "<p><button type='submit'>VACUUM INTO a quiescent "
-                  "copy</button></p></form>"
-                  "<p class='note'>No master, and that is a decision rather "
-                  "than an omission: this changes nothing and the copy lands "
-                  "on the server's disk, not in this browser, so a master "
-                  "retyped here would have defended against one extra file in "
-                  "a directory. The operations that do handle a secret stay on "
-                  "the <a href='/admin'>deployment</a> page.</p>"
                 + f"<h2>The log — the last {len(seen)} of "
                   f"{_esc(ring.lines.maxlen)} lines</h2>"
                 + "<p class='note'>Newest first. In memory and nowhere else: "
@@ -829,45 +946,22 @@ def build(*, registry, log, master: str, refusal,
         _issue(response)
         return response
 
-    async def maintenance_backup(request):
-        if not _session_ok(request):
-            return _guest(request)
-        # NO MASTER HERE, and it is written down rather than left to be
-        # noticed. `VACUUM INTO` is a READING: it changes nothing, and the file
-        # it produces lands on the server's disk. The session is the whole of
-        # what this needs. `test_surface` pins the exception BY NAME, so
-        # putting the master back is a decision somebody has to take on
-        # purpose rather than a line that drifts back in.
-        try:
-            out = registry.backup(backup_dir)
-        except refusal as e:
-            log.info("refused web backup: %s", e)
-            return HTMLResponse(_page("Maintenance",
-                                      _maintenance_html(message=str(e)), nav=NAV),
-                                status_code=400)
-        # Logged, and therefore visible on the page that ordered it: a copy
-        # taken off-site is the kind of thing you want to be able to date
-        # afterwards.
-        log.info("backup written: %s — %s bytes", out["backup"], out["bytes"])
-        return HTMLResponse(_page("Maintenance", _maintenance_html(
-            good=f"Quiescent copy written: {out['backup']} — {out['bytes']} "
-                 f"bytes. It opens without recovery, and it is the one to take "
-                 f"off-site."), nav=NAV))
-
     # ---------- the consultation: it reads, and only reads ----------
 
     def _read_page(request, render):
-        """The shape every read page shares: a session, a project, and the
-        code resolved from the name. Written once so that adding a page cannot
-        add a page that forgot the session."""
+        """The shape every read page shares: a session, and the project
+        resolved from the name in the URL. Written once so that adding a page
+        cannot add a page that forgot the session."""
         if not _session_ok(request):
             return _guest(request)
         name = request.path_params["project"]
-        code = _code_of(name)
-        if code is None:
+        prj = _open(name)
+        if prj is None:
             return _no_project(name)
         try:
-            body, title = render(name, code)
+            body, title = render(name, prj)
+        except fault:
+            raise
         except refusal as e:
             log.info("refused web read: %s", e)
             body, title = f"<p class='bad'>{_esc(e)}</p>", name
@@ -875,149 +969,170 @@ def build(*, registry, log, master: str, refusal,
         _issue(response)
         return response
 
-    def _pick(request, code: str) -> str:
+    def _pick(request, prj) -> str:
         """The consumer asked for, or the first one there is. Never empty: the
         readings that want a consumer refuse without one, and a page that
         opened on a refusal would teach that it is broken."""
         wanted = (request.query_params.get("consumer") or "").strip()
-        names = _consumers(code)
+        names = _consumers(prj)
         return wanted if wanted in names else (names[0] if names else "")
 
     async def rules_page(request):
-        def render(name, code):
-            consumer = _pick(request, code)
-            picker = _consumer_picker(name, code, consumer, "rules")
+        def render(name, prj):
+            consumer = _pick(request, prj)
+            picker = _consumer_picker(name, prj, consumer, "rules")
             if not consumer:
                 return picker + "<p class='note'>No consumer in this project.</p>", name
-            data = registry.list_rules(code, consumer)
-            # The BRIEF leads, exactly as it does in rules_list: "you are
-            # so-and-so, and these are your rules" is one round trip, which is
-            # the reason the field exists at all. Empty is not an error.
-            brief = (f"<p class='ok'>{_esc(data['brief'])}</p>" if data["brief"]
+            data = prj.list_rules(consumer)
+            # The PROJECT leads and then the consumer, which is the order
+            # `rules_list` puts them in and the order a person builds the
+            # picture in: where am I, who am I, what binds me. Empty is not an
+            # error — a project with no profile yet is a legitimate state.
+            profile = data["profile"]
+            who = data["consumer"]
+            head = (f"<p class='ok'>{_esc(profile['brief'])}</p>" if profile["brief"]
+                    else "<p class='note'>This project has no brief.</p>")
+            head += (f"<p class='ok'>{_esc(who['brief'])}</p>" if who["brief"]
                      else "<p class='note'>This consumer has no brief.</p>")
-            legend = " · ".join(f"{_esc(d)} {_esc(t)}"
-                                for d, t in data["domains"].items())
+            # The rules come in SHORT form — no bodies — because that is what
+            # `rules_list` serves and this page must show what a chat reads,
+            # not a richer version of it. The body is one click away.
             rows = "".join(
                 f"<tr><td><a href='/p/{_esc(name)}/rule/{_esc(r['id'])}"
                 f"?consumer={_esc(consumer)}'>{_esc(r['id'])}</a></td>"
-                f"<td><pre>{_esc(r['body'])}</pre></td></tr>"
-                for r in data["rules"])
-            return (picker + brief
-                    + (f"<p class='note'>{legend}</p>" if legend else "")
-                    + f"<p class='note'>{data['count']} in force, widest first — "
-                      f"what comes first binds everyone. "
-                      f"{data['outside_your_scope']} are outside this perimeter.</p>"
+                f"<td>{_esc(r['title'])}</td>"
+                f"<td class='note'>{_esc(r['reach'])} · {_esc(r['permanence'])}"
+                + (f" · {_esc(r.get('reaches_you'))}" if r.get("reaches_you") else "")
+                + "</td></tr>" for r in data["rules"])
+            # The DESK, in the short form the engine serves — id, title,
+            # urgent, age. It closes the page for the same reason it closes
+            # `rules_list`: post that dies in a queue nobody opens is post
+            # nobody answers.
+            desk = data["desk"]
+            tasks = "".join(
+                f"<li>{_esc(t['id'])} · {_esc(t['title'])} "
+                f"<span class='note'>{'URGENT · ' if t['urgent'] else ''}"
+                f"{_esc(t['age_days'])} days old</span></li>"
+                for t in desk["open"])
+            return (picker + head
+                    + f"<p class='note'>{_esc(data['count'])} in force, widest "
+                      f"first — what comes first binds everyone."
+                    + (" ⚠ truncated" if data.get("truncated") else "")
+                    + "</p>"
                     + (f"<table><tbody>{rows}</tbody></table>" if rows
-                       else "<p class='note'>Nothing in force for this consumer.</p>"),
+                       else "<p class='note'>Nothing in force for this consumer.</p>")
+                    + f"<h2>Desk — {_esc(desk['open_count'])} open</h2>"
+                    + (f"<ul>{tasks}</ul>" if tasks
+                       else "<p class='note'>Nothing open.</p>"),
                     f"{name} — rules for {consumer}")
         return _read_page(request, render)
 
     async def rule_page(request):
-        def render(name, code):
+        def render(name, prj):
             rid = request.path_params["rule"]
-            consumer = _pick(request, code)
+            consumer = _pick(request, prj)
             out = [f"<p class='note'>Read as <b>{_esc(consumer)}</b>.</p>"]
-            data = registry.get_rules(code, [rid], consumer)
-            for f in data["found"]:
-                mark = (f" — <b>{_esc(f['status'])}</b>" if f.get("status") else "")
+            # ONE call for the rule AND its story. `history=True` is an
+            # argument and not a second method since v4.0.0 — the story of a
+            # rule is an attribute of the rule, and the diff between one
+            # version and the one before it is computed on read. The arbitrary
+            # A-to-B comparison died with it, on purpose: what anybody ever
+            # wanted was N against N−1.
+            data = prj.get_rules([rid], consumer, history=True)
+            for f in data["rules"]:
+                mark = f" — <b>{_esc(f['status'])}</b>"
+                if not f["in_force"] and f["status"] == "active":
+                    mark += " (expired: it has left the lists on its own)"
                 if f.get("superseded_by"):
                     mark += f", superseded by {_esc(f['superseded_by'])}"
-                out.append(f"<p>{_esc(f['id'])}{mark}</p><pre>{_esc(f['body'])}</pre>")
-            for f in data["not_yours"]:
-                out.append(f"<p class='bad'>{_esc(f['id'])} exists and is not this "
-                           f"consumer's: it is held by "
-                           f"{_esc(', '.join(f['held_by']) or 'nobody')}.</p>")
-            for f in data["never_defined"]:
-                out.append(f"<p class='bad'>{_esc(f)} was never defined in this "
-                           f"project — a broken citation, or another project's "
-                           f"code.</p>")
-            # THE HISTORY, which is where the state, the perimeter and the why
-            # live version by version. It is perimeter-free on purpose: what a
-            # rule has BEEN is not addressed to a consumer.
-            versions = []
-            try:
-                versions = registry.history(code, rid)["versions"]
-            except refusal as e:
-                out.append(f"<p class='note'>{_esc(e)}</p>")
-            if versions:
-                rows = "".join(
-                    f"<tr><td>v{_esc(v['version'])}</td><td>{_esc(v['ts'])}</td>"
-                    f"<td>{_esc(v['action'])}</td><td>{_esc(v['status'])} · "
-                    f"{_esc(v['permanence'])}</td><td>{_esc(v['scopes'])}</td>"
-                    f"<td class='note'>{_esc(v['reason'])}</td></tr>"
-                    for v in versions)
-                out.append("<h2>History</h2><table><thead><tr><th></th><th>when</th>"
-                           "<th>what</th><th>state</th><th>perimeter</th><th>why</th>"
-                           f"</tr></thead><tbody>{rows}</tbody></table>")
-                # The expiry, read from the method born in C5: the page used
-                # to DECLARE that no method of Registry handed this out, and
-                # the declaration was the gap's honest form. The deciding
-                # still happens on the expiring queue; this is a reading.
-                exp = registry.expiry(code, rid)
-                if exp["permanence"] == "permanent":
-                    out.append("<p class='note'>Permanent: no expiry — "
-                               "somebody promised to notice when it goes "
-                               "stale.</p>")
-                elif exp["expires_at"]:
-                    gone = (exp["status"] == "active" and not exp["in_force"])
-                    out.append(f"<p class='note'>Expires "
-                               f"{_esc(exp['expires_at'])}"
-                               + (" — <b>already expired</b>: it has left the "
-                                  "lists on its own" if gone else "")
-                               + ". Renewal lives on the pending page, where "
-                                 "the reason is in front of you.</p>")
-                latest = versions[-1]["version"]
-                a = int(request.query_params.get("a") or max(1, latest - 1))
-                b = int(request.query_params.get("b") or latest)
-                if latest > 1:
-                    diff = registry.compare(code, rid, a, b)
-                    out.append(f"<h2>v{_esc(a)} to v{_esc(b)}</h2>"
-                               + (f"<pre>{_esc(diff['diff'])}</pre>" if not diff["identical"]
-                                  else "<p class='note'>Identical.</p>"))
+                if f.get("supersedes"):
+                    mark += f", superseding {_esc(f['supersedes'])}"
+                out.append(f"<p>{_esc(f['id'])} · {_esc(f['title'])}{mark}</p>"
+                           f"<pre>{_esc(f['body'])}</pre>")
+                # The PERIMETER and the LIFE, both read off the same payload:
+                # a page that asked a second method for the expiry would be a
+                # second reading of the row it is already holding.
+                perimeter = f["reach"]
+                if f.get("groups"):
+                    perimeter += " · groups: " + ", ".join(f["groups"])
+                if f.get("exceptions"):
+                    perimeter += " · plus: " + ", ".join(f["exceptions"])
+                out.append(f"<p class='note'>{_esc(perimeter)} — reaches "
+                           f"{_esc(f['reaches_count'])}</p>")
+                if f["permanence"] == "permanent":
+                    out.append("<p class='note'>Permanent: no expiry — somebody "
+                               "promised to notice when it goes stale.</p>")
+                elif f["expires_at"]:
+                    out.append(f"<p class='note'>Expires {_esc(f['expires_at'])}. "
+                               f"Renewal lives on the "
+                               f"<a href='/p/{_esc(name)}/renewals'>renewals</a> "
+                               f"page, where the reason is in front of you.</p>")
+                out.append(f"<p class='note'>why: {_esc(f['reason'])} · "
+                           f"proposed by {_esc(f['proposed_by'])} "
+                           f"({_esc(f['source'])})</p>")
+                if f.get("cited_by"):
+                    out.append(f"<p class='note'>cited by "
+                               f"{_esc(', '.join(f['cited_by']))}</p>")
+                # THE HISTORY, as dated GESTURES: when, what verb, whose hand,
+                # and only the fields that differ from the version before.
+                rows = ""
+                for g in f.get("history", []):
+                    # The changed fields, one per line, and the audience
+                    # movement in NAMES: who joined and who left is the half
+                    # of a perimeter change a person can actually check.
+                    what = "\n".join(f"{k}: {v}" for k, v in g["changed"].items())
+                    if g.get("joined"):
+                        what += "\njoined: " + ", ".join(g["joined"])
+                    if g.get("left"):
+                        what += "\nleft: " + ", ".join(g["left"])
+                    rows += (f"<tr><td>v{_esc(g['version'])}</td>"
+                             f"<td>{_esc(g['timestamp'])}</td>"
+                             f"<td>{_esc(g['action'])}</td>"
+                             f"<td>{_esc(g['actor'])}</td>"
+                             f"<td class='note'><pre>{_esc(what)}</pre>"
+                             f"{_esc(g.get('reason') or '')}</td></tr>")
+                if rows:
+                    out.append("<h2>History</h2><table><thead><tr><th></th>"
+                               "<th>when</th><th>what</th><th>hand</th>"
+                               "<th>what changed</th>"
+                               f"</tr></thead><tbody>{rows}</tbody></table>")
+            for missing in data.get("not_found", []):
+                out.append(f"<p class='bad'>{_esc(missing)} was never defined in "
+                           f"this project — a broken citation, or another "
+                           f"project's ID.</p>")
             return "".join(out), f"{name} — {rid}"
         return _read_page(request, render)
 
-    async def pending_page(request):
-        def render(name, code):
-            consumer = (request.query_params.get("consumer") or "").strip()
-            picker = _consumer_picker(name, code, consumer, "pending")
-            data = registry.pending(code, consumer if consumer in _consumers(code) else "")
-            def table(title, rows, why=False):
-                if not rows:
-                    return f"<h2>{title}</h2><p class='note'>None.</p>"
-                trs = "".join(
-                    f"<tr><td><a href='/p/{_esc(name)}/rule/{_esc(r['id'])}'>"
-                    f"{_esc(r['id'])}</a></td><td>{_esc(r.get('title'))}</td>"
-                    f"<td class='note'>{_esc(r.get('expires_at') or '')}</td>"
-                    f"<td class='note'>{_esc(r.get('reason') or r.get('denied_reason') or '')}"
-                    f"</td></tr>" for r in rows)
-                return f"<h2>{title}</h2><table><tbody>{trs}</tbody></table>"
-            # The expiring queue is per CONSUMER in the engine, and it is the
-            # only list that carries the WHY — it is the one read in order to
-            # decide, and that decision is undecidable without the reason in
-            # front of you. Without a consumer chosen the engine returns none,
-            # and the page says so rather than showing an empty table that
-            # reads like good news.
+    async def renewals_page(request):
+        def render(name, prj):
+            # The page is called RENEWALS and not "pending" since v4.0.0,
+            # because the pending queue moved: the whole lot is on the lot
+            # page, where it is decided. What is left here is the only other
+            # queue there is — what is about to stop binding — and it is
+            # PROJECT-WIDE now, read from the state report rather than from a
+            # per-consumer list. A rule that expires stops binding everybody
+            # it reached, so a queue that showed one consumer's half was a
+            # queue that made the decision look smaller than it is.
             #
-            # And it is where the corpus is GOVERNED: renewal and promotion
-            # act from here, since v3.0.0 — the reason is on the row you
-            # tick, which is the whole argument for the queue being the one
-            # place the date is published. Same contract as the lot: master
-            # once per action, ceiling per action.
-            expiring = data["expiring_within_30_days"]
-            if expiring:
-                trs = "".join(
-                    f"<tr><td><label><input type='checkbox' name='rule' "
-                    f"value='{_esc(r['id'])}'> "
-                    f"<a href='/p/{_esc(name)}/rule/{_esc(r['id'])}'>"
-                    f"{_esc(r['id'])}</a></label></td><td>{_esc(r.get('title'))}</td>"
-                    f"<td class='note'>{_esc(r.get('expires_at') or '')}</td>"
-                    f"<td class='note'>{_esc(r.get('reason') or '')}</td></tr>"
-                    for r in expiring)
-                exp_html = (
-                    f"<h2>Expiring within 30 days</h2>"
-                    f"<form method='post' action='/p/{_esc(name)}/pending'>"
-                    f"<input type='hidden' name='consumer' value='{_esc(consumer)}'>"
+            # This is where the corpus is GOVERNED: the question is not "is it
+            # still true?" but "would I file this today, for the reason it was
+            # filed for?" — and the reason is on the row. Same contract as the
+            # lot: master once per action, ceiling per action.
+            expiring = prj.status()["expiring"]
+            if not expiring:
+                return ("<h2>Expiring within 30 days</h2>"
+                        "<p class='note'>None.</p>", f"{name} — renewals")
+            trs = "".join(
+                f"<tr><td><label><input type='checkbox' name='rule' "
+                f"value='{_esc(r['id'])}'> "
+                f"<a href='/p/{_esc(name)}/rule/{_esc(r['id'])}'>"
+                f"{_esc(r['id'])}</a></label></td><td>{_esc(r['title'])}</td>"
+                f"<td class='note'>{_esc(r['expires_at'])} — "
+                f"{_esc(r['in_days'])} days</td>"
+                f"<td class='note'>{_esc(r['reason'])}</td></tr>"
+                for r in expiring)
+            return (f"<h2>Expiring within 30 days</h2>"
+                    f"<form method='post' action='/p/{_esc(name)}/renewals'>"
                     f"<table><tbody>{trs}</tbody></table>"
                     f"<p class='note'>Renewal is where the corpus is governed, "
                     f"and the question is not \"is it still true?\" but \"would "
@@ -1031,37 +1146,26 @@ def build(*, registry, log, master: str, refusal,
                     f"<p><button type='submit' name='action' value='renew'>"
                     f"Renew the ticked</button> "
                     f"<button type='submit' name='action' value='promote'>"
-                    f"Promote the ticked to PERMANENT</button></p></form>")
-            else:
-                exp_html = ("<h2>Expiring within 30 days</h2>"
-                            "<p class='note'>None.</p>")
-            tail = ("" if consumer else
-                    "<p class='note'>The expiring queue is per consumer: choose "
-                    "one above to see it.</p>")
-            return (picker + table("Waiting", data["waiting"])
-                    + table("Denied", data["denied"])
-                    + exp_html + tail,
-                    f"{name} — pending")
+                    f"Promote the ticked to PERMANENT</button></p></form>",
+                    f"{name} — renewals")
         return _read_page(request, render)
 
-    async def pending_action(request):
-        """Renew or promote the ticked rules: the write half of the pending
+    async def renewals_action(request):
+        """Renew or promote the ticked rules: the write half of the renewals
         page. Same shape as the lot's action — session, master retyped once,
         ceiling per action, refusals as sentences — because a second shape
         would be a second thing to get wrong."""
         if not _session_ok(request):
             return _guest(request)
         name = request.path_params["project"]
-        code = _code_of(name)
-        if code is None:
+        prj = _open(name)
+        if prj is None:
             return _no_project(name)
         form = await request.form()
-        consumer = (form.get("consumer") or "").strip()
-        back = (f"<p><a href='/p/{_esc(name)}/pending"
-                + (f"?consumer={_esc(consumer)}" if consumer else "")
-                + "'>Back to the pending page</a></p>")
+        back = (f"<p><a href='/p/{_esc(name)}/renewals'>Back to the renewals "
+                f"page</a></p>")
         def say(msg, cls, status):
-            return HTMLResponse(_page(f"{name} — pending",
+            return HTMLResponse(_page(f"{name} — renewals",
                                       f"<p class='{cls}'>{msg}</p>{back}",
                                       nav=_project_nav(name)), status_code=status)
         if not secrets.compare_digest((form.get("master") or "").strip(), master):
@@ -1074,66 +1178,110 @@ def build(*, registry, log, master: str, refusal,
             return say("Unknown action. Nothing was changed.", "bad", 400)
         if not ticked:
             return say("Nothing ticked, nothing done.", "bad", 400)
-        cap = _cap(code)
-        if cap is not None and len(ticked) > cap:
+        # The ceiling, asked of the project — the same knob the lot obeys, for
+        # the same reason: at the twelfth signature in a row a person signs
+        # without reading. `decide()` enforces it on its own side; here there
+        # is no engine method that would, so this is the one place it is
+        # checked, and it is checked BEFORE anything is written.
+        cap = _cap(prj)
+        if cap is not None and cap > 0 and len(ticked) > cap:
             return say(f"{len(ticked)} ticked and the ceiling for one action "
                        f"is {cap}. Nothing was changed: do it in more "
                        f"than one pass, which is the point of the ceiling.",
                        "bad", 400)
         try:
             if action == "renew":
-                v = registry.renew(code, ticked)
-                whys = "".join(f"<li>{_esc(rid)} <span class='note'>— why it "
-                               f"exists: {_esc(why)}</span></li>"
-                               for rid, why in v["reasons"].items())
+                v = prj.renew(ticked)
+                rows = "".join(f"<li>{_esc(r['id'])} <span class='note'>— until "
+                               f"{_esc(r['expires_at'])}</span></li>"
+                               for r in v["renewed"])
                 return HTMLResponse(_page(
                     f"{name} — renewed",
-                    f"<p class='ok'>Renewed <b>{_esc(', '.join(v['renewed']))}"
-                    f"</b> until {_esc(v['expires_at'])} — let in again, which "
-                    f"is what staying costs.</p><ul>{whys}</ul>{back}",
+                    f"<p class='ok'>Renewed for another {_esc(v['days'])} days "
+                    f"— let in again, which is what staying costs.</p>"
+                    f"<ul>{rows}</ul>{back}",
                     nav=_project_nav(name)))
-            v = registry.promote(code, ticked)
+            v = prj.promote(ticked)
             return HTMLResponse(_page(
                 f"{name} — promoted",
                 f"<p class='ok'>Permanent: <b>{_esc(', '.join(v['promoted']))}"
                 f"</b>. No expiry, it never leaves on its own — you promised "
                 f"to notice when it goes stale.</p>{back}",
                 nav=_project_nav(name)))
+        except fault:
+            raise
         except refusal as e:
             log.info("refused web renewal: %s", e)
             return say(_esc(e), "bad", 400)
 
     async def status_page(request):
-        def render(name, code):
-            st = registry.status(code)
-            def dl(d):
-                return "".join(f"<tr><td>{_esc(k)}</td><td>{_esc(v)}</td></tr>"
-                               for k, v in d.items())
-            return ("<h2>Rules</h2><table><tbody>" + dl(st["rules"])
-                    + "</tbody></table><h2>By domain</h2><table><tbody>"
-                    + dl(st["by_domain"]) + "</tbody></table>"
-                    + "<h2>By consumer</h2><table><tbody>"
-                    + dl(st["by_consumer"]) + "</tbody></table>"
-                    + "<h2>Database</h2><table><tbody>" + dl(st["database"])
-                    + "</tbody></table>", f"{name} — state")
+        def render(name, prj):
+            st = prj.status()
+            counts = "".join(f"<tr><td>{_esc(k)}</td><td>{_esc(v)}</td></tr>"
+                             for k, v in st["counted"].items())
+            out = [f"<h2>Counted</h2><table><tbody>{counts}</tbody></table>",
+                   f"<p class='note'>Queue ceiling: "
+                   f"{_esc('none' if st['queue_cap'] is None else st['queue_cap'])}"
+                   f" — policy of this project, changed with the admin code and "
+                   f"a one-time code.</p>"]
+
+            def findings(title, rows, render_row, empty="Nothing."):
+                if not rows:
+                    return f"<h2>{title}</h2><p class='note'>{empty}</p>"
+                items = "".join(f"<li>{render_row(r)}</li>" for r in rows)
+                return f"<h2>{title}</h2><ul>{items}</ul>"
+
+            # THE RETIRED, and this page is the only place they are readable:
+            # `project_info` shows the live alone, on purpose, but a retired
+            # name is still a name TAKEN — a create is refused pointing at
+            # something the caller cannot see, and a revive needs a target.
+            ret = st["retired"]
+            retired_rows = ([f"domain {_esc(r['code'])} — {_esc(r['reason'])}"
+                             for r in ret["domains"]]
+                            + [f"consumer {_esc(r['name'])} ({_esc(r['kind'])}) — "
+                               f"{_esc(r['reason'])}" for r in ret["consumers"]]
+                            + [f"group {_esc(r['name'])} — {_esc(r['reason'])}"
+                               for r in ret["groups"]])
+            out.append(findings("Retired — the names still taken", retired_rows,
+                                lambda r: r, "None: every name is free."))
+            out.append(findings(
+                "Expiring within 30 days", st["expiring"],
+                lambda r: (f"<a href='/p/{_esc(name)}/rule/{_esc(r['id'])}'>"
+                           f"{_esc(r['id'])}</a> — {_esc(r['title'])}, "
+                           f"{_esc(r['in_days'])} days")))
+            out.append(findings(
+                "Citations pointing nowhere", st["dangling_citations"],
+                lambda r: (f"{_esc(r['in'])} ({_esc(r['field'])}) cites "
+                           f"{_esc(r['cites'])} — {_esc(r['state'])}")))
+            out.append(findings(
+                "Overlaps that formed later", st["overlaps"],
+                lambda r: f"{_esc(r['rule'])} · {_esc(r['consumer'])} — {_esc(r['note'])}"))
+            out.append(findings(
+                "Stray audience rows", st["stray_audience_rows"],
+                lambda r: f"{_esc(r['rule'])} — {_esc(r['rows'])} rows: {_esc(r['note'])}"))
+            out.append(findings("Domains with no rule", st["domains_with_no_rules"],
+                                lambda r: _esc(r)))
+            out.append(findings("Consumers no rule reaches",
+                                st["consumers_no_rule_reaches"], lambda r: _esc(r)))
+            out.append(f"<p class='note'>{_esc(st['note'])}</p>")
+            return "".join(out), f"{name} — state"
         return _read_page(request, render)
 
     routes = [
         Route("/", home, methods=["GET"]),
         Route("/login", login, methods=["POST"]),
         Route("/logout", logout, methods=["POST"]),
-        Route("/admin", admin_page, methods=["GET"]),
-        Route("/admin/create", admin_create, methods=["POST"]),
-        Route("/admin/rekey", admin_rekey, methods=["POST"]),
         Route("/maintenance", maintenance_page, methods=["GET"]),
-        Route("/maintenance/backup", maintenance_backup, methods=["POST"]),
         Route("/p/{project}/", project_home, methods=["GET"]),
+        Route("/p/{project}/backup", project_backup, methods=["POST"]),
         Route("/p/{project}/batch", batch_page, methods=["GET"]),
         Route("/p/{project}/batch", batch_action, methods=["POST"]),
+        Route("/p/{project}/codes", codes_page, methods=["GET"]),
+        Route("/p/{project}/codes", codes_mint, methods=["POST"]),
+        Route("/p/{project}/renewals", renewals_page, methods=["GET"]),
+        Route("/p/{project}/renewals", renewals_action, methods=["POST"]),
         Route("/p/{project}/rules", rules_page, methods=["GET"]),
         Route("/p/{project}/rule/{rule}", rule_page, methods=["GET"]),
-        Route("/p/{project}/pending", pending_page, methods=["GET"]),
-        Route("/p/{project}/pending", pending_action, methods=["POST"]),
         Route("/p/{project}/status", status_page, methods=["GET"]),
     ]
     return Starlette(routes=routes)

@@ -8,7 +8,9 @@ The admin code travels in `key`, on **every** call: elevation is per call —
 there is no session, no `su` that persists. The scale is FLAT: **creating takes
 the admin code; MODIFYING anything that exists takes the admin code PLUS a
 one-time `auth_code`** — perimeters, retirements, renames, briefs, group
-membership, `queue_cap`. The code is minted on the web UI's maintenance page:
+membership, `queue_cap`. The code is minted on the web UI, on the PROJECT's own
+codes page — a code is a row in that project's database, so it is good for that
+project and for no other. It is shown once and copied by hand into the chat:
 minutes to live, burned in the same transaction as the SUCCEEDED gesture — a
 refusal rolls back and does not consume it. Spent or expired it is nothing;
 alone it elevates nobody. Chained gestures mint one code per gesture, one at a
