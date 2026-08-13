@@ -389,14 +389,17 @@ equals("the verbs the database can derive, it derives",
         (3, "amended", "architect"), (4, "retired", "architect")])
 equals("the display ID is built from the domain code and the number",
        con.execute("SELECT display_id FROM v_rule").fetchone()[0], "VA-0001")
-con.execute("UPDATE consumer SET name='fidelity advisory',actor='architect'"
+# The new spelling is ONE WORD, like every consumer name since `RE_NAME`
+# narrowed: this file writes raw SQL and would take a space happily, but a
+# literal here that the engine refuses reads as an endorsement of it.
+con.execute("UPDATE consumer SET name='advisor',actor='architect'"
             " WHERE consumer_id=2")
 con.commit()
 equals("a rename is named, and the snapshot keeps the old spelling",
        con.execute("SELECT name,action,actor FROM consumer_version"
                    " WHERE consumer_id=2 ORDER BY version").fetchall(),
        [("advisory", "created", "architect"),
-        ("fidelity advisory", "renamed", "architect")])
+        ("advisor", "renamed", "architect")])
 con.close()
 
 # =====================================================================

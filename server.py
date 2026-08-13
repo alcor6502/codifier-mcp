@@ -371,14 +371,21 @@ def reference_guide(project: str = "", key: str = "") -> dict:
 
 @tool
 def project_info(project: str) -> dict:
-    """The living structure of the project: the profile, the DOMAINS with their
-    gloss, the CONSUMERS with kind, brief and specs, the GROUPS with their
-    members, and counts computed on read. The first call of a new chat.
+    """The technical structure of the project, and only what is ALIVE in it:
+    the DOMAINS with their gloss, the CONSUMERS with kind, brief and specs, the
+    GROUPS with their live members, and three counts. The first call of a new
+    chat — and if it answers at all, the registry parsed and the database
+    opened, so this is also the health check.
 
-    The names read here are the names every other tool expects: do not guess a
-    consumer or a group — read it. `project` is the alphanumeric CODE at the
-    top of the project's instructions, never its name: no tool lists projects,
-    and no error will ever hint at another one."""
+    ⚠ FIND YOUR OWN CONSUMER IN THAT LIST, spelled exactly, before you go any
+    further: everything here is live, so a name that is missing means the role
+    is retired or misspelt. The names read here are the names every other tool
+    expects — do not guess a consumer or a group, read it.
+
+    No brief and no specs of the PROJECT: those open `rules_list`, and a
+    session start calls both. `project` is the alphanumeric CODE at the top of
+    the project's instructions, never its name: no tool lists projects, and no
+    error will ever hint at another one."""
     return _project(project).project_info()
 
 
@@ -389,8 +396,9 @@ def rules_list(project: str, consumer: str, query: str = "",
     identity then the living facts — then YOUR brief and specs, the legend, and
     the rules in force for you: universal, then groups from the widest, then
     exceptions. Every line shows `reach` and the names it reaches. It closes
-    with the desk summary — TWO counters, open and urgent, nothing more: the
-    list itself is `tasks_list`'s job.
+    with YOUR OPEN TASKS in short form — id, title, urgent, age, urgent first
+    then the oldest. The bodies are NOT here: `tasks_get` carries those, and
+    the ceiling on it is why.
 
     `query` filters on title and body and hands back the matching fragment.
     `pending=True` shows the proposal QUEUE instead, with the reasons and the
@@ -662,6 +670,12 @@ def project_status(project: str, key: str) -> dict:
     citations pointing at retired or missing rules, and the overlaps that FORMED
     after the fact — an exception a group has since swallowed, a domain or a
     consumer nothing reaches any more.
+
+    It is also the ONE place the RETIRED are readable — domains, consumers and
+    groups, with the date and the reason. `project_info` shows the live alone,
+    and a retired name is still a name TAKEN: a create on it is refused, so
+    the way past that refusal is `revive`, and reviving needs a target you can
+    see.
 
     Structural pointers are not checked because they are impossible: the schema
     refuses them at write time. It REPORTS and does not correct: what it finds

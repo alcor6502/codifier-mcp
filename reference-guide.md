@@ -27,9 +27,18 @@ One call:
 It returns, in order: the PROJECT's brief and specs — identity first, then the
 living facts — then your **brief** and your specs, then the
 legend of the domains present, your rules in force (universal, then groups from the widest,
-then exceptions), and the desk summary — TWO counters, open and urgent, and
-nothing more: the list is `tasks_list`'s job. Every rule line shows `reach` and the
-names it reaches.
+then exceptions), and at the foot **your open tasks in short form** — id, title,
+urgent, age, urgent first then the oldest. Every rule line shows `reach` and the
+names it reaches. The task **bodies are not in here**: `tasks_get` carries those.
+
+The other half of a session start is:
+
+    project_info(project)
+
+the TECHNICAL half — domains, consumers, groups — and everything in it is
+**alive**. ⚠ **Find your own consumer name in that list, spelled exactly,
+before you go any further.** If it is not there your role is retired or
+misspelt, and nothing further you call will say so this plainly.
 
 Empty set or silent registry: stop and say so.
 
@@ -154,12 +163,12 @@ never looks like a short one.
 
 | You want to | Use |
 |---|---|
-| start a session, get project + brief + rules + desk summary | `rules_list` |
+| start a session, get project + brief + rules + your open tasks | `rules_list` |
 | find a rule by text | `rules_list(query=...)` |
 | see the proposal queue | `rules_list(pending=True)` |
 | read rules in full, with history as dated gestures | `rules_get(history=True)` |
 | propose a rule, or replace one | `rules_propose` (+ `supersedes`) |
-| see who exists: profile, domains, consumers, groups | `project_info` |
+| see who exists — domains, consumers, groups, LIVE only | `project_info` |
 | put work on a desk (yours or anyone's) | `tasks_add` |
 | see your desk / what you opened for others | `tasks_list` (+ `authored=True`) |
 | read tasks in full | `tasks_get` |

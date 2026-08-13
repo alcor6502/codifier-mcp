@@ -40,9 +40,15 @@ the admin code only — a task closed wrong reopens as a new task.
   exception: that overlap is repairable, it goes to the status report and is
   refused at the next write on that rule. A group edit or consumer retire that
   would leave a rule in force with ZERO effective consumers is refused naming
-  the rules. Names of consumers and groups are amendable (two factors,
-  versioned) and the OLD NAME STOPS RESOLVING: the verdict lists what to update
-  outside the registry — skill files, chat instructions, scheduled prompts.
+  the rules. A name of a consumer or a group is ONE WORD — letters, digits,
+  `-` and `_`, no spaces, and the refusal says which mistake you made: those
+  names are quoted exactly, in `groups`, in chat instructions, in scheduled
+  prompts, and a space is the character nobody sees when it is wrong. A
+  PROJECT name keeps its spaces: the folder is the name as spelled, the file
+  is the slug derived from it. Names of consumers and groups are amendable
+  (two factors, versioned) and the OLD NAME STOPS RESOLVING: the verdict lists
+  what to update outside the registry — skill files, chat instructions,
+  scheduled prompts.
   `queue_cap`: NULL = unlimited, 0 = queue closed, N = N — it governs both the
   proposal queue and the batch page's action.
 - **`rules_amend`** — the perimeter of a rule in force, NARROWED only: the new
@@ -57,7 +63,12 @@ the admin code only — a task closed wrong reopens as a new task.
   heir, supersede.
 - **`project_status`** — computed counts, expiring rules with their reasons, the
   pending queue, prose citations pointing at retired or missing rules, and the
-  overlaps that formed after the fact. It reports; it does not correct.
+  overlaps that formed after the fact. It reports; it does not correct. It is
+  also the ONE place the RETIRED are readable — domains, consumers and groups
+  under `retired`, with date and reason. `project_info` lists the live alone,
+  and a retired name is still a name TAKEN: a `create` on it is refused, so
+  the way past that refusal is `revive` — and you cannot revive what you
+  cannot see.
 - **`rules_export`** — the corpus in one call; mind your client's result cap:
   this is the tool that meets it first.
 - **`tasks_overview`** — every desk at once, read-only, ceilings declared.

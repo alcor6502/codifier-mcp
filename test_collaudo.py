@@ -341,8 +341,36 @@ refused("the project created from a tool", lambda: p.amend_project(
 refused("a negative queue cap", lambda: p.amend_project(
     "project", "", "amend", {"queue_cap": -1}), "none of the three")
 
+# A NAME IS ONE WORD, and the space is the mistake worth naming: it is the
+# character the eye does not find. Both entities, because a group is quoted the
+# way a consumer is — a rule that held for one and not the other would be a
+# rule with an exception, which is a rule nobody can check.
+refused("a consumer name with a space in it", lambda: p.amend_project(
+    "consumer", "fidelity advisory", "create", {"kind": "chat"}), "ONE WORD")
+refused("and the refusal names the space, not just the pattern",
+        lambda: p.amend_project("consumer", "fidelity advisory", "create",
+                                {"kind": "chat"}), "has a space in it")
+refused("a GROUP name with a space in it", lambda: p.amend_project(
+    "group", "i deliberativi", "create", {"members": ["architect"]}), "ONE WORD")
+refused("and a rename cannot smuggle one back in", lambda: p.amend_project(
+    "consumer", "advisory", "amend", {"name": "fidelity advisory"}), "ONE WORD")
+allowed("a dash is not a space", lambda: p.amend_project(
+    "consumer", "fidelity-advisory", "create", {"kind": "chat"}, actor="architect"))
+allowed("and neither is an underscore", lambda: p.amend_project(
+    "group", "i_deliberativi", "create", {"members": ["architect"]}, actor="architect"))
+# THE OTHER SIDE of the same rule, and it is the case narrowing `RE_NAME` to a
+# single pattern would have taken away in silence: a PROJECT name has spaces BY
+# DESIGN — the folder is the name as spelled, the file is the slug. Proved
+# HERE, on the parser and not on a Registry, because when the project name
+# stops being legal every registry this suite's twin builds fails at setup and
+# the run dies before reaching the case that was supposed to notice.
+yields("a PROJECT name may hold spaces — a consumer name is the narrow one",
+       lambda: rules._registry_lines(
+           f"Financial Portfolio | {'r' * 16} | {'k' * 16}", "registry")[0][1],
+       "Financial Portfolio")
+
 out = allowed("a rename goes through", lambda: p.amend_project(
-    "consumer", "advisory", "amend", {"name": "fidelity advisory"}, actor="architect",
+    "consumer", "advisory", "amend", {"name": "advisor"}, actor="architect",
     auth_code=code(p)))
 equals("and the verdict says the old name STOPS RESOLVING",
        "STOPS RESOLVING" in (out or {}).get("note", ""), True)
@@ -351,7 +379,7 @@ equals("and it names what lives outside the registry",
            for w in ("skill", "instructions", "scheduled")), True)
 refused("the old name does not resolve any more",
         lambda: p.list_rules("advisory"), "not a consumer of this project")
-allowed("the new one does", lambda: p.list_rules("fidelity advisory"))
+allowed("the new one does", lambda: p.list_rules("advisor"))
 
 # =====================================================================
 print("\n— THE PERIMETER: declared, never deduced —")
@@ -630,6 +658,69 @@ refused("and nothing new is filed under it", lambda: p.propose(
     "ST", "R", "t", "b", "why", "all", "architect"), "was retired on")
 
 # =====================================================================
+print("\n— READING: project_info, technical and ALIVE —")
+p = project(brief="the owner's book", specs="cash at 12%")
+info = allowed("one call", lambda: p.project_info())
+equals("no profile: brief and specs are rules_list's, and are not paid twice",
+       "profile" in (info or {}), False)
+# `yields` and not `equals` all the way down this section, and injection 6
+# bought the difference: a key that VANISHES from a payload raises a KeyError
+# out of the module body, the run is cut short, and every case after it stops
+# measuring. A guard removed has to come back as a red line with a name.
+yields("it hands back the NAMES",
+       lambda: [c["name"] for c in info["consumers"]],
+       ["Alfredo", "advisory", "architect", "news"])
+yields("and the counts are the three the payload cannot yield",
+       lambda: set(info["counts"]), {"rules_in_force", "proposed", "tasks_open"})
+yields("on a fresh project all three are zero", lambda: info["counts"],
+       {"rules_in_force": 0, "proposed": 0, "tasks_open": 0})
+# COUNTED, not written. Three literals would satisfy the case above for ever,
+# and the payload cannot be used to check them — that is the whole reason
+# these three survived the cut while the `_live` ones did not.
+rule(p, title="one in force")
+p.propose("VA", "R", "one waiting", "b", "why", "all", "architect")
+p.task_add("advisory", "one on a desk", "b", "architect")
+yields("and every one of them MOVES with the database",
+       lambda: p.project_info()["counts"],
+       {"rules_in_force": 1, "proposed": 1, "tasks_open": 1})
+yields("the note tells the reader to find ITSELF in the list",
+       lambda: "YOUR consumer" in info["note"], True)
+p.amend_project("consumer", "news", "retire", {}, reason="the run stopped",
+                actor="architect", auth_code=code(p))
+gone = allowed("after a retirement", lambda: p.project_info())
+yields("a retired consumer is NOT in the list — the name missing IS the answer",
+       lambda: [c["name"] for c in gone["consumers"]],
+       ["Alfredo", "advisory", "architect"])
+yields("and no retired_at survives anywhere in the payload, to be misread",
+       lambda: any("retired_at" in x for x in (gone["consumers"] + gone["domains"]
+                                               + gone["groups"])), False)
+# One level down, and it is the door this rule could have been left open by:
+# retiring deletes no junction row, so the membership is still sitting there.
+yields("nor inside a GROUP it still belongs to by junction row",
+       lambda: [x["members"] for x in gone["groups"] if x["name"] == "automatismi"],
+       [["advisory"]])
+p.amend_project("domain", "ST", "retire", {}, reason="never used",
+                actor="architect", auth_code=code(p))
+yields("a retired domain is gone from the legend too",
+       lambda: [x["code"] for x in p.project_info()["domains"]], ["VA"])
+# And the price of all that: the retired have to be readable SOMEWHERE, or the
+# refusal below points at something invisible.
+refused("the retired name is still TAKEN", lambda: p.amend_project(
+    "consumer", "news", "create", {"kind": "skill"}), "already has a consumer")
+allowed("and the admin report is where it is read", lambda: p.status())
+yields("the retired consumer, with its date and its reason",
+       lambda: [(c["name"], c["reason"])
+                for c in p.status()["retired"]["consumers"]],
+       [("news", "the run stopped")])
+yields("and the retired domain with it",
+       lambda: [x["code"] for x in p.status()["retired"]["domains"]], ["ST"])
+allowed("so revive has a target somebody can see", lambda: p.amend_project(
+    "consumer", "news", "revive", {}, actor="architect", auth_code=code(p)))
+yields("and the name is back in the live list", lambda: sorted(
+    c["name"] for c in p.project_info()["consumers"]),
+    ["Alfredo", "advisory", "architect", "news"])
+
+# =====================================================================
 print("\n— READING: the session start —")
 p = project(brief="the owner's book", specs="cash at 12%")
 u = rule(p, title="everyone")
@@ -643,8 +734,25 @@ equals("then the rules that reach it", [r["id"] for r in (start or {})["rules"]]
 equals("universal first, then the group, then the name",
        [r["reaches_you"] for r in (start or {})["rules"]],
        ["everyone", "deliberativi", "by name"])
-equals("and the desk summary is TWO counters and nothing else",
-       set((start or {})["desk"]), {"open", "urgent"})
+yields("the desk arrives as a LIST of open tasks, not two counters",
+       lambda: set(start["desk"]), {"open", "open_count"})
+yields("empty desk, empty list", lambda: start["desk"],
+       {"open": [], "open_count": 0})
+p.task_add("advisory", "the older one", "b", "architect")
+p.task_add("advisory", "the urgent one", "b", "architect", urgent=True)
+desk = allowed("with post on it", lambda: p.list_rules("advisory")["desk"])
+yields("urgent first, then the oldest — the same order tasks_list uses",
+       lambda: [t["title"] for t in desk["open"]],
+       ["the urgent one", "the older one"])
+yields("four fields and no more: id, title, urgent, age",
+       lambda: set(desk["open"][0]), {"id", "title", "urgent", "age_days"})
+# THE CONFINE, and it is the whole reason B7 could be superseded without being
+# betrayed: the list comes in, the PROSE does not. A chat that will never open
+# a task pays four fields, not a document.
+yields("the BODY of a task does not come to a session start",
+       lambda: any("body" in t for t in desk["open"]), False)
+yields("and the bodies are still one call away, where the ceiling is",
+       lambda: "b" in p.task_get([desk["open"][0]["id"]])["tasks"][0]["body"], True)
 yields("a rule that reaches nobody here is not listed",
        lambda: [r["id"] for r in p.list_rules("news")["rules"]], [u])
 yields("query filters, and hands back the fragment",
@@ -655,6 +763,19 @@ refused("a consumer nobody declared", lambda: p.list_rules("nobody"),
         "not a consumer of this project")
 refused("and the refusal lists the ones that exist", lambda: p.list_rules("nobody"),
         "architect")
+
+# The cut, and it has to be DECLARED against the real total: a truncated list
+# that says nothing is a short list, and a session start would read it as an
+# empty desk.
+for _i in range(rules.TASKS_LIST_CAP + 1):
+    p.task_add("news", f"task number {_i}", "b", "architect")
+full = allowed("a desk past the ceiling", lambda: p.list_rules("news")["desk"])
+yields("cuts at the cap", lambda: len(full["open"]), rules.TASKS_LIST_CAP)
+equals("and DECLARES it", (full or {}).get("truncated"), True)
+yields("against the REAL total, not the length of what came back",
+       lambda: full["open_count"], rules.TASKS_LIST_CAP + 1)
+equals("and the note carries that total in words",
+       str(rules.TASKS_LIST_CAP + 1) in (full or {}).get("note", ""), True)
 
 # =====================================================================
 print("\n— READING: the detail, and the story —")

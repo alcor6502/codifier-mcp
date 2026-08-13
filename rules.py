@@ -167,7 +167,21 @@ RE_CODE = re.compile(r"^[A-Za-z0-9]{8,32}$")
 # identity with one spelling, never two rows. The old pattern forced
 # lowercase, which silently rewrote what the owner typed: that rewriting is
 # extinct, not configurable.
-RE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _-]{0,40}$")
+#
+# And a name is ONE WORD: the space is OUT. A consumer or a group is quoted
+# exactly — in `groups=[…]`, in a chat's instructions, in the prompt of a
+# scheduled task — and the space is the character you cannot see when it is
+# wrong: `fidelity  advisory` with two of them reads the same on a page and
+# resolves to nothing. One word makes that class of mistake unwritable
+# instead of merely discouraged.
+RE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$")
+# A PROJECT name keeps its spaces, and this is a SECOND expression rather than
+# a widening of the one above on purpose: the folder is the name as it is
+# spelled (`Financial Portfolio`) and the file is the slug derived from it, so
+# the project side has to stay wide. One pattern serving both would have to be
+# the wider of the two — which is how the narrow side quietly stops being
+# enforced.
+RE_PROJECT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _-]{0,40}$")
 # What a slug may hold, one character at a time — the pattern is per character
 # and not per string so a refusal can name WHICH characters were the trouble.
 RE_SLUG_CHAR = re.compile(r"[a-z0-9-]")
@@ -397,8 +411,18 @@ def _valid_name(name: str, what: str) -> str:
     the casefolded unique index, not by rewriting the input."""
     s = (name or "").strip()
     if not RE_NAME.match(s):
+        if " " in s:
+            # The culprit gets NAMED. `invalid name` plus a character class is
+            # a refusal the reader has to decode against their own string; the
+            # space is the one mistake worth spelling out, because it is the
+            # one the eye does not find.
+            raise RulesError(
+                f"invalid {what} name {name!r}: a {what} name is ONE WORD and this one "
+                "has a space in it. Names are quoted exactly — in `groups`, in a chat's "
+                "instructions, in a scheduled prompt — so use '-' or '_' instead. "
+                "(A PROJECT name may hold spaces; this is not one.)")
         raise RulesError(
-            f"invalid {what} name {name!r}: letters, digits, space, '-' and '_', "
+            f"invalid {what} name {name!r}: letters, digits, '-' and '_', one word, "
             "max 41 characters, and it cannot start with a separator")
     return s
 
@@ -452,19 +476,13 @@ def _valid_domain(d: str) -> str:
     return d
 
 
-def _norm_scope_list(scopes) -> list[str]:
-    if isinstance(scopes, str):
-        scopes = [scopes]
-    out: list[str] = []
-    for s in scopes or []:
-        t = (s or "").strip()
-        if t.lower() in ALL_ALIASES:
-            t = ALL
-        elif t != ALL:
-            t = _valid_name(t, "scope")
-        if _fold(t) not in [_fold(x) for x in out]:
-            out.append(t)
-    return out
+# `_norm_scope_list` used to sit here, and it is GONE rather than carried
+# along: scopes died with the v3 schema (`reach` is declared now, and the
+# audience is groups plus exceptions), nothing called it, and its body read
+# `ALL_ALIASES` and `ALL` — two names this module no longer defines, so the
+# first call would have raised NameError. Dead code that cannot even run is
+# not a spare part; it is a third caller of `_valid_name` that would have made
+# the rule above look like it had an exception.
 
 
 # =====================================================================
@@ -1308,7 +1326,7 @@ def _registry_lines(text: str, where: str) -> list[tuple]:
                 f"and nothing else is served — comment it out with # while you fix "
                 f"it: {line!r}")
         name, ref, adm = parts
-        if not RE_NAME.match(name):
+        if not RE_PROJECT_NAME.match(name):
             raise RulesFault(
                 f"{where} line {n}: {name!r} is not a usable project name — letters, "
                 "digits, spaces, dashes and underscores, up to 41 characters, and it "
@@ -2418,59 +2436,83 @@ class Project:
                 "queue_cap": row["queue_cap"], "updated_at": row["updated_at"]}
 
     def project_info(self) -> dict:
-        """The living structure: the profile, the domains with their gloss, the
-        consumers with kind and brief, the groups with their members, and
-        counts computed on read.
+        """The TECHNICAL structure of the project, and only what is ALIVE in
+        it: the domains with their gloss, the consumers with kind and brief,
+        the groups with their live members, and the three counts a caller
+        cannot work out from the payload.
 
-        The first call of a new chat, and the reason it exists is narrow: the
-        names read here are the names every other tool expects. Guessing a
-        consumer or a group is how a proposal gets refused for a reason that
-        has nothing to do with what it says."""
+        It does two jobs, and the first one is silent: if this answers, the
+        registry parsed, the file opened and the schema generation matched.
+        The health probe IS the reply, which is why no separate tool asks for
+        one.
+
+        The second is the one that reads. It hands back the NAMES every other
+        call expects — guessing a consumer or a group is how a proposal gets
+        refused for a reason that has nothing to do with what it says.
+
+        NO PROFILE HERE. Brief, specs, `queue_cap` and `updated_at` are what
+        `rules_list` opens with, and a session start calls both: kept in the
+        two, they are paid for twice.
+
+        ONLY THE LIVE. A retired consumer stays in the database — the row is
+        marked, not deleted, because `rule_version` keeps who was reached as
+        text — but it is not in here. So `my name is in the list` means `my
+        role is alive`, and a check a chat could forget stops existing: a door
+        that is not there instead of a door that is shut. That is also why
+        `retired_at` and `retired_reason` are gone from this payload, and why
+        the retired have to be readable SOMEWHERE — they are, in
+        `project_status`, behind the admin code, because the name stays taken
+        even retired and a revive needs a target you can see."""
         domains = []
-        for d in self.cx.execute("SELECT * FROM domain ORDER BY code"):
+        for d in self.cx.execute("SELECT * FROM domain WHERE retired_at IS NULL "
+                                 "ORDER BY code"):
             n = self.cx.execute("SELECT COUNT(*) FROM rule WHERE domain_id=? "
                                 "AND status='active'", (d["domain_id"],)).fetchone()[0]
             domains.append({"code": d["code"], "description": d["description"],
-                            "reason": d["reason"], "rules_in_force": n,
-                            "retired_at": d["retired_at"],
-                            "retired_reason": d["retired_reason"]})
+                            "reason": d["reason"], "rules_in_force": n})
         consumers = []
-        for c in self.cx.execute("SELECT * FROM consumer ORDER BY name"):
+        for c in self.cx.execute("SELECT * FROM consumer WHERE retired_at IS NULL "
+                                 "ORDER BY name"):
             consumers.append({"name": c["name"], "kind": c["kind"],
                               "brief": c["brief"], "specs": c["specs"],
                               # The secret itself never leaves the database; what
                               # a caller needs to know is whether its gestures
                               # have to be signed.
-                              "signed": bool(c["secret"]),
-                              "retired_at": c["retired_at"],
-                              "retired_reason": c["retired_reason"]})
+                              "signed": bool(c["secret"])})
         groups = []
-        for g in self.cx.execute("SELECT * FROM consumer_group ORDER BY name"):
+        for g in self.cx.execute("SELECT * FROM consumer_group WHERE retired_at IS NULL "
+                                 "ORDER BY name"):
+            # LIVE members only, and it is the same rule one level down: a
+            # retirement deletes no junction row, so the membership of a
+            # retired consumer is still sitting there. Listed here it would put
+            # a dead name back in front of a chat by the side door.
             members = [r[0] for r in self.cx.execute(
                 "SELECT c.name FROM consumer_group_member m "
                 "JOIN consumer c ON c.consumer_id = m.consumer_id "
-                "WHERE m.group_id=? ORDER BY c.name", (g["group_id"],))]
-            groups.append({"name": g["name"], "members": members,
-                           "retired_at": g["retired_at"],
-                           "retired_reason": g["retired_reason"]})
+                "WHERE m.group_id=? AND c.retired_at IS NULL ORDER BY c.name",
+                (g["group_id"],))]
+            groups.append({"name": g["name"], "members": members})
         now = _now()
         in_force = sum(1 for r in self.cx.execute(
             "SELECT * FROM rule WHERE status='active'") if self._in_force(r, now))
         return {
             "project": self.name,
-            "profile": self.profile(),
             "domains": domains, "consumers": consumers, "groups": groups,
+            # THREE, and the three that are left are the ones the payload
+            # cannot yield. The `_live` counters that used to be here were the
+            # len() of the lists next to them — a number written twice, and the
+            # second copy is the one that goes stale.
             "counts": {
                 "rules_in_force": in_force,
                 "proposed": self.cx.execute("SELECT COUNT(*) FROM rule WHERE "
                                             "status='proposed'").fetchone()[0],
-                "consumers_live": sum(1 for c in consumers if not c["retired_at"]),
-                "groups_live": sum(1 for g in groups if not g["retired_at"]),
-                "domains_live": sum(1 for d in domains if not d["retired_at"]),
                 "tasks_open": self.cx.execute("SELECT COUNT(*) FROM task WHERE "
                                               "status='pending'").fetchone()[0],
             },
-            "note": "the names here are the names every other call expects: a consumer or "
+            "note": "everything here is ALIVE, and these are the names every other call "
+                    "expects: find YOUR consumer in this list, spelled exactly, before "
+                    "you go any further — if it is not here, your role is retired or "
+                    "misspelt, and no other call will tell you so kindly. A consumer or "
                     "a group is READ, never guessed.",
         }
 
@@ -2545,26 +2587,54 @@ class Project:
         return ("…" if a else "") + t[a:b].strip() + ("…" if b < len(t) else "")
 
     def _desk(self, consumer_id) -> dict:
-        """TWO counters, and the number two is the decision: the summary at the
-        end of a session start says whether there is post, not what it says.
-        The list is `tasks_list`'s job, and this line exists to say what does
-        NOT get added here the next time somebody finds it handy."""
-        open_n = self.cx.execute(
-            "SELECT COUNT(*) FROM task WHERE consumer_id=? AND status='pending'",
-            (consumer_id,)).fetchone()[0]
-        urgent = self.cx.execute(
-            "SELECT COUNT(*) FROM task WHERE consumer_id=? AND status='pending' "
-            "AND urgent=1", (consumer_id,)).fetchone()[0]
-        return {"open": open_n, "urgent": urgent}
+        """The open tasks on this desk, in the SHORTEST form there is: id,
+        title, urgent, age. Ordered the way `tasks_list` orders — urgent
+        first, then the oldest — through the one sort key both call, so the
+        two views cannot drift apart.
+
+        This SUPERSEDES the two counters that used to be here, and the reason
+        they were two is still the reason this line exists: session start is
+        the comfortable place to add things, so it needs a rule for what does
+        NOT come in. Two bare numbers were not a desk, though — they said
+        whether there was post, never what it was, and the reader had to make
+        a second call to find out whether it mattered.
+
+        The new line is PROSE. Bodies stay with `tasks_get`, which carries a
+        60.000-byte ceiling precisely because prose weighs: a chat that will
+        never open a task pays four fields, not a document."""
+        now = _now()
+        rows = list(self.cx.execute(
+            "SELECT * FROM v_task WHERE consumer_id=? AND status='pending' "
+            "AND archived_at IS NULL", (consumer_id,)))
+        ordered = sorted(rows, key=self._task_order)
+        out = [{"id": r["display_id"], "title": r["title"],
+                "urgent": bool(r["urgent"]),
+                "age_days": self._age_days(r["created_at"], now)}
+               for r in ordered[:TASKS_LIST_CAP]]
+        desk = {"open": out, "open_count": len(ordered)}
+        if len(ordered) > len(out):
+            # Declared against the REAL total, like every other cut in here: a
+            # truncated list that does not say so is a short list.
+            desk["truncated"] = True
+            desk["note"] = (f"{len(ordered)} open and the first {TASKS_LIST_CAP} are "
+                            "here: the cut falls on the FRESH work, because the oldest "
+                            "is what the desk owes. `tasks_list` for the rest, "
+                            "`tasks_get` for the bodies — they are not in this call.")
+        return desk
 
     def list_rules(self, consumer: str, query: str = "", pending: bool = False) -> dict:
         """SESSION START, in one call.
 
-        The project first — brief then specs, identity then the living facts —
-        then this consumer's brief and specs, the legend, the rules in force
-        for it, and the desk summary. One call because the alternative was four,
-        and a chat that has to make four calls before it can work makes three
-        of them wrong once.
+        The document a chat reads top to bottom when it wakes up. The project
+        first — brief then specs, identity then the living facts — then this
+        consumer's brief and specs, the legend, the rules in force for it,
+        and, at the foot, the OPEN TASKS in short form. One call because the
+        alternative was four, and a chat that has to make four calls before it
+        can work makes three of them wrong once.
+
+        The profile lives HERE and nowhere else: `project_info` is the
+        technical half — names, and only the live ones — and the two of them
+        together are a session start with nothing paid for twice.
 
         `query` filters on title and body and hands back the matching fragment.
         `pending=True` answers with the proposal queue instead: reasons and
@@ -3742,6 +3812,33 @@ class Project:
                                        "but the next write on this rule is refused until "
                                        "they go. Nothing here put them in."})
 
+        # THE RETIRED, and this report is the ONLY place they are readable.
+        # `project_info` shows the live alone, on purpose — but the identity of
+        # a consumer is its casefolded name and that name stays TAKEN once it
+        # is retired: `_amend_consumer` answers a create with "this project
+        # already has a consumer by that name". Without this section the
+        # Architect meets a refusal pointed at something invisible, and
+        # `revive` is a gesture on a target nobody can read. The admin code is
+        # already in hand here, and whoever revives is holding it.
+        retired = {
+            "domains": [{"code": r["code"], "retired_at": r["retired_at"],
+                         "reason": r["retired_reason"]}
+                        for r in self.cx.execute(
+                            "SELECT * FROM domain WHERE retired_at IS NOT NULL "
+                            "ORDER BY code")],
+            "consumers": [{"name": r["name"], "kind": r["kind"],
+                           "retired_at": r["retired_at"],
+                           "reason": r["retired_reason"]}
+                          for r in self.cx.execute(
+                              "SELECT * FROM consumer WHERE retired_at IS NOT NULL "
+                              "ORDER BY name")],
+            "groups": [{"name": r["name"], "retired_at": r["retired_at"],
+                        "reason": r["retired_reason"]}
+                       for r in self.cx.execute(
+                           "SELECT * FROM consumer_group WHERE retired_at IS NOT NULL "
+                           "ORDER BY name")],
+        }
+
         orphan_domains = [d[0] for d in self.cx.execute(
             "SELECT code FROM domain WHERE retired_at IS NULL AND domain_id NOT IN "
             "(SELECT DISTINCT domain_id FROM rule) ORDER BY code")]
@@ -3775,8 +3872,12 @@ class Project:
             "stray_audience_rows": strays,
             "domains_with_no_rules": orphan_domains,
             "consumers_no_rule_reaches": unreached,
+            "retired": retired,
             "note": "counted on read, never stored. Structural pointers are not checked "
-                    "because they cannot break: the schema refuses them at write time.",
+                    "because they cannot break: the schema refuses them at write time. "
+                    "`retired` is here because it is nowhere else: project_info shows "
+                    "the LIVE only, and a retired name is still a name taken — revive "
+                    "it, or pick another.",
         }
 
     def export(self, consumer: str = "", expand: bool = False) -> dict:
@@ -3873,10 +3974,20 @@ class Project:
             d["reason_dropped"] = row["reason_dropped"]
         return d
 
+    @staticmethod
+    def _task_order(row):
+        """Urgent first, then the oldest — ONE definition of that sentence.
+
+        Three places order tasks now (`tasks_list`, its query fragments, and
+        the desk at session start), and three copies of a sort key is how two
+        views of the same desk come back in different orders while every case
+        stays green."""
+        return (0 if row["urgent"] else 1, row["created_at"])
+
     def _order_and_cap(self, rows, now: str) -> tuple:
         """Urgent first, then the oldest. When the cap cuts, it cuts the FRESH
         work — what has been waiting longest is what a desk needs to see."""
-        ordered = sorted(rows, key=lambda r: (0 if r["urgent"] else 1, r["created_at"]))
+        ordered = sorted(rows, key=self._task_order)
         return [self._task_brief(r, now) for r in ordered[:TASKS_LIST_CAP]], len(ordered)
 
     def task_add(self, consumer: str, title: str, body: str, created_by: str,
@@ -3985,8 +4096,7 @@ class Project:
                            "owes.")
         if q:
             res["query"] = q
-            for d, r in zip(out, sorted(pending, key=lambda r: (0 if r["urgent"] else 1,
-                                                                r["created_at"]))):
+            for d, r in zip(out, sorted(pending, key=self._task_order)):
                 frag = self._fragment(q, r["title"]) or self._fragment(q, r["body"])
                 if frag:
                     d["fragment"] = frag

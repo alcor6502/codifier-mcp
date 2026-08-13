@@ -209,6 +209,21 @@ _write(r, _line(name="P" * 42))
 refused("a name past the ceiling is refused, and the ceiling is said",
         lambda: rules.Registry(r), "41 characters")
 
+# The other side of `RE_NAME` narrowing to one word, and it is written here as
+# its own case because it is the thing that narrowing could take away in
+# silence: a PROJECT name has spaces BY DESIGN — the folder is the name as it
+# is spelled and the file is the slug derived from it. `Financial Portfolio`
+# is used all over this suite, but used is not proved: nothing said out loud
+# that the space was legal, so nothing would have gone red when it stopped
+# being.
+r = _root()
+_write(r, _line(name="Financial Portfolio"))
+gesture("a PROJECT name may hold spaces — it is not a consumer name",
+        lambda: rules.Registry(r))
+yields("and the name is served whole, spaces and spelling untouched",
+       lambda: rules.Registry(r).projects()["projects"][0]["name"],
+       "Financial Portfolio")
+
 r = _root()
 _write(r, _line(ref="short"))
 refused("a code that is not 8 to 32 letters and digits is refused, and it says which",
