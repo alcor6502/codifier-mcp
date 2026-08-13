@@ -1756,37 +1756,88 @@ ok("<PostArgs/>" in TEMPLATE,
 # Unraid does not propagate new variables to containers already installed, so a
 # variable introduced later means editing every existing install by hand. These
 # go in now, inert or not.
-for var in ("PROVISIONAL_DAYS", "WEB_PORT", "WEB_MASTER_CODE", "WEB_ACTION_CAP",
-            "LOG_LEVEL", "ALLOWED_CIDRS", "DB_PATH", "BACKUP_DIR"):
+for var in ("PROVISIONAL_DAYS", "WEB_PORT", "WEB_UI_PASSWORD",
+            "ADMIN_AUTH_CODE_DURATION",
+            "LOG_LEVEL", "ALLOWED_CIDRS", "DB_DIR", "BACKUP_DIR"):
     ok(f'Target="{var}"' in TEMPLATE, f"template declares {var}")
 
-# The master: mandatory, masked, and blocked at boot while it is a
+# The other direction, and it is the one that had nobody watching it. The list
+# above catches a variable the template FORGOT; nothing caught a variable the
+# template kept after its last reader was deleted, and four of them survived
+# that way into v4.0.0 — DB_PATH, WEB_MASTER_CODE, PENDING_CAP and
+# WEB_ACTION_CAP, three grains after the code stopped reading them. A dead knob
+# is worse than a missing one: it is a form field a person fills in with care,
+# and the value goes nowhere.
+#
+# The set of readers comes from the AST of every module in the image plus the
+# names the engine resolves on our behalf, so it moves the day a reader is
+# added or removed. Type="Port" and Type="Path" targets are mappings, not
+# variables, and are not in this question.
+_ENV_READERS = set()
+for _mod in ("server.py", "web.py", "rules.py", "preflight.py"):
+    _t = parse(os.path.join(HERE, _mod))
+    for _n in ast.walk(_t):
+        if isinstance(_n, ast.Call) and ast.unparse(_n.func) in (
+                "os.environ.get", "os.getenv", "env") \
+                and _n.args and isinstance(_n.args[0], ast.Constant) \
+                and isinstance(_n.args[0].value, str):
+            _ENV_READERS.add(_n.args[0].value)
+        elif isinstance(_n, ast.Subscript) and ast.unparse(_n.value) == "os.environ" \
+                and isinstance(_n.slice, ast.Constant) \
+                and isinstance(_n.slice.value, str):
+            _ENV_READERS.add(_n.slice.value)
+# Read inside the engine, on this service's behalf, through cidrs_from_env()
+# and log_level_from_env(). Named here because the engine's source is not
+# what this file parses — and named ONE BY ONE, because a blanket exemption
+# would be the hole this check exists to close.
+_ENGINE_READS = {"ALLOWED_CIDRS", "ANTHROPIC_CIDR", "LOG_LEVEL"}
+# Target is the second attribute, so only the field's Name sits between the
+# two — no description is crossed. A port maps to a number and a path to an
+# absolute path, so neither can be mistaken for a variable by this pattern.
+_DECLARED = {m.group(1) for m in
+             re.finditer(r'<Config[^>]*Target="([A-Z][A-Z0-9_]*)"', TEMPLATE)}
+_ORPHANS = sorted(_DECLARED - _ENV_READERS - _ENGINE_READS)
+ok(not _ORPHANS,
+   f"every variable the template declares has a reader ({len(_DECLARED)} declared)",
+   _ORPHANS)
+# And the four that died, by name: the check above would go green again the day
+# somebody re-added a reader for one of them, which is not the same thing as
+# these being gone.
+for _dead_var in ("DB_PATH", "WEB_MASTER_CODE", "PENDING_CAP", "WEB_ACTION_CAP"):
+    ok(f'Target="{_dead_var}"' not in TEMPLATE,
+       f"and {_dead_var} is not declared: it has had no reader since v4.0.0")
+
+# The UI's password: mandatory, masked, and blocked at boot while it is a
 # placeholder. It is the one variable that cannot be "born optional with a
-# working default in the code" — a default for a master IS the placeholder
-# the preflight refuses. Required in the template moves the failure from a
-# container that will not boot to a form that will not save. (Its old
-# sibling ADMIN_ACCESS_CODE died in v3.0.0: the maintenance credential is
-# the per-project architect key now, data rather than environment.)
-_MASTER_FIELD = re.search(r'<Config[^>]*Target="WEB_MASTER_CODE"[^>]*>', TEMPLATE)
-ok(_MASTER_FIELD is not None, "the master is a field of the template")
+# working default in the code" — a default for it IS the placeholder the
+# preflight refuses. Required in the template moves the failure from a
+# container that will not boot to a form that will not save. (Its old sibling
+# ADMIN_ACCESS_CODE died in v3.0.0, and the "master" in its own old name died
+# in v4.0.0 with the level it claimed: what is behind this password is a UI.)
+_MASTER_FIELD = re.search(r'<Config[^>]*Target="WEB_UI_PASSWORD"[^>]*>', TEMPLATE)
+ok(_MASTER_FIELD is not None, "the UI's password is a field of the template")
 if _MASTER_FIELD:
     _f = _MASTER_FIELD.group(0)
-    # The NAME a person reads in Unraid, and it is the sibling's: "Admin Access
-    # Code" and "Web UI Master Code" sit next to each other in the form, and
-    # the pairing is half of what says they are two secrets of the same kind
-    # and not one secret with two homes.
-    ok('Name="Web UI Master Code"' in _f,
-       "and it keeps the name every install already knows", _f[:60])
+    # The NAME a person reads in Unraid, and it says what the password opens.
+    # It is a RENAME on every install that already exists — Unraid keeps the
+    # old field under its old target — which is why the description says to
+    # carry the value across by hand.
+    ok('Name="Web UI Password"' in _f,
+       "and it is named after what it opens, not after a level", _f[:60])
     ok('Mask="true"' in _f, "and it is masked, as a secret is", _f[:80])
     ok('Required="true"' in _f,
-       "and required: a master with a working default is the open door", _f[:80])
-# The ceiling is the other kind of new variable: optional, with the default in
-# the code, because Unraid does not propagate new variables to containers that
-# are already installed.
-_CAP_FIELD = re.search(r'<Config[^>]*Target="WEB_ACTION_CAP"[^>]*>', TEMPLATE)
+       "and required: a password with a working default is the open door", _f[:80])
+# The one-time code's life is the other kind of new variable: optional, with
+# the default in the code, because Unraid does not propagate new variables to
+# containers that are already installed.
+_CAP_FIELD = re.search(r'<Config[^>]*Target="ADMIN_AUTH_CODE_DURATION"[^>]*>', TEMPLATE)
 ok(_CAP_FIELD is not None and 'Required="false"' in _CAP_FIELD.group(0),
-   "the per-action ceiling is optional, with its default in the code",
+   "the one-time code's lifetime is optional, with its default in the code",
    _CAP_FIELD.group(0)[:80] if _CAP_FIELD else "absent")
+# The proposal ceiling is not a variable at all any more, and the template must
+# not describe one: it is `queue_cap`, policy of each project.
+ok("PENDING_CAP" not in TEMPLATE and "WEB_ACTION_CAP" not in TEMPLATE,
+   "and no field so much as mentions the two ceilings that became queue_cap")
 # And the field that promised a read-only interface that would read a
 # VACUUM INTO snapshot no longer says any of that: it was true of a design
 # that was not built, and the one that was built writes.

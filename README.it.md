@@ -32,7 +32,7 @@ lettura, e siccome è un lavoro di lettura viene fatto male.
 | Riusare il numero di una regola ritirata | niente te lo impedisce | il database rifiuta |
 | «Perché c'è questa regola?» | chiedi a chi l'ha scritta | il motivo è obbligatorio, e resta |
 | Una regola che non serve più | resta per sempre | scade se nessuno la rinnova |
-| Due regole che dicono la stessa cosa | prima o poi qualcuno se ne accorge | segnalate come coppia sospetta |
+| Due regole che dicono la stessa cosa | prima o poi qualcuno se ne accorge | la coda si legge intera prima di approvare |
 | Qualcuno modifica il file a mano | invisibile | lo registra un trigger |
 
 Il salto vero non è la consultazione: è che **il database rifiuta**. L'ID non si
@@ -40,27 +40,41 @@ riusa, il motivo non si omette, la cancellazione non esiste, e lo storico lo
 scrivono i trigger — quindi c'è dentro anche una modifica fatta a mano con
 `sqlite3`. Quelle che prima erano consegne adesso sono vincoli.
 
-## Il modello in cinque frasi
+## Il modello in sei frasi
+
+**Un progetto è un database**, nominato in un registro di testo che scrive a
+mano il proprietario. I progetti non si vedono fra loro e nessun tool li elenca:
+un progetto è un file, non una colonna, quindi un backup, un ripristino e una
+corruzione riguardano un progetto solo e mai tutta la casa.
 
 **Consumer** è chi si scarica le regole: chat *e* skill. Una skill agisce, e ciò
 che agisce sta sotto regole. Una persona non è un consumer — una regola che
-vincola una persona lo dice nel proprio corpo.
+vincola una persona lo dice nel proprio corpo. Il nome di un consumer è UNA
+PAROLA, perché quel nome si cita a mano nelle istruzioni delle chat e nei file
+delle skill, e lo spazio è l'errore che nessuno vede.
 
-**Scope** sono insiemi nominati di consumer. Non esiste una nozione separata di
-«gruppo»: un consumer singolo è un insieme con un elemento, e il suo scope
-singoletto lo crea un trigger quando il consumer nasce. Un solo tipo di
-puntatore, nessun ramo dove sbagliarsi.
+**La platea è MISTA, e si dichiara invece di dedurla.** `reach` vale `all` —
+tutti, e nessuna riga di platea — oppure `targeted`, e allora la platea è i
+**gruppi** UNIONE le **eccezioni**: consumer singoli che stanno ACCANTO ai
+gruppi e possono solo aggiungere. Una regola `targeted` che non nomina nessuno
+la rifiuta un trigger, e così una `all` che nomina qualcuno.
 
-**L'ordine di lettura è l'ampiezza dello scope.** Prima quella che vale per
-chiunque, ultima quella che vale solo per te — e siccome l'ampiezza è un
-`COUNT`, l'ordine resta giusto da solo quando nasce un consumer nuovo.
+**L'ordine di lettura è l'ampiezza della porta da cui sei entrato.** Prima
+l'universale, poi i gruppi dal più largo, ultimo ciò che ti è stato indirizzato
+per nome — e siccome l'ampiezza è un `COUNT` dei membri vivi calcolato adesso,
+l'ordine resta giusto da solo quando nasce un consumer o un gruppo si svuota.
 
-**Una regola punta a un insieme di scope.** Allargarla è una riga in più; il
-gruppo a cui apparteneva non si tocca, perché quel gruppo ha altri inquilini.
+**Allargare vincola qualcuno di nuovo, quindi è promulgazione**, non una
+modifica: `rules_amend` restringe un perimetro e si rifiuta di allargarlo. Per
+allargare si propone un supersede e una persona lo approva.
 
 **Lo storico è una fotografia.** Ogni versione registra sia cosa era stato
-dichiarato (`scopes`) sia chi era raggiunto davvero quel giorno (`consumers`),
-così cambiare un gruppo domani non riscrive quello che era vero ieri.
+dichiarato sia chi era raggiunto davvero quel giorno, per nome, così cambiare un
+gruppo domani non riscrive quello che era vero ieri.
+
+**I task vivono nello stesso registro e sono modellati come l'opposto di una
+regola**: niente platea, niente approvazione, niente scadenza. Le regole
+vincolano, i task aspettano.
 
 ## Come entra una regola
 
@@ -80,22 +94,25 @@ lasciarla andare è gratis.
 
 **Si approva a lotti, contro il loro digest.** Le proposte si accumulano, e le
 vedi tutte insieme, che è l'unico momento in cui salta all'occhio che tre
-dicono la stessa cosa. `rules_batch` restituisce le proposte pendenti — ognuna
-col suo perché — e un digest sull'insieme; la pagina del lotto della UI
-rivuole quel digest,
-quindi ciò che viene approvato è provabilmente il lotto che è stato **letto**:
-una proposta che arriva nel mezzo sposta il digest e invalida l'approvazione
-stantia. L'approvazione sta nella UI, dietro la master — dalla v3.0.0 non è
-un tool, così nessun segreto master viaggia mai in una conversazione. (Sopra
-viaggiava
-una firma ed25519; è uscita nella v2.0.0 — era il modo goffo di far entrare una
-persona invece di una chat, e la UI di amministrazione risolve il problema alla
-radice.)
+dicono la stessa cosa. La pagina del lotto mostra la coda intera, ogni proposta
+col suo perché, e calcola un digest su quello che ha mostrato; l'azione quel
+digest deve restituirlo, quindi ciò che viene approvato è provabilmente il lotto
+che è stato **letto** — una proposta che arriva nel mezzo sposta il digest e
+invalida l'approvazione stantia. Approvare non è un tool dalla v3.0.0: succede
+in un browser, dietro la password della UI, così nessun segreto di quel livello
+viaggia mai in una conversazione. (Sopra viaggiava una firma ed25519; è uscita
+nella v2.0.0 — era il modo goffo di far entrare una persona invece di una chat,
+e la UI di amministrazione risolve il problema alla radice.)
 
-Il diniego non vuole digest: negare non può fare danno. La riga della regola
-respinta resta, col suo motivo, e `rules_pending` mostra a una chat i propri
-rifiuti — così la stessa idea che torna da un'altra chat fra tre settimane è
-una cosa che si vede, non una cosa che il registro può impedire.
+Il diniego non vuole digest: negare non può fare danno. Costa però una frase,
+una per proposta. La riga della regola respinta resta, col suo motivo, e
+`rules_list(pending=True)` mostra a una chat i propri rifiuti — così la stessa
+idea che torna da un'altra chat fra tre settimane è una cosa che si vede, non
+una cosa che il registro può impedire.
+
+Quante proposte possono aspettare insieme è `queue_cap`, ed è del **progetto**,
+scritto nel database del progetto — non del container, che ne serve più d'uno.
+NULL è senza limite, 0 chiude la coda, N è N.
 
 ## Il numero non lo scegli tu
 
@@ -138,17 +155,21 @@ già marcato come tale, nel testo.
 ## Com'è fatto in pratica
 
 ```
-rules_list(project="<codice>", consumer="tax monitor")
+rules_list(project="<codice>", consumer="tax")
 
-  VA-0002  Rileggi le fonti          via _ALL_          ampiezza 7
-  PE-0001  Il metodo dei quattro     via deliberativi   ampiezza 4
-  FI-0003  Stima del bracket         via tax monitor    ampiezza 1
+  VA-0002  Rileggi le fonti          reach all        ti raggiunge: tutti
+  PE-0001  Il metodo dei quattro     reach targeted   ti raggiunge: deliberativi
+  FI-0003  Stima del bracket         reach targeted   ti raggiunge: per nome
   ...
-  38 regole in vigore · 132 fuori dal tuo perimetro
+  38 regole · e in fondo i task aperti sulla tua scrivania
 ```
 
-`via` dice *perché* una regola è nel tuo elenco, che è esattamente
-l'informazione che serve per decidere se sta nel posto giusto.
+`reaches_you` dice *perché* una regola è nel tuo elenco — tutti, un gruppo a cui
+appartieni, o il tuo nome — che è esattamente l'informazione che serve per
+decidere se sta nel posto giusto. La stessa chiamata porta il brief del
+progetto, il tuo, e i task aperti sulla tua scrivania: una chiamata, perché
+l'alternativa erano quattro, e una chat che deve farne quattro prima di poter
+lavorare una volta ne sbaglia tre.
 
 ## La pagina di amministrazione
 
@@ -158,11 +179,15 @@ un browser, sulla LAN.
 
 La pagina la serve lo stesso processo, su una seconda porta — 9443 per difetto
 — perché due processi sullo stesso SQLite non condividono il lock del motore.
-Mostra il lotto pendente **intero e affiancato**, ogni proposta col perché è
-stata depositata: è lì che tre proposte che dicono la stessa cosa si
-riconoscono. Si spunta cosa entra, si dà una ragione per cosa no, e la master
-si digita **una volta per azione** — quattro regole non sono quattro password,
-e una password ripetuta quattro volte si digita senza guardare.
+La home elenca i progetti che il registro serve, per NOME: chi è entrato ha già
+dimostrato chi è con la password, e un URL può portare un nome dove una chat può
+portare solo un codice. Tutto quello che sta sotto è per progetto.
+
+La pagina del lotto mostra il pendente **intero e affiancato**, ogni proposta
+col perché è stata depositata: è lì che tre proposte che dicono la stessa cosa
+si riconoscono. Si spunta cosa entra, si dà una ragione per cosa no, e la
+password si digita **una volta per azione** — quattro regole non sono quattro
+password, e una password ripetuta quattro volte si digita senza guardare.
 
 Una proposta che ne sostituisce un'altra lo dice **prima** che tu decida, con
 l'ID della vittima e il suo titolo attuale: approvarla la ritira nella stessa
@@ -172,28 +197,40 @@ Il digest copre quello che stavi **guardando**, non quello che hai spuntato. Se
 una proposta arriva mentre leggi, l'azione torna respinta con la pagina com'è
 adesso — lo stesso contratto del digest che aveva il tool MCP.
 
-Accanto, quattro letture che non scrivono niente: le regole in forza per un
-consumer, esattamente come le legge la sua chat, brief in testa; il dettaglio
-di una regola con la sua storia e il diff fra due versioni; i pendenti e la
-coda delle scadenze; e lo stato del registro.
+Accanto, letture che non scrivono niente: le regole in forza per un consumer,
+esattamente come le legge la sua chat, brief in testa; il dettaglio di una
+regola con la sua storia e il diff fra due versioni; i rinnovi e la coda delle
+scadenze; e lo stato del progetto. E una pagina che scrive senza toccare
+nessuna regola: **codes**, dove si conia un codice monouso.
 
-Una master, dal template, e un'ora di inattività. Un riavvio del servizio
-invalida tutte le sessioni, di proposito: il segreto della sessione nasce a
-caso a ogni boot e non è scritto da nessuna parte.
+La password si richiede a ogni gesto che SCRIVE — decidere il lotto, rinnovare,
+promuovere, coniare un codice — perché una sessione da sola è un browser
+lasciato aperto sull'iPad. Non si richiede per il backup né per il log: un
+`VACUUM INTO` non cambia niente e il log è un anello in memoria, e una password
+ridigitata dove non difende niente insegna solo alla mano a digitarla senza
+guardare. Una password, dal template, e un'ora di inattività. Un riavvio del
+servizio invalida tutte le sessioni, di proposito: il segreto della sessione
+nasce a caso a ogni boot e non è scritto da nessuna parte.
 
-**La superficie MCP si è mossa nella v3.0.0 — riconnettere il connettore e
-provare in una chat nuova.** Sette tool l'hanno lasciata: approve, renew e
-promote sono passati alle pagine del lotto e dei pendenti, e le operazioni
-master — creazione, indice, rekey — vivono nella UI dietro la master. Anche
-il backup è passato alla UI, nella sua pagina **maintenance**, e la master
-non la chiede: `VACUUM INTO` non cambia niente e la copia atterra sul disco
-del server. La manutenzione si apre con la coppia: codice di progetto più la
-chiave d'architetto di quel progetto, generata sulla ricevuta del progetto.
+**Cosa non c'è più, dalla v4.0.0: la pagina di deployment.** Creava i progetti,
+li rekeyava e ne stampava i codici, e tutte e tre le cose sono morte col
+registro dichiarativo — un progetto adesso è una riga in `projects.txt`, che
+scrive da Unraid chi ne sceglie i codici. Al suo posto c'è la pagina dei codici:
+coniare i monouso è l'unica cosa che il disegno dà a questa UI e a nient'altro.
+
+**La superficie MCP si è mossa di nuovo nella v4.0.0 — riconnettere il
+connettore e provare in una chat nuova.** Da 32 tool a 16, e i nomi si sono
+mossi con lei: a una chat servono `reference_guide`, `project_info`,
+`rules_list`, `rules_get`, `rules_propose` e i cinque `tasks_*`, e tutto quello
+che fa un amministratore sta in sei — `project_amend`, `rules_amend`,
+`rules_retire`, `project_status`, `rules_export`, `tasks_overview`. Un
+connettore rimasto sulla superficie vecchia non degrada: elenca tool che non
+ci sono.
 
 ## Il task log
 
 Le regole sono ciò che ti VINCOLA. I task sono ciò che ti ASPETTA — una cosa
-diversa, e modellata come tale: niente scope, niente approvazione, niente
+diversa, e modellata come tale: niente platea, niente approvazione, niente
 firma, niente scadenza. Il log esiste perché *cosa è aperto per me?* sia una
 sola chiamata, e con l'esito obbligatorio alla chiusura lo diventa anche
 *cosa ho fatto di recente?*. Sostituisce sia il changelog per ruolo sia le
@@ -204,16 +241,18 @@ non può essere dichiarato come dominio di regole — il registro rifiuta —
 perché il codice deve significare una cosa sola.
 
 **Chiunque può aprire un task per chiunque**, ed è così che un audit assegna
-ogni correzione al ruolo competente. `created_by` è obbligatorio.
-**Chiudere costa una frase**: `tasks_complete` esige l'esito, `tasks_drop` la
-ragione, e i due rifiuti stanno nello schema oltre che alla porta. **Chiuso è
-chiuso** — un task aperto si emenda liberamente, proprietario compreso, uno
-chiuso per niente.
+ogni correzione al ruolo competente. `created_by` è obbligatorio. ⚠ Aprire un
+task per una **persona** non avvisa nessuno: le persone non chiamano tool, e la
+loro posta la vede chi legge l'overview o la UI. **Chiudere costa una frase**:
+`tasks_close` prende un `outcome` che lo completa o una `reason` che lo lascia
+cadere, esattamente uno dei due, e il rifiuto sta nello schema oltre che alla
+porta. **Chiuso è chiuso** — un task aperto si emenda liberamente, proprietario
+compreso, uno chiuso per niente.
 
 **`urgent` è di chi crea il task** e nessuno lo cambia dopo, perché chi lo
 riceve è la parte che ha interesse a toglierlo. Non ci sono livelli; la
-guardia contro l'inflazione è che la vista di manutenzione conta gli urgenti
-per CREATORE.
+guardia contro l'inflazione è che `tasks_overview` conta gli urgenti per
+CREATORE.
 
 **I task non scadono.** Uno aperto da più di trenta giorni esce marcato, e
 basta: una scadenza automatica sarebbe un drop senza ragione, scritto
@@ -222,27 +261,52 @@ in testa, poi i più vecchi — così quando il tetto taglia il taglio colpisce
 il lavoro fresco e mai quello che aspetta. Il troncamento si dichiara sempre,
 col totale reale.
 
-**La superficie MCP si è mossa di nuovo nella v3.1.0 — riconnettere il
-connettore e provare in una chat nuova.** Sono arrivati nove tool, 31 in
-tutto; otto costano il solo codice di progetto, e solo la vista trasversale
-vuole la chiave.
-
 ## Installazione
 
 Fatto per Unraid col plugin Tailscale, ma è un container normale: un mount per
-il database, uno per lo stato, e variabili d'ambiente.
+i database, uno per lo stato, e variabili d'ambiente.
 
 1. **Una OAuth App GitHub dedicata.** Homepage `BASE_URL`, callback
    `BASE_URL/auth/callback`. Non riciclare quella di un altro servizio, o i due
    si contendono la callback.
 2. **`JWT_SIGNING_KEY`**: `openssl rand -hex 32`. Stabile per sempre — cambiarla
    invalida ogni token già emesso.
-3. **La cartella del database dev'essere storage locale**, mai una share di
+3. **`WEB_UI_PASSWORD`**, dodici caratteri o più. Apre la pagina che promulga le
+   regole, non c'è un secondo account e non c'è recupero.
+4. **La cartella dei database dev'essere storage locale**, mai una share di
    rete: SQLite in WAL vuole locking vero.
 
 Il template in questo repository **è** la configurazione, e le descrizioni dei
 campi sono la vera documentazione del deploy. Punta Unraid lì, riempi i campi,
 Apply.
+
+**Poi si dichiara un progetto.** Finché non lo fai il servizio non serve niente.
+Nella cartella dei database il primo avvio scrive `projects.txt`, solo root, con
+le istruzioni già dentro; tu ci aggiungi una riga per progetto:
+
+    Financial Portfolio | <codice di riferimento> | <codice admin>
+
+Nome, codice di riferimento, codice admin. I due codici stanno lì scritti come
+segnaposto e non come cifre plausibili di proposito, ed è la stessa decisione
+per cui il modello dentro `projects.txt` non porta nessuna riga d'esempio: una
+riga con codici verosimili è una riga che qualcuno copia. I due codici sono da 8 a 32 lettere e
+cifre, li generi tu (`openssl rand -hex 12`), e nessun codice può comparire due
+volte nel file — lo stesso codice su due progetti, o un codice di riferimento
+uguale al proprio admin, viene rifiutato per nome e numero di riga. Il nome è
+una **cartella** accanto al file, in quella grafia, e dentro c'è il `.db` del
+progetto; rinominare un progetto vuol dire cambiare la riga *e* rinominare la
+cartella. Una riga senza database ne crea uno, vuoto e corrente, e lo dice nel
+log; un database senza riga non è servito. Il file si rilegge quando cambia
+l'mtime, quindi aggiungere un progetto non vuole nessun riavvio, e un file che
+non si legge ferma tutto citando la riga incriminata invece di servire mezza
+verità.
+
+Il codice di riferimento va in testa alle istruzioni delle chat di quel
+progetto; il codice admin va a chi lo amministra, e da nessun'altra parte.
+
+**Aggiornare dalla 3.x non è una migrazione.** Non ce n'è una, per decisione: un
+database di generazione di schema diversa viene rifiutato all'avvio, nominando
+il file e i due numeri, mai aggiornato in silenzio. Il registro v4 nasce vuoto.
 
 Il resto lo controlla il preflight all'avvio, ed è bloccante: un controllo
 fallito esce 2 e al server non ci si arriva — un servizio che parte lo stesso e
@@ -259,25 +323,34 @@ avvisa è un servizio di cui nessuno legge gli avvisi.
   uscita, ma la forma della superficie sì. Nessuno dei due controlli copre le
   rotte OAuth: un estraneo fuori dagli intervalli ammessi può completare il
   login lo stesso. Quello che non può fare è parlare MCP.
-- **La chiave d'architetto viaggia a ogni chiamata** che scrive, in coppia
-  col codice di progetto: nessuna sessione, nessuna modalità rimasta aperta,
-  e nessun codice a livello di container — la chiave è per progetto, tenuta
-  come hash sulla riga del progetto stesso. Leggere le proprie regole e
-  depositare una proposta sono gratis — una chat di lavoro la chiave non ce
-  l'ha mai.
-- **Un manuale solo, con la riga di stop.** `reference_guide` non prende
-  nessun argomento: chiunque il gate lasci entrare lo legge. La parte per i
-  consumer viene prima e finisce a una riga di stop; i tool di manutenzione
-  oltre la riga vogliono la chiave a ogni chiamata. Il manuale del legislatore
-  della v1.4 è stato riassorbito: la sua porta proteggeva un'igiene senza
-  lettori — il manuale lo leggono tre chat, e le skill non lo leggono affatto.
+- **Tre credenziali, e la scala è piatta.** Il **codice di riferimento** apre
+  ogni lettura di un progetto e lascia a una chat depositare una proposta — una
+  proposta non raggiunge nessuno finché una persona non l'approva, quindi non
+  può fare danno, e chiedere a una chat di lavoro qualcosa di più forte
+  metterebbe quel qualcosa in ogni chat. Il **codice admin** crea: un dominio,
+  un consumer, un gruppo. Modificare qualcosa che esiste già — un perimetro, un
+  ritiro, un rename, un brief, i membri di un gruppo — vuole il codice admin
+  **più un codice monouso**, coniato nel browser sulla pagina di quel progetto,
+  mostrato una volta sola, bruciato dentro la transazione del gesto riuscito. Un
+  rifiuto fa rollback e non lo consuma; da solo non eleva nessuno. Il ruolo non
+  eleva: eleva la chiave.
+- **Due manuali, in due file.** `reference_guide()` nudo serve la metà per chi
+  consuma; la metà di amministrazione vuole il codice di progetto *e* il codice
+  admin. Sono due file e non un testo tagliato a un marcatore, così «il manuale
+  admin servito senza chiave» non è un guasto da provare: è uno che non può
+  succedere.
+- **Il file del registro è la cassaforte.** `projects.txt` tiene in chiaro tutti
+  i codici di riferimento e admin, che è la decisione, ed è l'unico file qui
+  dentro solo root, 0600. Il modo si rimette a ogni rilettura, non solo alla
+  creazione: si edita da una share, e un editor che scrive un file nuovo e lo
+  rinomina sopra al vecchio ci porta il proprio modo.
 - **Una chiamata malformata non stampa quello che portava.** FastMCP valida gli
   argomenti prima che parta qualunque tool e logga quello che ha rifiutato, con
   gli argomenti dentro la riga — un record che non obbedisce a nessun LOG_LEVEL
   nostro e non lascia nessuna riga `refused`, quindi un log pulito non prova che
-  non sia successo. Qui quegli argomenti sono il codice di progetto e la chiave
-  d'architetto. Dalla v2.1.1 il carico è redatto e la diagnosi no: restano il
-  tool, il parametro e la regola violata.
+  non sia successo. Qui quegli argomenti sono i codici del progetto. Dalla
+  v2.1.1 il carico è redatto e la diagnosi no: restano il tool, il parametro e
+  la regola violata.
 - **Il processo gira come root e il database è 644.** È l'opposto del gemello
   vault, di proposito: dalla share si legge e non si tocca, perché una scrittura
   a mano aggirerebbe i trigger e romperebbe lo storico in silenzio.
@@ -288,9 +361,11 @@ avvisa è un servizio di cui nessuno legge gli avvisi.
 
 ## Collaudo
 
-Tre suite. Niente rete, niente FastMCP, niente Docker.
+Cinque suite. Niente rete, niente FastMCP, niente Docker.
 
 ```
+python3 test_schema.py      # il DDL: trigger, vincoli, generazione
+python3 test_registry.py    # projects.txt, il router, i rifiuti che solleva
 python3 test_collaudo.py    # il motore, rifiuti compresi
 python3 test_surface.py     # la cucitura, l'immagine, il template
 python3 test_crash.py       # SIGKILL a metà transazione, come fa Docker
@@ -301,7 +376,10 @@ scritto in due posti sono due numeri, e qui l'abbiamo già pagato una volta.
 
 `test_surface.py` legge il sorgente invece di eseguirlo: ogni chiamata al motore
 deve esistere con firma compatibile, ogni tool che scrive deve passare dal gate
-di manutenzione, e nessuna docstring può nominare un tool che non esiste.
+che dichiara, nessuna docstring può nominare un tool che non esiste, e ogni
+variabile che il template dichiara deve avere un lettore nel codice — l'ultimo
+perché quattro manopole morte sono sopravvissute a tre grani dentro un modulo
+che una persona compila con cura.
 
 ## L'icona, e dove si vede davvero
 

@@ -33,7 +33,7 @@ job, and because it is a reading job it gets done badly.
 | Reusing a retired rule's number | nothing stops you | the database refuses |
 | "Why is this rule here?" | ask whoever wrote it | the reason is mandatory, and kept |
 | A rule that stopped being needed | stays forever | expires unless renewed |
-| Two rules that say the same thing | somebody notices, eventually | flagged as a candidate pair |
+| Two rules that say the same thing | somebody notices, eventually | the queue is read whole before anything is approved |
 | Someone edits the file by hand | invisible | recorded by a trigger |
 
 The real leap is not the lookup: it is that **the database refuses things.** The
@@ -41,27 +41,40 @@ ID cannot be reused, the reason cannot be omitted, deletion does not exist, and
 history is written by triggers — so a change made by hand with `sqlite3` is in
 there too. What used to be discipline is now a constraint.
 
-## The model in five sentences
+## The model in six sentences
+
+**A project is one database**, named in a text registry the owner writes by
+hand. Projects do not see each other and no tool lists them: a project is a
+file, not a column, so a backup, a restore and a corruption are each one
+project's business.
 
 **Consumers** are whoever downloads rules: chats *and* skills. A skill acts, and
 what acts is under rules. A person is not a consumer — a rule that binds a
-person says so in its body.
+person says so in its body. A consumer's name is ONE WORD, because that name is
+quoted by hand in chat instructions and skill files, and a space is the mistake
+nobody sees.
 
-**Scopes** are named sets of consumers. There is no separate notion of "group":
-a single consumer is a set with one element, and its singleton scope is created
-by a trigger the moment the consumer is born. One kind of pointer, no branch to
-get wrong.
+**The audience is MIXED, and declared rather than deduced.** `reach` is `all` —
+everybody, no audience rows at all — or `targeted`, and then the audience is the
+**groups** UNION the **exceptions**: single consumers standing next to the
+groups, only ever adding. A rule that says `targeted` and names nobody is
+refused by a trigger, and so is one that says `all` and names somebody.
 
-**The reading order is the breadth of the scope.** A rule that reaches everyone
-comes first, one that reaches only you comes last — and because breadth is a
-`COUNT`, the order stays right by itself when a new consumer appears.
+**The reading order is the breadth of the door you came through.** Universal
+first, then groups from the widest, then what was aimed at you by name — and
+because breadth is a `COUNT` of live members computed now, the order stays right
+by itself when a consumer appears or a group empties out.
 
-**A rule points to a set of scopes.** Widening it is one more row; the group it
-already belonged to is untouched, because that group has other tenants.
+**Widening binds somebody new, so it is promulgation**, not an edit: `rules_amend`
+narrows a perimeter and refuses to widen one. To widen, you propose a supersede
+and a person approves it.
 
-**History is a photograph.** Each version records both what was declared
-(`scopes`) and who was actually reached that day (`consumers`), so changing a
-group tomorrow cannot rewrite what was true yesterday.
+**History is a photograph.** Each version records both what was declared and who
+was actually reached that day, by name, so changing a group tomorrow cannot
+rewrite what was true yesterday.
+
+**Tasks live in the same registry and are modelled as the opposite of a rule**:
+no audience, no approval, no expiry. Rules bind; tasks wait.
 
 ## How a rule gets in
 
@@ -80,19 +93,25 @@ free.
 
 **Approval is by batch, against its digest.** Proposals accumulate, and you see
 them together, which is the only moment three near-duplicates are visible as
-such. `rules_batch` returns the pending proposals — each with its reason — and
-a digest over the whole; the lot page of the administration UI demands that
-digest back, so what gets approved is provably the batch that was **read**: a
-proposal arriving in between moves the digest and voids the stale approval.
-Approval sits in the UI, behind the master — since v3.0.0 it is not a tool,
-so no master-level secret ever travels in a conversation. (An ed25519
-signature used to ride on top; it left in v2.0.0 — it was the clumsy way of
-letting a person in instead of a chat, and the UI solves that at the root.)
+such. The lot page of the administration UI shows the queue whole, each proposal
+with its reason, and computes a digest over what it displayed; the action must
+hand that digest back, so what gets approved is provably the batch that was
+**read** — a proposal arriving in between moves the digest and voids the stale
+approval. Approval has not been a tool since v3.0.0: it happens in a browser,
+behind the UI's own password, so no secret of that level ever travels in a
+conversation. (An ed25519 signature used to ride on top; it left in v2.0.0 — it
+was the clumsy way of letting a person in instead of a chat, and the UI solves
+that at the root.)
 
-Denial needs no digest: refusing cannot do harm. The denied row stays, with
-its reason, and `rules_pending` shows a chat its own refusals — so the same idea
+Denial needs no digest: refusing cannot do harm. It does cost a sentence, one
+per proposal. The denied row stays, with its reason, and
+`rules_list(pending=True)` shows a chat its own refusals — so the same idea
 coming back through another chat in three weeks is something you can see,
 rather than something the registry can block.
+
+How many proposals may wait at once is `queue_cap`, and it belongs to the
+**project**, kept in the project's own database — not to the container, which
+serves several. NULL is unlimited, 0 closes the queue, N is N.
 
 ## The number is not yours to pick
 
@@ -134,17 +153,21 @@ arrives already marked as such, in the text.
 ## What it looks like
 
 ```
-rules_list(project="<code>", consumer="tax monitor")
+rules_list(project="<code>", consumer="tax")
 
-  VA-0002  Re-read the sources       via _ALL_          breadth 7
-  PE-0001  The method of the four    via deliberativi   breadth 4
-  FI-0003  Estimating the bracket    via tax monitor    breadth 1
+  VA-0002  Re-read the sources       reach all        reaches you: everyone
+  PE-0001  The method of the four    reach targeted   reaches you: deliberativi
+  FI-0003  Estimating the bracket    reach targeted   reaches you: by name
   ...
-  38 rules in force · 132 outside your perimeter
+  38 rules · and your open tasks at the foot
 ```
 
-`via` says *why* a rule is in your list, which is exactly what you need in order
-to decide whether it belongs somewhere else.
+`reaches_you` says *why* a rule is in your list — everybody, a group you belong
+to, or your own name — which is exactly what you need in order to decide whether
+it belongs somewhere else. The same call carries the project's brief, your own,
+and the tasks open on your desk: one call, because the alternative was four, and
+a chat that must make four calls before it can work gets three of them wrong
+once.
 
 ## The administration page
 
@@ -154,11 +177,15 @@ browser, on the LAN.
 
 The page is served by the same process, on a second port — 9443 by default —
 because two processes on one SQLite database do not share the engine's lock.
-It shows the pending batch **whole and side by side**, each proposal with the
-reason it was filed: that is where three proposals saying the same thing
-become visible as what they are. You tick what goes in, give a reason for what
-does not, and type the master **once for the action** — four rules are not four
-passwords, and a password typed four times is typed without looking.
+The home page lists the projects the registry serves, by NAME: the person has
+already proved who they are with the password, and a URL may carry a name where
+a chat may only carry a code. Everything below it is per project.
+
+The lot page shows the pending batch **whole and side by side**, each proposal
+with the reason it was filed: that is where three proposals saying the same
+thing become visible as what they are. You tick what goes in, give a reason for
+what does not, and type the password **once for the action** — four rules are
+not four passwords, and a password typed four times is typed without looking.
 
 A proposal that supersedes a rule says so **before** you decide, with the
 victim's ID and its current title: approving it retires that rule in the same
@@ -168,28 +195,40 @@ The digest covers what you were **looking at**, not what you ticked. If a
 proposal arrives while you read, the action comes back refused with the page as
 it now is — the same digest contract the MCP tool used to carry.
 
-Beside it, four readings that write nothing: the rules in force for a chosen
+Beside it, readings that write nothing: the rules in force for a chosen
 consumer, exactly as that consumer's chat reads them, brief first; a rule's
-detail with its history and the diff between two versions; the pendings and the
-expiring queue; and the state of the registry.
+detail with its history and the diff between two versions; the renewals and the
+expiring queue; and the state of the project. And one page that writes without
+touching a rule: **codes**, where a one-time authorisation code is minted.
 
-One master, from the template, and one hour of inactivity. A restart of the
-service invalidates every session, deliberately: the session secret is
+The password is asked for again on every gesture that WRITES — deciding the lot,
+renewing, promoting, minting a code — because a session alone is a browser left
+open on the iPad. It is *not* asked again for the backup or the log: a
+`VACUUM INTO` changes nothing and the log is a ring in memory, and a password
+retyped where it defends nothing only teaches the hand to type it without
+looking. One password, from the template, and one hour of inactivity. A restart
+of the service invalidates every session, deliberately: the session secret is
 generated at boot and stored nowhere.
 
-**The MCP surface moved in v3.0.0 — reconnect the connector and test in a
-new conversation.** Seven tools left it: approve, renew and promote went to
-the lot and pending pages, and the master operations — create, registry
-index, rekey — live in the UI behind the master. The backup went to the UI
-too, on its **maintenance** page, and asks for no master: `VACUUM INTO`
-changes nothing and the copy lands on the server's disk. Maintenance opens
-with the pair: project code plus that project's architect key, generated on
-the project's receipt.
+**What is not here any more, since v4.0.0: the deployment page.** It created
+projects, rekeyed them and printed their codes, and all three died with the
+declarative registry — a project is now a line in `projects.txt`, written from
+Unraid by the person who chooses its codes. What took its place is the codes
+page: minting one-time codes is the one thing the design gives to this UI and to
+nothing else.
+
+**The MCP surface moved again in v4.0.0 — reconnect the connector and test in a
+new conversation.** It went from 32 tools to 16, and the names moved with it:
+what a chat needs is `reference_guide`, `project_info`, `rules_list`,
+`rules_get`, `rules_propose` and the five `tasks_*` calls, and everything an
+administrator does went into six — `project_amend`, `rules_amend`,
+`rules_retire`, `project_status`, `rules_export`, `tasks_overview`. A connector
+left on the old surface does not degrade: it lists tools that are not there.
 
 ## The task log
 
 Rules are what BINDS a consumer. Tasks are what is WAITING for it — a
-different thing, and modelled as one: no scope, no approval, no signature,
+different thing, and modelled as one: no audience, no approval, no signature,
 no expiry. The log exists so that *what is open for me?* is a single call,
 and so is *what did I do lately?*, because closing a task costs a written
 outcome. It replaces both the per-role changelog and the "pending" section
@@ -200,16 +239,18 @@ be declared as a domain of rules — the registry refuses — because the code
 has to mean one thing.
 
 **Anybody may open a task for anybody**, which is how an audit hands each
-correction to the role that owns it. `created_by` is mandatory. **Closing
-costs a sentence**: `tasks_complete` demands an outcome, `tasks_drop` a
-reason, and both refusals are in the schema as well as at the door. **Closed
-is closed** — an open task is amended freely, its owner included, and a
-closed one not at all.
+correction to the role that owns it. `created_by` is mandatory. ⚠ Opening a task
+for a **human** notifies nobody: humans call no tools, and their post is seen by
+whoever reads the overview or the UI. **Closing costs a sentence**: `tasks_close`
+takes an `outcome` that completes it or a `reason` that drops it, exactly one of
+the two, and the refusal is in the schema as well as at the door. **Closed is
+closed** — an open task is amended freely, its owner included, and a closed one
+not at all.
 
 **`urgent` belongs to whoever created the task** and cannot be changed by
 anyone afterwards, because the receiver is the party with an interest in
-clearing it. There are no levels; the guard against inflation is that the
-maintenance view counts urgent tasks by CREATOR.
+clearing it. There are no levels; the guard against inflation is that
+`tasks_overview` counts urgent tasks by CREATOR.
 
 **Tasks do not expire.** One open past thirty days comes back marked, and
 that is all: an automatic expiry would be a drop with no reason, written by
@@ -218,26 +259,51 @@ first, then oldest first — so when a ceiling bites the cut falls on the
 fresh work and never on what has been waiting. Truncation is always
 declared, with the real total.
 
-**The MCP surface moved again in v3.1.0 — reconnect the connector and test
-in a new conversation.** Nine tools arrived, 31 in all; eight of them cost
-the project code alone, and only the cross-consumer view wants the key.
-
 ## Installing
 
 Built for Unraid with the Tailscale plugin, but it is an ordinary container: a
-mount for the database, one for state, and environment variables.
+mount for the databases, one for state, and environment variables.
 
 1. **A GitHub OAuth application of its own.** Homepage `BASE_URL`, callback
    `BASE_URL/auth/callback`. Do not recycle another service's, or the two will
    fight over the callback.
 2. **`JWT_SIGNING_KEY`**: `openssl rand -hex 32`. Stable forever — change it and
    every issued token dies.
-3. **The database directory must be local storage**, never a network share:
+3. **`WEB_UI_PASSWORD`**, twelve characters or more. It opens the page that
+   promulgates rules, there is no second account and no recovery.
+4. **The database directory must be local storage**, never a network share:
    SQLite in WAL needs real file locking.
 
 The template in this repository **is** the configuration, and its field
 descriptions are the real documentation of the deploy. Point Unraid at it, fill
 the fields, Apply.
+
+**Then declare a project.** The service serves nothing until you do. In the
+database directory the first boot writes `projects.txt`, root-only, with the
+instructions inside it; you add one line per project:
+
+    Financial Portfolio | <reference code> | <admin code>
+
+Name, reference code, admin code. The two codes are placeholders there rather
+than plausible digits on purpose, and it is the same decision that keeps an
+example row out of the template inside `projects.txt`: a line with believable
+codes in it is a line somebody copies. Both codes are 8 to 32 letters and digits, you
+generate them (`openssl rand -hex 12`), and no code may appear twice in the file
+— the same code on two projects, or a reference code equal to its own admin
+code, is refused by name and line number. The name is a **folder** next to the
+file, in that spelling, holding the project's `.db`; renaming a project means
+editing the line *and* renaming the folder. A line with no database creates one,
+empty and current, and says so in the log; a database with no line is not
+served. The file is re-read whenever its mtime changes, so adding a project
+needs no restart, and a file that will not parse stops everything with the
+offending line quoted rather than serving half a truth.
+
+The reference code goes at the top of that project's chat instructions; the
+admin code goes to whoever administers it, and nowhere else.
+
+**Updating from 3.x is not a migration.** There is none, by design: a database
+of a different schema generation is refused at boot, naming the file and the two
+numbers, never silently upgraded. The v4 registry starts empty.
 
 Everything else is checked at boot. The preflight is blocking — a failed check
 exits 2 and the server is never reached, because a service that starts anyway
@@ -254,24 +320,33 @@ and warns is a service whose warnings nobody reads.
   shape of the surface did. Note that neither check covers the OAuth routes
   themselves: a stranger outside the allowed ranges can still complete a login.
   What they cannot do is speak MCP.
-- **The architect key travels on every call** that writes, paired with the
-  project code: no session, no mode left open by accident, and no
-  container-wide code — the key is per project, kept as a hash on the
-  project's own row. Reading your own rules and filing a proposal are both
-  free — a working chat never needs the key.
-- **One manual, with a stop line.** `reference_guide` takes no arguments at
-  all — anyone the gate lets in reads it. The consumer part comes first and
-  ends at a stop line; the maintenance tools past it want the key on every
-  call. The separate legislator's manual of v1.4 was folded in: its door
-  protected an hygiene that had no readers, since the manual is read by three
-  chats and the skills do not read it at all.
+- **Three credentials, and the scale is flat.** The **reference code** opens
+  every read of a project and lets a chat file a proposal — a proposal reaches
+  nobody until a person approves it, so it cannot do harm, and asking a working
+  chat for anything stronger would put that stronger thing in every chat.
+  The **admin code** creates: a domain, a consumer, a group. Modifying anything
+  that already exists — a perimeter, a retirement, a rename, a brief, a group's
+  membership — takes the admin code **plus a one-time code**, minted on that
+  project's page in the browser, shown once, burned inside the transaction of
+  the gesture that succeeded. A refusal rolls back and does not consume it;
+  alone it elevates nobody. The role does not elevate: the key elevates.
+- **Two manuals, in two files.** `reference_guide()` bare serves the consumer's
+  half; the administration half needs the project code *and* the admin code.
+  They are two files rather than one text cut at a marker, so "the admin manual
+  served without a key" is not a failure to test for — it is one that cannot
+  happen.
+- **The registry file is the safe.** `projects.txt` holds every reference and
+  admin code in clear, which is the decision, and it is the one file here that
+  is root-only, 0600. The mode is re-imposed at every re-read, not only at
+  creation: it is edited from a share, and an editor that writes a new file and
+  renames it over the old one brings its own mode with it.
 - **A malformed call does not print what it carried.** FastMCP validates
   arguments before any tool runs and logs what it rejected, with the arguments
   in the line — a record that obeys no LOG_LEVEL of ours and leaves no
   `refused` line, so a clean log is no evidence it did not happen. Here those
-  arguments are the project code and the architect key. From v2.1.1 the
-  payload is redacted and the diagnosis is not: the tool, the parameter and the
-  rule that was broken all survive.
+  arguments are the project's codes. From v2.1.1 the payload is redacted and the
+  diagnosis is not: the tool, the parameter and the rule that was broken all
+  survive.
 - **The process runs as root and the database is 0644.** This is the opposite of
   the vault twin, deliberately: from the share you read and you do not touch,
   because a write by hand would bypass the triggers and break history in
@@ -283,9 +358,11 @@ and warns is a service whose warnings nobody reads.
 
 ## Testing
 
-Three suites. No network, no FastMCP, no Docker.
+Five suites. No network, no FastMCP, no Docker.
 
 ```
+python3 test_schema.py      # the DDL: triggers, constraints, generation
+python3 test_registry.py    # projects.txt, the router, the refusals it raises
 python3 test_collaudo.py    # the engine, refusals included
 python3 test_surface.py     # the seam, the image, the template
 python3 test_crash.py       # SIGKILL mid-transaction, as Docker does
@@ -296,7 +373,10 @@ in two places is two numbers, and this project has already paid for that once.
 
 `test_surface.py` reads the source rather than running it: every call into the
 engine must exist with a compatible signature, every tool that writes must pass
-the maintenance gate, and no docstring may name a tool that does not exist.
+the gate it claims, no docstring may name a tool that does not exist, and every
+variable the template declares must have a reader in the code — that last one
+because four dead knobs survived three grains in a form a person fills in with
+care.
 
 ## The icon, and where it is actually seen
 
