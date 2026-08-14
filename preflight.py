@@ -386,7 +386,27 @@ def c_manuals():
     missing = [m for m in MANUALS if not os.path.isfile(os.path.join(here, m))]
     if missing:
         raise RuntimeError(f"not in the image: {', '.join(missing)} — check the Dockerfile COPY")
-    return f"{len(MANUALS)} manual{'s' if len(MANUALS) != 1 else ''}, in the image"
+    # AND IT HAS THE RIGHT SHAPE. From 4.1.0 the manual is served one card at a
+    # time, so a file that is present but has lost its `# COMMANDS` separator is
+    # a manual that answers every single call with a fault — present, announced,
+    # and useless, which is the same defect as absent wearing a better face. The
+    # cut is asked for with the engine's own function, so there is no second
+    # expression here to disagree with it later.
+    from rules import split_guide                    # stdlib-only module
+    counts = []
+    for m in MANUALS:
+        with open(os.path.join(here, m), encoding="utf-8") as f:
+            text = f.read()
+        try:
+            _, cards = split_guide(text)
+        except Exception as e:
+            raise RuntimeError(f"{m}: {e} — the file in the image is not the "
+                               f"manual this version serves") from e
+        if not cards:
+            raise RuntimeError(f"{m}: no command cards past the separator — "
+                               f"reference_guide(name) could answer nothing")
+        counts.append(f"{m.removesuffix('.md')} {len(cards)}")
+    return f"{len(MANUALS)} manuals, in the image · cards: {', '.join(counts)}"
 
 
 CHECKS = [c_db, c_schema, c_writable, c_ownership, c_approval,

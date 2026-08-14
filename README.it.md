@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/versione-4.0.1-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tool-8A63D2.svg">
+<img src="https://img.shields.io/badge/versione-4.1.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tool-8A63D2.svg">
 
 **Le regole di un progetto in un registro invece che sparse nei Markdown — così
 una chat può rispondere in una chiamata a «sotto quali regole sto?».**
@@ -226,6 +226,40 @@ che fa un amministratore sta in sei — `project_amend`, `rules_amend`,
 `rules_retire`, `project_status`, `rules_export`, `tasks_overview`. Un
 connettore rimasto sulla superficie vecchia non degrada: elenca tool che non
 ci sono.
+
+La superficie intera, e un test tiene questo blocco contro il codice — un README
+che promette un argomento che il tool non ha è la copia che diverge per prima:
+
+    reference_guide(name='', project='', key='')
+    project_info(project)
+    rules_list(project, consumer, query='', pending=False)
+    rules_get(project, ids, consumer, history=False)
+    rules_propose(project, domain, type, title, body, reason, reach,
+                  proposed_by, groups=[], exceptions=[], supersedes='',
+                  source='', consumer_key='')
+    tasks_add(project, consumer, title, body, created_by, urgent=False,
+              idem_key='', consumer_key='')
+    tasks_list(project, consumer, query='', since='', until='',
+               authored=False)
+    tasks_get(project, ids)
+    tasks_close(project, id, by, outcome='', reason='', consumer_key='',
+                key='')
+    tasks_amend(project, id, by, title='', body='', consumer='',
+                consumer_key='', key='')
+    project_amend(project, entity, name, action, fields={}, reason='',
+                  auth_code='', key='')
+    rules_amend(project, id, reach, groups, exceptions, expected_version,
+                reason, auth_code, key)
+    rules_retire(project, id, reason, auth_code, key)
+    project_status(project, key)
+    rules_export(project, key, consumer='', expand=False)
+    tasks_overview(project, key)
+
+**Dalla v4.1.0 il manuale si prende un comando per volta.** Chiamato nudo,
+`reference_guide` serve una pagina di modello corta più l'elenco dei nomi delle
+schede; chiamato con un nome serve quel comando spiegato per intero, rifiuti
+compresi. Il manuale nel suo insieme è cresciuto: a rimpicciolirsi è quello che
+si paga per chiedere una cosa sola.
 
 ## Il task log
 

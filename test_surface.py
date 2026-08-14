@@ -706,10 +706,17 @@ for _manual, _text in MANUALS.items():
 # red on correct lines gets deleted rather than obeyed.
 #
 # It reads BLOCKS, not every parenthesis in the prose. A signature is a run of
-# indented lines whose brackets balance, so one split over three lines is one
-# signature — and `_norm` below reads it with ast, which means the reading of a
-# signature is the language's, not a regular expression's.
-SIG_LINE = re.compile(r"^ {4}([a-z][a-z0-9_]*)\(")
+# lines whose brackets balance, so one split over three lines is one signature —
+# and it is read with ast, which means the reading of a signature is the
+# language's, not a regular expression's.
+#
+# TWO SHAPES, since 4.1.0, and the check has to see both or it goes half blind.
+# An INDENTED block is a signature quoted in prose — the abbreviated
+# `rules_list(project, consumer)` at SESSION START, and the block in the READMEs.
+# A `## name(...)` HEADING is a card, and that is now where the full signatures
+# live. Reading only the first shape would have left every card unchecked while
+# staying green, which is the failure mode this check exists to prevent.
+SIG_LINE = re.compile(r"^(?: {4}|## )([a-z][a-z0-9_]*)\(")
 
 
 def signatures_in(text: str) -> list[tuple[str, list[str]]]:
@@ -725,7 +732,7 @@ def signatures_in(text: str) -> list[tuple[str, list[str]]]:
         if not SIG_LINE.match(lines[i]):
             i += 1
             continue
-        chunk = lines[i].strip()
+        chunk = lines[i].removeprefix("## ").strip()
         while chunk.count("(") > chunk.count(")") and i + 1 < len(lines):
             i += 1
             chunk += " " + lines[i].strip()
@@ -998,21 +1005,30 @@ ok("(VA-0002)" in GUIDE_SRC, "the manual teaches the citation format")
 # already in it, for other reasons: "your rules in force" in SESSION START,
 # "closed is closed" under TASKS, `tasks_close` in the signature block. A pin
 # satisfied by text that was there anyway is a pin that can never go red.
-ok("point at a rule that is **already approved**" not in GUIDE_SRC,
+#
+# WHITESPACE-FLATTENED, and that is the 4.1.0 change to them. The pin is still
+# the WHOLE sentence; what is dropped is only where the paragraph happened to
+# wrap, which is not something the manual promises anybody. Before this release
+# three of them carried a newline inside the literal, so re-wrapping a CORRECT
+# paragraph turned the manual red — and a check that goes red on a correct line
+# gets deleted rather than obeyed, and then it is gone for the case it was
+# written for. Cutting the manual into cards re-wrapped every one of them.
+GUIDE_FLAT = re.sub(r"\s+", " ", GUIDE_SRC)
+ok("point at a rule that is **already approved**" not in GUIDE_FLAT,
    "the sentence this release made FALSE is gone: approved is no longer enough")
-ok("that means one thing only: a rule **in force**" in GUIDE_SRC,
+ok("that means one thing only: a rule **in force**" in GUIDE_FLAT,
    "the manual says a citation may only point at a rule IN FORCE")
-ok("denied, retired or superseded is refused" in GUIDE_SRC,
+ok("denied, retired or superseded is refused" in GUIDE_FLAT,
    "and names the three states that are refused")
-ok("the refusal **names the heir**" in GUIDE_SRC,
+ok("the refusal **names the heir**" in GUIDE_FLAT,
    "and that the refusal names the heir, which is what makes it actionable")
-ok("term has **expired** is refused" in GUIDE_SRC,
+ok("term has **expired** is refused" in GUIDE_FLAT,
    "and that an expired term is refused as well — the one no gesture caused")
-ok("renew it from the administration page" in GUIDE_SRC.lower(),
+ok("renew it from the administration page" in GUIDE_FLAT.lower(),
    "with the way out that belongs to it, which is not the one for a retirement")
-ok("A **closed** task stays citable" in GUIDE_SRC,
+ok("A **closed** task stays citable" in GUIDE_FLAT,
    "the manual says a task may cite a task, closed ones included")
-ok("the `outcome` or `reason` you give\n`tasks_close`" in GUIDE_SRC,
+ok("the `outcome` or `reason` you give `tasks_close`" in GUIDE_FLAT,
    "and that the same door runs on the outcome, which is written once")
 # The migration was DELETED on purpose: a migration is not code, it is the work,
 # and a regex sweep over prose invents citations that were never citations. The
@@ -1050,12 +1066,16 @@ for _t in TOOLS:
 print("\n== the manual's ceilings are rendered from the engine's constants ==")
 
 # A manual with no limits is useless to a caller; a manual with the wrong ones
-# is worse, because the caller plans around them. The way out is not to drop
-# them, it is to read the row back OUT of the manual and compare it with the
-# constant — an `in` test would be satisfied while a second, stale row sat
-# right above saying something else, which is the state a rewrite leaves
-# behind. So: find every row with that label, and demand the list be exactly
-# one, holding exactly the constant.
+# is worse, because the caller plans around them.
+#
+# Until 4.1.0 they sat in one table, and the check read the row back out of it.
+# With the manual cut into cards the table is gone, and putting it back would be
+# the wrong shape twice over: a ceiling is paid by the caller of ONE command, so
+# it belongs on that command's card — and a ceiling looked for in the file at
+# large is satisfied by an occurrence anywhere, so a wrong number sitting in the
+# card that governs it would pass while a right one three sections away answered
+# for it. So each ceiling is demanded INSIDE the card of the command it governs,
+# rendered from the constant in the form a person writes it.
 #
 # `import rules` and getattr, not `from rules import ...`: a from-import of a
 # constant that got renamed raises ImportError HERE, in the middle of the file,
@@ -1063,15 +1083,47 @@ print("\n== the manual's ceilings are rendered from the engine's constants ==")
 # — silently never runs.
 import rules as _rules                                          # noqa: E402
 
-for _label, _attr, _unit in (("IDs per `rules_get`", "GET_IDS", ""),
-                             ("body of one rule", "MAX_BODY_BYTES", " bytes"),
-                             ("numbers in one domain", "MAX_SEQ", "")):
+
+def cut_guide(text: str, label: str):
+    """`split_guide` on a manual, with the SEPARATOR asked for FIRST and BY NAME.
+
+    Not politeness: `split_guide` raises a RulesFault when `# COMMANDS` is
+    missing, and a bare call here would take the whole file down with it — every
+    check below would stop existing rather than go red, which by the rule of the
+    house is a control MISSING, not a control being strict. The twin paid this
+    exactly once: of its seven injections, the one that removed the separator
+    was the only one that produced no red line at all.
+
+    So: one verdict that names the file, then a split that cannot explode. An
+    empty pair afterwards makes the checks below fail loudly, on their own
+    labels."""
+    ok(_rules.GUIDE_SEPARATOR in (text or ""),
+       f"{label} carries its '# COMMANDS' separator — without it nothing that "
+       f"reads the cards runs at all")
+    try:
+        return _rules.split_guide(text or "")
+    except _rules.RulesFault:
+        return "", {}
+
+
+_WORK_MODEL, _WORK_CARDS = cut_guide(GUIDE_SRC, "reference-guide.md")
+
+# (card, constant, what it is) — and the same constant appears on more than one
+# card on purpose: GET_IDS is the ceiling of two different reads, and a caller
+# of one of them has no reason to be reading the other one's card.
+for _card, _attr, _what in (("rules_get", "GET_IDS", "IDs per call"),
+                            ("rules_propose", "MAX_BODY_BYTES", "the body of a rule"),
+                            ("rules_propose", "MAX_SEQ", "numbers in one domain"),
+                            ("tasks_add", "MAX_BODY_BYTES", "the body of a task"),
+                            ("tasks_list", "TASKS_LIST_CAP", "items in a list"),
+                            ("tasks_list", "TASKS_STALE_DAYS", "days before MARKED"),
+                            ("tasks_get", "GET_IDS", "IDs per call"),
+                            ("tasks_get", "GET_BYTES", "bytes per answer")):
     _v = getattr(_rules, _attr, None)
     ok(_v is not None, f"the engine still declares {_attr}")
-    _found = re.findall(rf"^\|\s*{re.escape(_label)}\s*\|\s*([^|]*?)\s*\|",
-                        GUIDE_SRC, re.MULTILINE)
-    ok(_found == [f"{_v}{_unit}"],
-       f"reference-guide.md states {_label} exactly once, as {_v}{_unit}", _found)
+    ok(f"**{_v}**" in _WORK_CARDS.get(_card, ""),
+       f"the card for {_card} states {_what} as the code enforces it ({_v})",
+       _attr)
 
 # =====================================================================
 # 2d · one manual, whole, behind no door
@@ -1201,12 +1253,37 @@ if _REF is not None:
     ok(_branch_ok,
        "the admin manual is named ONLY where the gate has just been passed, and "
        "the bare branch never names it")
+    # AND NOWHERE ELSE IN THE FUNCTION, which is the half that was missing. The
+    # check above reads the two arms of the `if` and says nothing about what
+    # sits AFTER it — so a line like `return {..., "extra":
+    # _GUIDE_ADMIN.read_text()}` at the end of the body handed the whole
+    # administration manual to every keyless caller with the suite green. Found
+    # by adversarial review, 2026-Ago-14, on this release. The gate is not where
+    # the branch is written, it is everywhere the constant can be named.
+    _gated = {id(n) for _if in [n for n in ast.walk(_REF) if isinstance(n, ast.If)]
+              for b in _if.body for n in ast.walk(b)
+              if any(isinstance(x, ast.Name) and x.id == "_admin"
+                     for x in ast.walk(_if))}
+    _loose_admin = [n for n in ast.walk(_REF) if isinstance(n, ast.Name)
+                    and n.id == "_GUIDE_ADMIN" and id(n) not in _gated]
+    ok(not _loose_admin,
+       "and the admin constant is named NOWHERE ELSE in the tool — not after the "
+       "branch, not in the return", len(_loose_admin))
     # And the answer says which half it served, so a caller can tell a work
     # manual from a truncated admin one without reading the prose.
     _levels = {n.value for n in ast.walk(_REF)
                if isinstance(n, ast.Constant) and n.value in ("work", "admin")}
     ok(_levels == {"work", "admin"},
        "and it declares the level it served, both of them", sorted(_levels))
+    # And it is in the ANSWER, which the check above never asked: those two
+    # constants are satisfied by the assignment `level, page = "work", _GUIDE`,
+    # so dropping `"level": level` from the return left it green while the
+    # manual and the docstring went on promising the field.
+    _keys = {k.value for n in ast.walk(_REF) if isinstance(n, ast.Dict)
+             for k in n.keys if isinstance(k, ast.Constant)}
+    ok({"version", "level"} <= _keys,
+       "and the answer really carries `level` and `version`, not only the words",
+       sorted(_keys))
     _reads = {PATH_CONSTS.get(c) for c in _TOUCHES_CONST.get("reference_guide", set())}
     ok(_reads == {"reference-guide.md", "reference-guide-admin.md"},
        "reference_guide serves the two manuals, and nothing else",
@@ -1253,6 +1330,340 @@ if _PRE:
 _CHECKS_LIST = re.search(r"^CHECKS = \[(.*?)\]", PREFLIGHT_SRC, re.MULTILINE | re.DOTALL)
 ok(_CHECKS_LIST is not None and "c_manuals" in _CHECKS_LIST.group(1),
    "and the check is in CHECKS — one that is defined but not listed never runs")
+# And it asks about the SHAPE, not only the presence. A manual in the image with
+# no `# COMMANDS` in it answers every reference_guide call with a fault: present,
+# announced, and useless. Read off the AST inside that function, and it has to be
+# the engine's own `split_guide` — a second expression written here would be the
+# copy that stops agreeing.
+_CM = next((n for n in ast.walk(ast.parse(PREFLIGHT_SRC))
+            if isinstance(n, ast.FunctionDef) and n.name == "c_manuals"), None)
+ok(_CM is not None and any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                           and c.func.id == "split_guide" for c in ast.walk(_CM)),
+   "preflight cuts each manual with the engine's split_guide, so a shapeless "
+   "one is refused at boot and not weeks later in a chat")
+
+# =====================================================================
+# 2e · the manual is cut into cards, and the cards are the tools
+# =====================================================================
+
+print("\n== the manual is cut into cards, one per command ==")
+
+# 4.1.0. The manual stopped being handed over whole: a model page that is read
+# once, then one card per command, asked for by name. The cut is what makes the
+# manual checkable at the grain of a command — before this, "the manual mentions
+# rules_propose" was the strongest thing anybody could say about it.
+#
+# EVERY CHECK BELOW RUNS THE REAL FUNCTION on the real file. A second parser
+# written here to hold the first one honest would be two expressions agreeing
+# today, which is the shape every divergence in this project has taken.
+
+_ADMIN_MODEL, _ADMIN_CARDS = cut_guide(MANUALS.get("reference-guide-admin.md"),
+                                       "reference-guide-admin.md")
+
+# WHICH TOOLS BELONG TO WHICH HALF. Everything that takes no admin code at all
+# is documented in the work manual — that half is derived from the gate and
+# moves by itself. Three that DO take one are documented there too, and that is
+# a decision rather than a consequence, so it is written down with its reason.
+WORK_HALF_WITH_KEY = {
+    "reference_guide": "it is the door to both halves: refusing to describe it "
+                       "in the half you can read would be a wall at the front "
+                       "door",
+    "tasks_close": "the ordinary call — closing your own task — takes no key at "
+                   "all, and a chat that could not read about it could not "
+                   "close anything",
+    "tasks_amend": "same, and for the same reason",
+}
+# `project_amend` is NOT on that list, and it is the one to argue about: its
+# `specs`-only case travels on the reference code, so a working chat can call
+# it. It stays in the administration half all the same — the command as a whole
+# is administration, its card is the longest one there, and a work manual that
+# carried it would be paying every reader for a corner nobody uses. The
+# consequence is stated rather than hidden: a chat that has to write `specs`
+# back is a chat that was given the admin manual.
+ok(set(WORK_HALF_WITH_KEY) <= set(ADMIN_IF_KEY),
+   "every tool documented in the work half despite taking a key is one whose "
+   "KEYLESS call is a real working call",
+   sorted(set(WORK_HALF_WITH_KEY) - set(ADMIN_IF_KEY)))
+_ADMIN_TOOLS = sorted(WITH_KEY - set(WORK_HALF_WITH_KEY))
+_WORK_TOOLS = sorted(TOOL_NAMES - set(_ADMIN_TOOLS))
+
+for _label, _cards, _expected in (("reference-guide.md", _WORK_CARDS, _WORK_TOOLS),
+                                  ("reference-guide-admin.md", _ADMIN_CARDS, _ADMIN_TOOLS)):
+    # ONE CARD PER TOOL, and the count is not written anywhere: it is the length
+    # of two lists. A tool added without a card falls here, and so does a card
+    # left behind by a tool that was withdrawn — which is the direction that
+    # rots in silence, because whoever reads that card calls a door that is not
+    # there any more.
+    ok(sorted(_cards) == _expected,
+       f"{_label}: one card per tool of this half, and no card without a tool",
+       f"cards {sorted(_cards)} vs tools {_expected}")
+    # And every heading after the separator IS a card. A `## Something` that is
+    # not a signature is text nobody can ask for: `split_guide` swallows it into
+    # the card above, so it ships, it is paid for, and it is unreachable by name.
+    _rest = (MANUALS.get(_label) or "").partition(_rules.GUIDE_SEPARATOR)[2]
+    _stray = [h for h in re.findall(r"(?m)^## (.*)$", _rest)
+              if not re.match(r"^[a-z][a-z0-9_]*\(", h)]
+    ok(not _stray, f"{_label}: every heading past the separator is a card", _stray)
+    # AND A CARD HAS A BODY. Every check in this section is satisfied by a
+    # heading with nothing under it — the name is right, the signature is right,
+    # the count is right, and the reader who asks for it learns nothing and goes
+    # back to improvising, which is the whole thing this release exists to stop.
+    # The floor is deliberately low: it is there to catch a card that was
+    # emptied, not to legislate how long an explanation should be.
+    CARD_FLOOR = 200
+    _thin = sorted(f"{n} ({len(b)})" for n, b in _cards.items()
+                   if len(b.split("\n", 1)[-1].strip()) < CARD_FLOOR)
+    ok(not _thin, f"{_label}: no card is a heading with nothing under it", _thin)
+
+# THE CARDS ARE HEADED BY THE EXACT SIGNATURE, and that is not typography: it is
+# what lets the signature checks in section 1 read them. Those run over both
+# manuals already, in both directions — nothing promised that the code has not
+# got, nothing the code takes that the manual never names. Here we only pin that
+# they are actually being READ from the headings, because the extractor changed
+# shape in this release and a silently empty read would leave the whole of
+# section 1 green over nothing.
+for _label, _cards in (("reference-guide.md", _WORK_CARDS),
+                       ("reference-guide-admin.md", _ADMIN_CARDS)):
+    _read = {n for n, _ in signatures_in(MANUALS.get(_label) or "")}
+    ok(set(_cards) <= _read,
+       f"{_label}: every card heading is read as a signature, not just as text",
+       sorted(set(_cards) - _read))
+
+# THE MODEL PAGE STAYS SMALL. Not a matter of style: the whole operation is that
+# the page everybody pays for stays small while the cards, which only their own
+# caller pays for, get to explain properly. A model page that re-inflates undoes
+# the work without anybody noticing — so the ceiling is here, with headroom for
+# a sentence and not for a section.
+MODEL_CEILING = 4200
+ok(len(_WORK_MODEL) <= MODEL_CEILING,
+   f"the work model page is under {MODEL_CEILING} characters", len(_WORK_MODEL))
+ok(len(_ADMIN_MODEL) <= MODEL_CEILING,
+   f"the administration model page is under {MODEL_CEILING} characters",
+   len(_ADMIN_MODEL))
+
+# THE POINTER TO THE CARDS IS THE ONE LINE THE WHOLE MANOEUVRE RESTS ON. Nobody
+# asks for a card they do not know they may ask for: without this line the cut
+# is invisible and the result is a manual SHORTER than before, which is the
+# worst of the three possible outcomes. It lives once, in the model page, where
+# it is the first thing read — repeating it in sixteen docstrings would cost
+# more than the cut saves.
+for _label, _model in (("reference-guide.md", _WORK_MODEL),
+                       ("reference-guide-admin.md", _ADMIN_MODEL)):
+    ok("reference_guide(\"<name>\"" in _model,
+       f"{_label}: the model page tells the reader to ask for a card, by name")
+
+# THE GATE, AND IT IS PROVED BY A CASE rather than deduced. `legislator_guide`
+# on the twin stayed protected in appearance only, with the suites green, and
+# the lesson written down was that a check which chooses for itself what to
+# watch is not a gate. So: ask the WORK manual for an administration card, the
+# way a chat without a key would, and read what comes back.
+for _name in _ADMIN_TOOLS:
+    try:
+        _rules.guide_for(GUIDE_SRC, _name)
+        ok(False, f"the work manual refuses to serve the card for {_name}", "served it")
+    except _rules.RulesFault as e:
+        # A fault is not the gate holding: a broken image refuses everything,
+        # including the things it should serve. Caught apart, or a manual with
+        # no separator would read here as a gate that works.
+        ok(False, f"the work manual refuses to serve the card for {_name} "
+                  f"BECAUSE OF THE GATE, not because the image is broken", str(e)[:80])
+    except _rules.RulesError as e:
+        # And the refusal lists the names of THIS half only. A refusal that
+        # helpfully listed every card would hand the whole administration menu
+        # to a caller who has no key — the gate would hold on the text and leak
+        # the map.
+        ok(not any(a in str(e) for a in _ADMIN_TOOLS if a != _name),
+           f"the work manual refuses the card for {_name} without naming the "
+           f"other administration cards", str(e)[:90])
+# The other direction, so the refusal above is not green because the file is
+# empty: the work manual really does serve its own cards. Caught rather than
+# called bare — a missing card here would take the file down instead of going
+# red, and the checks after it would stop existing.
+_SERVED_CARDS = []
+for _n in _WORK_TOOLS:
+    try:
+        _SERVED_CARDS.append(_rules.guide_for(GUIDE_SRC, _n)["command"])
+    except _rules.RulesError:
+        pass
+ok(_SERVED_CARDS == _WORK_TOOLS, "and it serves every card of its own half",
+   sorted(set(_WORK_TOOLS) - set(_SERVED_CARDS)))
+
+def _guide(*a):
+    """`guide_for` that answers a dict either way: on a broken image these two
+    checks have to go RED with their own labels, not take the file down."""
+    try:
+        return _rules.guide_for(*a)
+    except _rules.RulesError as e:
+        return {"error": str(e)}
+
+
+# The forgiveness is designed, so it is measured: the manual prints names WITH
+# the parentheses, and pasting one back is the likeliest way to ask.
+ok(_guide(GUIDE_SRC, "  RULES_GET() ").get("command") == "rules_get",
+   "space, capitals and a trailing () are forgiven on the way in")
+# Bare: the model page AND the list of names, so learning that cards exist and
+# learning which ones is one round trip and not two.
+_BARE = _guide(GUIDE_SRC)
+ok(_BARE.get("cards") == _WORK_TOOLS and "guide" in _BARE,
+   "asked bare it serves the model page and the list of card names",
+   _BARE.get("cards"))
+
+# THE VERBATIM REFUSALS ARE HELD AGAINST THE CODE, and this is the check the
+# whole release turns on. The best thing the cards carry is the refusal a
+# command can hand you, copied word for word — the collaudo of 14 August found
+# the service's refusals to be BETTER than the manual, which is why they were
+# brought in. Copied text with nothing holding it is a second answer waiting to
+# disagree: measured, `11 IDs asked for and the ceiling is 10` could be edited
+# to `26 … 25`, and `does NOT notify them` to `does NOT ping them`, with every
+# other check in this file green.
+#
+# A quoted block is an INDENTED run inside a card. The engine's messages are
+# f-strings, so what is compared is the literal parts either side of each hole,
+# with the manual's own sample values sitting in the holes — and a block is
+# allowed to STOP early, because quoting the first two sentences of a
+# four-sentence refusal is honest quoting. What is not allowed is a word the
+# code does not say.
+def _flat(s: str) -> str:
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def message_parts(tree) -> list:
+    """Every refusal message in a module, as a list of literal runs with None
+    where an f-string interpolates. Adjacent implicit-concatenated literals are
+    already one node by the time the parser is done, so a message wrapped over
+    six source lines arrives here as one string."""
+    out = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.JoinedStr):
+            out.append([_flat(v.value) if isinstance(v, ast.Constant) else None
+                        for v in n.values])
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str) \
+                and len(n.value) > 40:
+            out.append([_flat(n.value)])
+    return out
+
+
+def covered_by(parts: list, block: str) -> tuple:
+    """How much of `block` this one message accounts for, from its start, and
+    how much of that was LITERAL rather than swallowed by a hole.
+
+    Walks the two side by side: a literal run has to match character for
+    character, and a hole swallows whatever the manual put in it up to the next
+    literal. It stops where they part company — which is the whole point,
+    because a block that diverges one word in stops one word in.
+
+    The second number is there because the first one alone was fooled. `f"{a}.{b}"`
+    is a message whose entire literal content is a full stop, and it "covered"
+    every quoted block in the manual: two holes and a dot match anything with a
+    dot in it. So a match also has to be mostly literal to count."""
+    i = lit = 0
+    for idx, p in enumerate(parts):
+        if p is None:
+            nxt = next((q for q in parts[idx + 1:] if q), None)
+            if nxt is None:
+                return len(block), lit
+            j = block.find(nxt[:24], i)
+            if j < 0:
+                return i, lit
+            i = j
+        else:
+            k = 0
+            while k < len(p) and i + k < len(block) and p[k] == block[i + k]:
+                k += 1
+            lit += k
+            if k < len(p) and i + k < len(block):
+                return i + k, lit
+            i += k
+    return i, lit
+
+
+# Only messages with real literal substance: a run of at least 25 characters
+# somewhere in them. Below that a "message" is punctuation between two holes,
+# and it answers for anything.
+_MESSAGES = [p for p in message_parts(ENGINE_TREE)
+             if max((len(x) for x in p if x), default=0) >= 25]
+for _label, _cards in (("reference-guide.md", _WORK_CARDS),
+                       ("reference-guide-admin.md", _ADMIN_CARDS)):
+    _quoted = []
+    for _n, _body in _cards.items():
+        for _blk in re.findall(r"(?m)(?:^ {4,}\S.*\n)+", _body):
+            _b = _flat(_blk)
+            if len(_b) > 60:                      # a quoted refusal, not a call
+                _quoted.append((_n, _b))
+    ok(_quoted, f"{_label}: there are quoted refusals to check at all",
+       len(_quoted))
+    _drifted = []
+    for _n, _b in _quoted:
+        _hits = [covered_by(p, _b) for p in _MESSAGES]
+        # Whole block accounted for, and MOSTLY by literal text of the message —
+        # not by holes that swallow whatever was put in them.
+        _held = [e for e, lit in _hits if e >= len(_b) - 2 and lit >= len(_b) * 0.5]
+        if not _held:
+            _end = max((e for e, _ in _hits), default=0)
+            _drifted.append(f"{_n}: diverges at …{_b[max(0, _end - 30):_end + 30]}…")
+    ok(not _drifted, f"{_label}: every refusal quoted in a card is the one the "
+                     f"engine actually raises ({len(_quoted)} quoted)", _drifted)
+
+# AND THE NUMBERS IN THE PROSE OF A CARD ARE THAT CARD'S NUMBERS. The ceiling
+# check above is an `in`, so it is satisfied while a second sentence three lines
+# down says something else — which is exactly the state a rewrite leaves behind.
+# This is the other half: outside the quoted blocks, a card may not state a
+# number that is not one of the constants it is allowed to state.
+_ALLOWED_NUMBERS = {
+    "rules_get": {_rules.GET_IDS},
+    "rules_propose": {_rules.MAX_BODY_BYTES, _rules.MAX_SEQ},
+    "tasks_add": {_rules.MAX_BODY_BYTES},
+    "tasks_list": {_rules.TASKS_LIST_CAP, _rules.TASKS_STALE_DAYS},
+    "tasks_get": {_rules.GET_IDS, _rules.GET_BYTES},
+}
+for _n, _body in _WORK_CARDS.items():
+    # THE QUOTED BLOCKS ARE READ TOO, and that is not an oversight to fix later:
+    # a wrong number inside a quoted refusal is the one the check above CANNOT
+    # see, because in the engine that number is a hole in an f-string and a hole
+    # accepts anything. `11 IDs asked for and the ceiling is 10` edited to
+    # `26 … 25` passed the verbatim check exactly as it should have, and this is
+    # what catches it. Hence `c + 1` in the allowed set: the sample in a ceiling
+    # refusal is one over the ceiling, and that is the only other number a card
+    # has any business stating.
+    _allowed = _ALLOWED_NUMBERS.get(_n, set())
+    _allowed = _allowed | {c + 1 for c in _allowed}
+    # The lookbehind bars a hyphen as well as a word character: without it the
+    # `02` of `VA-02` and the `0001` of `(TK-0001 — …)` read as numbers the card
+    # was stating, and the check went red on two correct cards.
+    _nums = {int(x) for x in re.findall(r"(?<![\w.\-])(\d{2,})(?![\w.])", _body)}
+    _off = sorted(_nums - _allowed)
+    ok(not _off, f"the card for {_n} states no number that is not its own", _off)
+
+# NO BARE VERB THAT IS NOT A TOOL. A manual that names `status()` sends its
+# reader to a door that does not exist, and the reader has no way to tell.
+for _label in SERVED_FILES:
+    _verbs = {v for v in re.findall(r"`([a-z][a-z0-9_]*)\(", MANUALS.get(_label) or "")}
+    ok(not (_verbs - TOOL_NAMES), f"{_label} names no verb that is not a tool",
+       sorted(_verbs - TOOL_NAMES))
+
+# THE READMEs DECLARE THE SURFACE, with the exact signatures. A README is what a
+# stranger reads before installing anything, and it is the copy that diverges
+# first — it is not in the image, so nothing else here would ever catch it.
+for _readme in ("README.md", "README.it.md"):
+    _src = source_or_none(os.path.join(HERE, _readme)) or ""
+    _seen: dict = {}
+    for _n, _ps in signatures_in(_src):
+        _seen.setdefault(_n, set()).update(_ps)
+    ok(sorted(_seen) == sorted(TOOL_NAMES),
+       f"{_readme} declares every tool and no other",
+       sorted(set(TOOL_NAMES) ^ set(_seen)))
+    # BOTH DIRECTIONS, and the second one is here because the first one alone
+    # was measured and found half blind: a README given `tasks_get(project, ids,
+    # consumer)` — an argument the tool has not got — passed everything. Naming
+    # every real parameter says nothing about the invented ones standing next to
+    # them.
+    _unsaid = sorted(f"{n}.{p}" for n in _seen if n in CODE_PARAMS
+                     for p in CODE_PARAMS[n] if p not in _seen[n])
+    ok(not _unsaid, f"{_readme} names every parameter those tools take", _unsaid)
+    _invented = sorted(f"{n}({p})" for n, ps in _seen.items() if n in CODE_PARAMS
+                       for p in ps if p not in CODE_PARAMS[n])
+    ok(not _invented, f"{_readme} promises no parameter the code has not got",
+       _invented)
 
 # =====================================================================
 # 3 · no docstring points at a tool that is not there
@@ -2907,12 +3318,19 @@ ok("`skill`, the project's brief and specs do not come" in (MANUALS.get("referen
 _WORK = MANUALS.get("reference-guide.md") or ""
 ok("consumer_key" in _WORK, "consumer_key is still in the manual's signatures, "
                             "because it is still a real parameter")
-_SIG_LINES = [ln for ln in _WORK.splitlines() if SIG_LINE.match(ln) or ln.startswith(" " * 14)]
-_PROSE = "\n".join(ln for ln in _WORK.splitlines() if ln not in _SIG_LINES)
-ok("consumer_key" not in _PROSE,
-   "and the PROSE does not teach it: the per-consumer secret is scaffolding, "
-   "not a thing a chat has to carry",
-   [ln.strip()[:60] for ln in _PROSE.splitlines() if "consumer_key" in ln])
+# BOTH MANUALS, and the exemption is the signature line and nothing else. It
+# used to spare any line indented fourteen spaces as well — that was where a
+# wrapped signature continued in the old shape, and with the cards every
+# signature sits on one `## ` line, so all the clause did was exempt any deeply
+# indented prose from being read as prose. Measured: the sentence that teaches
+# `consumer_key`, indented fourteen spaces, passed.
+for _label in SERVED_FILES:
+    _txt = MANUALS.get(_label) or ""
+    _PROSE = "\n".join(ln for ln in _txt.splitlines() if not SIG_LINE.match(ln))
+    ok("consumer_key" not in _PROSE,
+       f"and {_label} does not teach it in PROSE: the per-consumer secret is "
+       f"scaffolding, not a thing a chat has to carry",
+       [ln.strip()[:60] for ln in _PROSE.splitlines() if "consumer_key" in ln])
 
 # TK is reserved, and the two letter-pair checks that used to be written twice
 # are ONE door now. The literal is counted: a second copy is how a reservation
@@ -2965,24 +3383,15 @@ for _t in TOOLS:
         ok("urgent first" in _doc and "real total" in _doc,
            "tasks_list promises the order and the declared total")
 
-# THE MANUAL SHIPS WITH THE BEHAVIOUR, and here it also carries a COPY of
-# four numbers. A copy needs a check that compares it, or it is just a second
-# answer waiting to disagree with the first — a manual with the wrong ceilings
-# is worse than one with no ceilings.
-_GUIDE_CEILINGS = re.search(r"## THE CEILINGS.*?\n\n(.*?)\n\n", GUIDE_SRC, re.S)
-ok(_GUIDE_CEILINGS is not None, "the manual has a ceilings table to read")
-if _GUIDE_CEILINGS:
-    _tbl = _GUIDE_CEILINGS.group(1)
-    for _label, _value in (("items in a task list", _rules.TASKS_LIST_CAP),
-                           ("codes per `tasks_get`", _rules.GET_IDS),
-                           ("bytes per `tasks_get`", _rules.GET_BYTES),
-                           ("body of one task", _rules.MAX_BODY_BYTES)):
-        _line = next((l for l in _tbl.splitlines() if _label in l), "")
-        ok(str(_value) in _line,
-           f"the manual's ceiling for {_label} is {_value}", _line[:80] or "(row absent)")
-ok(str(_rules.TASKS_STALE_DAYS) in GUIDE_SRC
-   and "MARKED" in GUIDE_SRC and "do not expire" in GUIDE_SRC,
-   "the manual says tasks do not expire and gives the staleness threshold")
+# THE MANUAL SHIPS WITH THE BEHAVIOUR, and the four task ceilings are checked
+# against their constants in section 2c, each one inside the card of the command
+# it governs. What is pinned HERE is the SENTENCE the number lives in: a
+# threshold with no sentence around it reads as a deadline, and the whole point
+# of that number is that it is not one.
+_TL_CARD = _WORK_CARDS.get("tasks_list", "")
+ok("do not expire" in _TL_CARD and "MARKED" in _TL_CARD,
+   "the card for tasks_list says tasks do not expire and that a stale one is "
+   "only MARKED")
 
 # And it NAMES every task tool. The witness elsewhere in this file checks the
 # other direction — that a name in the prose is still a tool — which stays
@@ -3000,7 +3409,12 @@ ok(not _UNDOCUMENTED, "the work manual names every task tool a chat can call",
 ok(not sorted(t for t in _ADMIN_TASKS if t not in _ADMIN_SRC),
    "and the administration manual names the ones it cannot",
    sorted(t for t in _ADMIN_TASKS if t not in _ADMIN_SRC))
-_LEAKED = sorted(t for t in (WITH_KEY - set(ADMIN_IF_KEY)) if t in GUIDE_SRC)
+# The partition is `_ADMIN_TOOLS`, the SAME one that decides which manual holds
+# which card, and not `WITH_KEY - ADMIN_IF_KEY`. The two are not the same set —
+# they differ by `project_amend`, which is administration for the cards and was
+# exempt here — so the manual could name the one tool whose placement had to be
+# argued for. Two partitions of the same idea is one of them going stale.
+_LEAKED = sorted(t for t in _ADMIN_TOOLS if t in GUIDE_SRC)
 ok(not _LEAKED,
    "and the work manual names no administration tool: no pointer forward to a "
    "door the reader has no key for", _LEAKED)

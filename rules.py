@@ -75,7 +75,7 @@ from datetime import datetime, timedelta, timezone
 # and both are alarms about the world outside this process.
 log = logging.getLogger("codifier-mcp.registry")
 
-VERSION = "4.0.1"
+VERSION = "4.1.0"
 
 # The GENERATION of the schema, and it is a number the database carries in
 # `PRAGMA user_version`. It exists because of a thing that was seen live at
@@ -354,6 +354,88 @@ class RulesFault(RulesError):
     Anything sqlite raises on its own — a locked file, a half-written page, a
     full disk — never becomes a RulesError at all: this engine lets it rise
     untouched, so it already keeps its traceback."""
+
+
+# =====================================================================
+# The manual, cut into cards
+# =====================================================================
+#
+# A manual handed over whole is a manual nobody asks for. The reader who
+# wonders about ONE argument of ONE command will not spend the whole text to
+# find out, so they improvise — and they improvise on the expensive command,
+# which is the one with the trap in it. Cutting it into cards is not a saving:
+# the manual as a whole gets BIGGER, because a card is paid only by the caller
+# about to use that command and can therefore afford to explain.
+#
+# These two functions live HERE, in the module the suites import, and not in
+# server.py: that file cannot be imported without fastmcp, so anything written
+# in it is out of reach of the suites, and a check for it would have to write a
+# second parser to hold the first one honest. Two expressions that agree today
+# is the shape every divergence in this project has taken. The tool stays a
+# shell: it opens the file, stamps the version, and delegates to these.
+
+GUIDE_SEPARATOR = "\n# COMMANDS\n"
+
+# `## name(signature)` — the signature is in the HEADING and not in the body,
+# and that is the whole reason the cards are checkable: a static check reads
+# these headings against the real parameters of the tools, so a card cannot
+# promise an argument the code has not got, and a tool cannot be added without
+# a card. DOTALL, and the lookahead stops the card at the next one.
+_CARD = re.compile(r"\n## ([a-z][a-z0-9_]*)\((.*?)\)\n(.*?)(?=\n## |\Z)", re.S)
+
+
+def split_guide(text: str) -> tuple[str, dict[str, str]]:
+    """The manual in two: the model page, and one card per command.
+
+    Everything before `# COMMANDS` is the model — what a signature cannot say,
+    and what has to be known before anything at all can be done. Everything
+    after it is cards, keyed by command name.
+
+    A missing separator is a FAULT and not a refusal: the caller asked for the
+    manual and there is nothing wrong with that question — the image is wrong.
+    Told as a refusal it would reach the log as one quiet line beginning with
+    the word "refused", which is a broken image wearing the face of a normal
+    answer."""
+    model, sep, rest = (text or "").partition(GUIDE_SEPARATOR)
+    if not sep:
+        raise RulesFault(
+            "the guide has no '# COMMANDS' section: the image is wrong")
+    cards = {m.group(1): f"{m.group(1)}({m.group(2)})\n{m.group(3).strip()}"
+             for m in _CARD.finditer(rest)}
+    return model.strip(), cards
+
+
+def guide_for(text: str, name: str = "") -> dict:
+    """What `reference_guide` answers, minus the version and the level — so the
+    tool is a shell and this is the behaviour, testable with no fastmcp.
+
+    Asked with no name it serves the model page AND the list of card names,
+    because a reader who has just learnt that cards exist should not need a
+    second round trip to find out what may be asked for.
+
+    A name is taken as written and then forgiven: surrounding space, capitals,
+    and ANYTHING FROM THE FIRST BRACKET ON. Forgiving the bracket is design and
+    not politeness — what the manual prints is `## rules_get(project, ids,
+    consumer, history=False)`, so the likeliest way to ask for a card is to
+    paste the heading back, and refusing that would punish the reader for
+    having read. It was measured: an earlier version forgave a bare `()` and
+    nothing else, which is the one form the manual never prints.
+
+    An unknown name is refused WITH the list of names, which costs almost
+    nothing to send and saves the caller a second call to find out what they
+    should have asked for. That list is the list of THIS half of the manual:
+    asked without the admin code, the refusal names the work cards and no
+    others, so a card behind the gate does not announce itself through the
+    refusal of the door in front of it."""
+    model, cards = split_guide(text)
+    if not (name or "").strip():
+        return {"guide": model, "cards": sorted(cards),
+                "how": "reference_guide(name) for one command's card"}
+    key = name.split("(")[0].strip().lower()
+    if key not in cards:
+        raise RulesError(f"no card for {name!r} in this manual: "
+                         f"{', '.join(sorted(cards))}")
+    return {"command": key, "guide": cards[key]}
 
 
 def _now() -> str:

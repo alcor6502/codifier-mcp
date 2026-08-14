@@ -107,7 +107,7 @@ from mcp_common_engine.refusals import make_tool
 import web
 import rules
 from rules import (Project, Registry, RulesError, RulesFault, VERSION,
-                   check_admin)
+                   check_admin, guide_for)
 
 # The shape of a line, written ONCE and handed to everything that needs it —
 # `basicConfig` here, and the engine's `arm_timestamps` further down, which
@@ -404,21 +404,28 @@ def _admin(project: str, key: str):
 # =====================================================================
 
 @tool
-def reference_guide(project: str = "", key: str = "") -> dict:
-    """The manual — one of two, and which one depends on what you bring.
+def reference_guide(name: str = "", project: str = "", key: str = "") -> dict:
+    """The manual — a model page, and one CARD per command.
 
-    Called BARE it returns the WORK manual: everything a chat holding a project
-    code can do, and nothing it cannot. That call is meant to work before you
-    know anything else — a chat's bootstrap is kept to the bone, so the first
-    call it makes must not be a wall.
+    Called BARE it returns the model page of the WORK manual plus the LIST of
+    its card names: everything a chat holding a project code can do, and
+    nothing it cannot. That call is meant to work before you know anything else
+    — a chat's bootstrap is kept to the bone, so the first call it makes must
+    not be a wall.
 
-    With `project` and the admin code in `key` it returns the OTHER HALF:
+    With `name` it returns ONE card — that command explained in full, its
+    refusals included. The name is forgiven space, capitals and anything from
+    the first bracket on, because what the manual prints is a whole signature
+    and pasting one back is the likeliest way to ask.
+
+    With `project` and the admin code in `key` it serves the OTHER HALF:
     administration, and only that. Not the whole text — the work manual is
     already in the caller's context, and sending it twice is context paid for
     twice. The response says which half it served (`level: work | admin`).
 
     They are two FILES, not one text cut at a marker: the half you cannot read
-    is a file this call never opens. A wrong pair is refused the way every
+    is a file this call never opens, and the list of ITS cards comes back only
+    to the caller who opened it. A wrong pair is refused the way every
     administration call is refused — one answer for both halves of it."""
     if (key or "").strip():
         _admin(project, key)
@@ -429,15 +436,18 @@ def reference_guide(project: str = "", key: str = "") -> dict:
         # Read HERE and not in a helper: a module function that reads a served
         # file is a door — an extra tool calling it serves the same file with
         # no gate, and every check that looks for a read INSIDE a tool goes
-        # blind. Measured on this repo, on the two-manual shape.
-        return {"version": VERSION, "level": level,
-                "guide": page.read_text(encoding="utf-8")}
+        # blind. Measured on this repo, on the two-manual shape. What the read
+        # hands over is TEXT, and the cutting is rules.guide_for: this file
+        # cannot be imported without fastmcp, so behaviour written here would
+        # be out of reach of the suites.
+        text = page.read_text(encoding="utf-8")
     except OSError as e:
         # A FAULT, not a refusal: the caller did nothing wrong, the image is
         # incomplete. As a refusal it would leave one quiet line beginning with
         # the word `refused` — a broken image wearing the face of a normal
         # answer, which is the exact inversion the decorator exists to prevent.
         raise RulesFault(f"guide not available in the image: {e}") from e
+    return {"version": VERSION, "level": level, **guide_for(text, name)}
 
 
 # =====================================================================

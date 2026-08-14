@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-4.0.1-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-4.1.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -224,6 +224,39 @@ what a chat needs is `reference_guide`, `project_info`, `rules_list`,
 administrator does went into six — `project_amend`, `rules_amend`,
 `rules_retire`, `project_status`, `rules_export`, `tasks_overview`. A connector
 left on the old surface does not degrade: it lists tools that are not there.
+
+The whole surface, and a test holds this block against the code — a README that
+promises an argument the tool has not got is the copy that diverges first:
+
+    reference_guide(name='', project='', key='')
+    project_info(project)
+    rules_list(project, consumer, query='', pending=False)
+    rules_get(project, ids, consumer, history=False)
+    rules_propose(project, domain, type, title, body, reason, reach,
+                  proposed_by, groups=[], exceptions=[], supersedes='',
+                  source='', consumer_key='')
+    tasks_add(project, consumer, title, body, created_by, urgent=False,
+              idem_key='', consumer_key='')
+    tasks_list(project, consumer, query='', since='', until='',
+               authored=False)
+    tasks_get(project, ids)
+    tasks_close(project, id, by, outcome='', reason='', consumer_key='',
+                key='')
+    tasks_amend(project, id, by, title='', body='', consumer='',
+                consumer_key='', key='')
+    project_amend(project, entity, name, action, fields={}, reason='',
+                  auth_code='', key='')
+    rules_amend(project, id, reach, groups, exceptions, expected_version,
+                reason, auth_code, key)
+    rules_retire(project, id, reason, auth_code, key)
+    project_status(project, key)
+    rules_export(project, key, consumer='', expand=False)
+    tasks_overview(project, key)
+
+**From v4.1.0 the manual comes one command at a time.** Called bare,
+`reference_guide` serves a short model page plus the list of card names; called
+with a name it serves that one command explained in full, refusals included. The
+manual as a whole grew: what shrank is what you pay to ask one question.
 
 ## The task log
 
