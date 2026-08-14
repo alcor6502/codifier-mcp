@@ -2422,6 +2422,16 @@ class Project:
         # actionable, and the succession is a FIELD of the row, never a citation
         # in a body, so moving the pointer loses nothing.
         dead = [d for d in rule_ids if found[d]["status"] == "retired"]
+        # EXPIRED IS THE SAME QUESTION WITH A DIFFERENT ANSWER. `_in_force` is
+        # this registry's own word for "binds", `project_status` counts with it
+        # and `_expand` writes `· expired` when it reads one — so a door that
+        # filtered on the verb `retired` instead was the only part of the
+        # system that still thought a lapsed provisional was law. Same refusal,
+        # different way out: a retirement is a gesture somebody made, an expiry
+        # is a date passing on its own, and the rule comes back with the SAME
+        # ID the moment it is renewed from the page. So it is named apart.
+        lapsed = [d for d in rule_ids if found[d]["status"] == "active"
+                  and not self._in_force(found[d])]
         if dead:
             bits = []
             for d in dead:
@@ -2434,6 +2444,14 @@ class Project:
                 "say it in words. A rule that has been taken out of force still reads like "
                 "law when somebody follows the pointer, which is the whole reason this is "
                 "refused instead of marked.")
+        if lapsed:
+            raise RulesError(
+                f"citation in `{field}` towards a rule whose term has EXPIRED: "
+                f"{', '.join(lapsed)}. It is provisional and its date has passed, so it "
+                "binds nobody right now — and nobody decided that, a clock did. It is not "
+                "gone: renew it from the administration page and it is in force again "
+                "under the same ID, and this citation goes through. Renew it first, or "
+                "say the thing in words.")
         # THE GLOSS IS CHECKED, NOT SWALLOWED. Reading hands back
         # `(VA-0002 — its title)` and pasting that straight back must work — but
         # anything else inside those brackets is the author's own words, and
@@ -3971,6 +3989,13 @@ class Project:
                                  + self._display(target["superseded_by_rule_id"]))
                     dangling.append({"in": where, "field": label, "cites": dst,
                                      "state": state})
+                elif target["status"] == "active" and not self._in_force(target):
+                    # The one that arrives without anybody doing anything: a
+                    # provisional term runs out and every pointer at it goes
+                    # quiet. The door cannot catch this one by construction —
+                    # it was in force when it was written.
+                    dangling.append({"in": where, "field": label, "cites": dst,
+                                     "state": "expired"})
 
         for r in rules:
             for col, label in seen_fields:

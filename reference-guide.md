@@ -69,6 +69,11 @@ that cites it — and one that was **denied, retired or superseded is refused** 
 because a pointer at it reads like law and is not. When the rule you cited has an
 heir, the refusal **names the heir**, so there is one thing to do about it.
 
+A provisional rule whose term has **expired** is refused for the same reason and
+answered differently: nobody took it out of force, a date passed.
+Renew it from the administration page — it comes back under the same ID — and
+the citation goes through.
+
 In the body of a **task** the door is the same, with two differences, and both
 follow from a task being a message rather than law:
 

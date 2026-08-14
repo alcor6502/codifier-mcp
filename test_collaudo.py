@@ -520,6 +520,29 @@ allowed("while the heir itself may be cited",
         lambda: p2.propose("VA", "R", "t", f"see ({new['id']})", "why", "all",
                            "architect"))
 
+# AND THE ONE NOBODY DECIDED: a provisional term running out. `_in_force` says
+# it binds nobody, `project_status` counts it out and reading writes `· expired`
+# — the door was the only part of the system still treating it as law, because
+# it filtered on the VERB `retired` instead of on force. Named apart from a
+# retirement on purpose: a retirement is a gesture, this is a clock, and the
+# rule comes back under the same ID when it is renewed.
+p3 = project()
+prov = rule(p3, title="a provisional one")
+p3.cx.execute("UPDATE rule SET expires_at='2000-01-01T00:00:00Z' WHERE rule_id=?",
+              (p3._rule_row(prov)["rule_id"],))
+yields("the rule is still `active` and yet in force it is NOT — which is the "
+       "whole trap: a status check and a force check disagree here",
+       lambda: (p3._rule_row(prov)["status"], p3._in_force(p3._rule_row(prov))),
+       ("active", False))
+refused("a rule that cites a rule whose term EXPIRED", lambda: p3.propose(
+    "VA", "R", "t", f"see ({prov})", "why", "all", "architect"), "EXPIRED")
+refused("and a task cannot either", lambda: p3.task_add(
+    "architect", "t", f"see ({prov})", "architect"), "EXPIRED")
+yields("and the refusal points at the renewal, not at a rewrite: nobody took "
+       "this rule out of force",
+       lambda: "renew it" in _refusal(lambda: p3.task_add(
+           "architect", "t", f"see ({prov})", "architect")).lower(), True)
+
 # =====================================================================
 print("\n— THE TASK LOG IS THE SAME DOOR, WITH TWO DIFFERENCES —")
 # A task is not law, so what it may point at is not the same set. Until 4.0.1
@@ -790,6 +813,36 @@ yields("and only now is it spent", lambda: p.auth_codes()["count_live"], 0)
 yields("by the gesture that succeeded, which is what the log says",
        lambda: p.auth_codes()["spent"][0]["spent_action"], "rule.retire")
 
+# ONE CASE PER DOOR, and not for symmetry. The cure is three separate calls —
+# `rules_amend`, `rules_retire`, `amend_project` — and a suite that exercised
+# only one of them would keep 261 green while a refactor put the other two back
+# to answering about the state first. `amend_project` is the one that matters
+# most and the one it is easiest to forget: behind it sit four handlers, and
+# `_amend_consumer` says `this project has no consumer by that name`.
+p = project()
+live = rule(p, title="a rule in force")
+_v = p.get_rules([live], history=True)["rules"][0]["history"][-1]["version"]
+for _what, _call in (
+        ("rules_amend, on a rule that does not exist",
+         lambda: p.amend_rule("VA-0099", "targeted", ["deliberativi"], [], 1, "why",
+                              "architect", auth_code="000000")),
+        ("amend_project, on a consumer that does not exist",
+         lambda: p.amend_project("consumer", "nessuno", "amend", {"brief": "x"},
+                                 actor="architect", auth_code="000000")),
+        ("amend_project, on a group that does not exist",
+         lambda: p.amend_project("group", "nessuno", "retire", {}, reason="done",
+                                 actor="architect", auth_code="000000")),
+        ("amend_project, on a domain that does not exist",
+         lambda: p.amend_project("domain", "ZZ", "amend", {"description": "x"},
+                                 actor="architect", auth_code="000000"))):
+    _msg = _refusal(_call)
+    yields(f"{_what}: the one-time code answers first",
+           lambda m=_msg: "auth_code" in m, True)
+    yields(f"{_what}: and the state stays quiet",
+           lambda m=_msg: not any(w in m.lower() for w in
+                                  ("no consumer", "no group", "no domain",
+                                   "never defined", "nessuno", "zz")), True)
+
 p = project()
 rule(p, title="in force")
 allowed("a domain with nothing under it retires",
@@ -1052,6 +1105,17 @@ equals("a citation towards a retired rule is reported, in the rule AND in the ta
        [("VA-0003", "VA-0001", "retired"), (orphan, "VA-0001", "retired")])
 equals("and the CLOSED task is not, because nothing could ever clear it",
        [d["in"] for d in (rep or {})["dangling_citations"] if d["in"] == closed], [])
+# The EXPIRED one is the case the door cannot take by construction — the rule
+# was in force when the pointer was written and a clock did the rest, so if the
+# sweep does not carry it, nothing does.
+lapsing = p.task_add("architect", "t", f"and this points at ({b_})", "architect")["id"]
+p.cx.execute("UPDATE rule SET expires_at='2000-01-01T00:00:00Z' WHERE rule_id=?",
+             (p._rule_row(b_)["rule_id"],))
+yields("a citation towards a rule whose term ran out is reported too",
+       lambda: sorted((d["in"], d["cites"], d["state"])
+                      for d in p.status()["dangling_citations"]
+                      if d["state"] == "expired"),
+       [(lapsing, b_, "expired")])
 equals("a domain nothing was ever filed under is reported",
        (rep or {})["domains_with_no_rules"], ["ST"])
 equals("and a consumer no rule reaches", (rep or {})["consumers_no_rule_reaches"],

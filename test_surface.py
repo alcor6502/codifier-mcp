@@ -991,15 +991,28 @@ ok("(VA-0002)" in GUIDE_SRC, "the manual teaches the citation format")
 # would be describing the 4.0.0. The sentence pinned here used to be "already
 # approved", and it was retired with the release that made it FALSE: approved is
 # no longer enough, the rule has to be in force when you point at it.
-ok("in force" in GUIDE_SRC,
+# ⚠ EACH PIN IS A WHOLE SENTENCE, and three of these started life as a word.
+# `"in force" in GUIDE_SRC`, `"closed" in GUIDE_SRC`, `"tasks_close" in
+# GUIDE_SRC` — all three were green against the manual as it stood BEFORE this
+# release, which is the manual they exist to say has changed. The words were
+# already in it, for other reasons: "your rules in force" in SESSION START,
+# "closed is closed" under TASKS, `tasks_close` in the signature block. A pin
+# satisfied by text that was there anyway is a pin that can never go red.
+ok("point at a rule that is **already approved**" not in GUIDE_SRC,
+   "the sentence this release made FALSE is gone: approved is no longer enough")
+ok("that means one thing only: a rule **in force**" in GUIDE_SRC,
    "the manual says a citation may only point at a rule IN FORCE")
 ok("denied, retired or superseded is refused" in GUIDE_SRC,
    "and names the three states that are refused")
-ok("names the heir" in GUIDE_SRC,
+ok("the refusal **names the heir**" in GUIDE_SRC,
    "and that the refusal names the heir, which is what makes it actionable")
-ok("closed" in GUIDE_SRC and "may cite a **task**" in GUIDE_SRC,
+ok("term has **expired** is refused" in GUIDE_SRC,
+   "and that an expired term is refused as well — the one no gesture caused")
+ok("renew it from the administration page" in GUIDE_SRC.lower(),
+   "with the way out that belongs to it, which is not the one for a retirement")
+ok("A **closed** task stays citable" in GUIDE_SRC,
    "the manual says a task may cite a task, closed ones included")
-ok("tasks_close" in GUIDE_SRC,
+ok("the `outcome` or `reason` you give\n`tasks_close`" in GUIDE_SRC,
    "and that the same door runs on the outcome, which is written once")
 # The migration was DELETED on purpose: a migration is not code, it is the work,
 # and a regex sweep over prose invents citations that were never citations. The
