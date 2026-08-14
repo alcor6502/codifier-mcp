@@ -689,6 +689,112 @@ for _manual, _text in MANUALS.items():
        f"every tool {_manual} names is still registered as one "
        f"({len(_named)} named)", _vanished)
 
+# =====================================================================
+# THE SIGNATURES, and this is a different defect from the one above.
+#
+# The check above catches the GHOST: a manual naming a tool that is gone. It
+# cannot catch the DRIFT: a manual printing a signature the code no longer has.
+# `rules_propose(..., priority='')` would leave every case above green, because
+# rules_propose is still very much a tool. The same shape of defect archivist
+# closed by putting the signature in the heading and reading it against the AST.
+#
+# The comparison is on the NAMES of the parameters and DELIBERATELY NOT on the
+# defaults. The manuals write `fields={}`, `groups=[]`, `exceptions=[]` where
+# the code has `None`, and that is right twice over: `{}` reads as what the
+# caller may pass, and a mutable default in the code would be a real defect.
+# Comparing defaults would paint three correct lines red, and a check that goes
+# red on correct lines gets deleted rather than obeyed.
+#
+# It reads BLOCKS, not every parenthesis in the prose. A signature is a run of
+# indented lines whose brackets balance, so one split over three lines is one
+# signature — and `_norm` below reads it with ast, which means the reading of a
+# signature is the language's, not a regular expression's.
+SIG_LINE = re.compile(r"^ {4}([a-z][a-z0-9_]*)\(")
+
+
+def signatures_in(text: str) -> list[tuple[str, list[str]]]:
+    """Every signature written in a manual, as (tool, [parameter names]).
+
+    A tool may appear more than once on purpose: SESSION START shows
+    `rules_list(project, consumer)` abbreviated and the full one lives under
+    EVERY CALL, IN FULL. Both come back, and the two directions below treat
+    them differently — which is what keeps the abbreviation from reading as a
+    defect while still checking it."""
+    out, lines, i = [], (text or "").splitlines(), 0
+    while i < len(lines):
+        if not SIG_LINE.match(lines[i]):
+            i += 1
+            continue
+        chunk = lines[i].strip()
+        while chunk.count("(") > chunk.count(")") and i + 1 < len(lines):
+            i += 1
+            chunk += " " + lines[i].strip()
+        try:
+            node = ast.parse(chunk, mode="eval").body
+        except SyntaxError:
+            i += 1
+            continue
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            names = [a.id for a in node.args if isinstance(a, ast.Name)]
+            names += [k.arg for k in node.keywords if k.arg]
+            out.append((node.func.id, names))
+        i += 1
+    return out
+
+
+CODE_PARAMS = {}
+for _t in TOOLS:
+    _a = _t.args
+    CODE_PARAMS[_t.name] = [x.arg for x in
+                            (_a.posonlyargs + _a.args + _a.kwonlyargs)]
+
+for _manual, _text in MANUALS.items():
+    _sigs = signatures_in(_text or "")
+    ok(_sigs, f"{_manual}: signatures are found at all — an empty witness is "
+              f"not one", len(_sigs))
+    # FORWARD, on every signature including the abbreviated ones: nothing
+    # promised that the tool has not got. An abbreviation cannot fail this, and
+    # it is checked all the same — the names it does show still have to exist.
+    _invented = sorted({f"{n}({p})" for n, ps in _sigs
+                        for p in ps
+                        if n in CODE_PARAMS and p not in CODE_PARAMS[n]})
+    ok(not _invented,
+       f"{_manual} promises no parameter the code has not got "
+       f"({len(_sigs)} signatures read)", _invented)
+    # BACKWARD, per tool and across ALL its appearances: nothing the tool has
+    # that the manual never names anywhere. Aggregating is what makes the
+    # abbreviated `rules_list(project, consumer)` legitimate instead of a false
+    # positive — the full signature elsewhere in the same manual names the rest.
+    _seen: dict = {}
+    for _n, _ps in _sigs:
+        _seen.setdefault(_n, set()).update(_ps)
+    _unsaid = sorted(f"{n}.{p}" for n, ps in _seen.items()
+                     if n in CODE_PARAMS
+                     for p in CODE_PARAMS[n] if p not in ps)
+    ok(not _unsaid,
+       f"{_manual} names every parameter the tools it documents actually take",
+       _unsaid)
+    # And a signature for a name that is not a tool at all. The ghost check
+    # above works on prose and would catch most of these; this one states it
+    # where the signatures are read, so a manual whose prose stopped naming a
+    # tool while its signature block kept it is still caught.
+    _phantom = sorted({n for n, _ in _sigs if n not in CODE_PARAMS})
+    ok(not _phantom, f"{_manual} prints a signature only for real tools",
+       _phantom)
+
+# The abbreviated signature is the false positive this check was BUILT to
+# survive, and a check that survives it by no longer reading it would be green
+# for the wrong reason. So the abbreviation is pinned as PRESENT: the work
+# manual shows at least one tool twice — short in SESSION START, full under
+# EVERY CALL — and the three cases above stay green with it there. Drop this
+# and the day somebody stops reading the prose blocks, nothing goes red.
+_WORK_SIGS = signatures_in(MANUALS.get("reference-guide.md") or "")
+_TWICE = sorted({n for n, _ in _WORK_SIGS
+                 if sum(1 for m, _ in _WORK_SIGS if m == n) > 1})
+ok(_TWICE, "the work manual really does show a tool abbreviated AND in full — "
+           "the case these checks have to tolerate is actually in front of them",
+   _TWICE)
+
 # The manuals do not name every tool, and they are PROSE — rewrite a sentence
 # and the witness is gone. So the real witness is the engine: a function in
 # server.py that reaches `registry.<something>` is a tool by definition, and if
