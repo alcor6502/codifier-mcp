@@ -161,6 +161,18 @@ def equals(name, got, want):
         print(f"  FAIL  {name}: got {got!r}, wanted {want!r}")
 
 
+def _refusal(gesture) -> str:
+    """The TEXT of a refusal, for the cases where what matters is not that it
+    refused but WHAT IT SAYS — a refusal that names the heir is actionable and
+    one that does not is a wall. Returns '' if the gesture went through, so the
+    assertion fails instead of the run dying."""
+    try:
+        gesture()
+        return ""
+    except rules.RulesError as exc:
+        return str(exc)
+
+
 def yields(name, gesture, want):
     """A value that arrives from a call which MIGHT refuse. Without this the
     refusal escapes as a traceback, the run dies at case nine and every case
@@ -476,6 +488,77 @@ yields("while READING puts the current title back in",
 refused("a rule that cites a TASK", lambda: p.propose(
     "VA", "R", "t", "see (TK-0001)", "why", "all", "architect"),
     "cites a rule, never a task")
+
+# =====================================================================
+print("\n— A CITATION POINTS AT WHAT CAN STILL BE USED —")
+# The door the 4.0.1 closed. Until then a body could point at a rule that had
+# been taken out of force, and the only sign was a mark added when somebody
+# happened to read it.
+p = project()
+gone = rule(p, title="the withdrawn one")
+p.retire(gone, "it stopped applying", "architect", auth_code=code(p))
+refused("a rule that cites a RETIRED rule", lambda: p.propose(
+    "VA", "R", "t", "see (VA-0001)", "why", "all", "architect"), "out of force")
+yields("and the refusal says nothing replaced it, so the author knows to use words",
+       lambda: "nothing replaced it" in _refusal(lambda: p.propose(
+           "VA", "R", "t", "see (VA-0001)", "why", "all", "architect")), True)
+p2 = project()
+old = rule(p2, title="the old way")
+new = p2.propose("VA", "R", "the new way", "b", "it changed", "all", "architect",
+                 supersedes=old)
+bt = p2.batch()
+p2.decide(bt["digest"], [new["id"]], {})
+refused("a rule that cites a SUPERSEDED rule", lambda: p2.propose(
+    "VA", "R", "t", "see (VA-0001)", "why", "all", "architect"), "out of force")
+yields("and THE HEIR IS NAMED, which is what makes the refusal actionable",
+       lambda: f"superseded by {new['id']}" in _refusal(lambda: p2.propose(
+           "VA", "R", "t", "see (VA-0001)", "why", "all", "architect")), True)
+allowed("while the heir itself may be cited",
+        lambda: p2.propose("VA", "R", "t", f"see ({new['id']})", "why", "all",
+                           "architect"))
+
+# =====================================================================
+print("\n— THE TASK LOG IS THE SAME DOOR, WITH TWO DIFFERENCES —")
+# A task is not law, so what it may point at is not the same set. Until 4.0.1
+# the task door ran the SANITISATION alone and followed no pointer at all.
+p = project()
+live = rule(p, title="in force")
+queued = p.propose("VA", "R", "still in the queue", "b", "why", "all", "architect")
+refused("a task citing a rule that was never defined", lambda: p.task_add(
+    "architect", "t", "see (VA-9999)", "architect"), "does not resolve")
+allowed("a task citing a rule IN FORCE",
+        lambda: p.task_add("architect", "t", f"see ({live})", "architect"))
+allowed("a task citing an OPEN PROPOSAL, which is the log doing its job",
+        lambda: p.task_add("architect", "t", f"what of ({queued['id']})?", "architect"))
+refused("a rule citing that same open proposal", lambda: p.propose(
+    "VA", "R", "t", f"see ({queued['id']})", "why", "all", "architect"),
+    "not in force yet")
+p.retire(live, "it stopped applying", "architect", auth_code=code(p))
+refused("a task citing a RETIRED rule", lambda: p.task_add(
+    "architect", "t", f"see ({live})", "architect"), "out of force")
+lot = p.batch()
+p.decide(lot["digest"], [], {queued["id"]: "not now: it needs the tax desk"})
+refused("a task citing a DENIED rule", lambda: p.task_add(
+    "architect", "t", f"see ({queued['id']})", "architect"), "REFUSED")
+
+# A task citing a TASK: refused only when it resolves to nothing. A CLOSED one
+# stays citable, and that is the difference between force and history — a task
+# never bound anybody, so being readable afterwards is the whole of its value.
+p = project()
+first = p.task_add("architect", "the first errand", "b", "architect")["id"]
+refused("a task citing a task that was never opened", lambda: p.task_add(
+    "architect", "t", "see (TK-9999)", "architect"), "not a task in this project")
+allowed("a task citing an OPEN task",
+        lambda: p.task_add("architect", "t", f"see ({first})", "architect"))
+p.task_close(first, "architect", outcome="done")
+allowed("a task citing a CLOSED task — history is not a broken pointer",
+        lambda: p.task_add("architect", "t", f"as in ({first})", "architect"))
+yields("and reading labels the state, which is why the door need not refuse it",
+       lambda: " · completed" in p._expand(f"({first})"), True)
+refused("the OUTCOME goes through the same door, and it is written once",
+        lambda: p.task_close(
+            p.task_add("architect", "t", "b", "architect")["id"],
+            "architect", outcome="done, see (VA-9999)"), "does not resolve")
 
 # =====================================================================
 print("\n— THE SUPERSEDE —")
@@ -895,13 +978,22 @@ print("\n— THE REPORT —")
 p = project()
 a = rule(p, title="the first")
 b_ = rule(p, "targeted", groups=["deliberativi"], title="the second")
-p.retire(a, "it stopped applying", "architect", auth_code=code(p))
+# THE POINTER IS WRITTEN WHILE ITS TARGET IS IN FORCE, and since 4.0.1 that is
+# the only way it can be written at all — the door refuses the other way round.
+# Which is exactly why the sweep still has a job: it catches the pointer that
+# goes bad LATER, and no door can do that.
 p.propose("VA", "R", "points at a dead one", "see (VA-0001)", "why", "all", "architect")
+orphan = p.task_add("architect", "t", "and so does (VA-0001)", "architect")["id"]
+closed = p.task_add("architect", "t", "this one too: (VA-0001)", "architect")["id"]
+p.task_close(closed, "architect", outcome="done")
+p.retire(a, "it stopped applying", "architect", auth_code=code(p))
 rep = allowed("one call", lambda: p.status())
 equals("it counts, and says it counted", (rep or {})["counted"]["in_force"], 1)
-equals("a citation towards a retired rule is reported",
+equals("a citation towards a retired rule is reported, in the rule AND in the task",
        [(d["in"], d["cites"], d["state"]) for d in (rep or {})["dangling_citations"]],
-       [("VA-0003", "VA-0001", "retired")])
+       [("VA-0003", "VA-0001", "retired"), (orphan, "VA-0001", "retired")])
+equals("and the CLOSED task is not, because nothing could ever clear it",
+       [d["in"] for d in (rep or {})["dangling_citations"] if d["in"] == closed], [])
 equals("a domain nothing was ever filed under is reported",
        (rep or {})["domains_with_no_rules"], ["ST"])
 equals("and a consumer no rule reaches", (rep or {})["consumers_no_rule_reaches"],

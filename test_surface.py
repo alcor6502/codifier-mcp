@@ -880,8 +880,21 @@ ok("numbering_gaps" not in SERVER_SRC,
 # vault. A manual that promises a parameter the tool has not got is the defect
 # this project already paid for once.
 ok("(VA-0002)" in GUIDE_SRC, "the manual teaches the citation format")
-ok("already approved" in GUIDE_SRC,
-   "the manual says a citation may only point at a rule already approved")
+# The 4.0.1 door, and the manual carries it or the refusal arrives unexplained.
+# Each of these is a promise the engine now KEEPS, so a manual that dropped one
+# would be describing the 4.0.0. The sentence pinned here used to be "already
+# approved", and it was retired with the release that made it FALSE: approved is
+# no longer enough, the rule has to be in force when you point at it.
+ok("in force" in GUIDE_SRC,
+   "the manual says a citation may only point at a rule IN FORCE")
+ok("denied, retired or superseded is refused" in GUIDE_SRC,
+   "and names the three states that are refused")
+ok("names the heir" in GUIDE_SRC,
+   "and that the refusal names the heir, which is what makes it actionable")
+ok("closed" in GUIDE_SRC and "may cite a **task**" in GUIDE_SRC,
+   "the manual says a task may cite a task, closed ones included")
+ok("tasks_close" in GUIDE_SRC,
+   "and that the same door runs on the outcome, which is written once")
 # The migration was DELETED on purpose: a migration is not code, it is the work,
 # and a regex sweep over prose invents citations that were never citations. The
 # engine owes the seeding pass one column and nothing else.

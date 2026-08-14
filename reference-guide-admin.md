@@ -65,7 +65,12 @@ the admin code only — a task closed wrong reopens as a new task.
   heir, supersede.
 - **`project_status`** — computed counts, expiring rules with their reasons, the
   pending queue, prose citations pointing at retired or missing rules, and the
-  overlaps that formed after the fact. It reports; it does not correct. It is
+  overlaps that formed after the fact. `dangling_citations` covers the prose of
+  every rule and the title and body of every OPEN task: the door refuses a
+  pointer that is born broken, this catches the one that GOES broken when its
+  target is later retired. Closed tasks are left out on purpose — `tasks_amend`
+  answers `closed is closed`, so a finding there could never be cleared.
+  It reports; it does not correct. It is
   also the ONE place the RETIRED are readable — domains, consumers and groups
   under `retired`, with date and reason. `project_info` lists the live alone,
   and a retired name is still a name TAKEN: a `create` on it is refused, so

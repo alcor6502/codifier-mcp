@@ -62,9 +62,27 @@ digits, in every prose field. Reads forgive the short form (`VA-02` resolves);
 writes refuse anything else, naming field and token, spending neither a number
 nor a queue slot.
 
-A citation may only point at a rule that is **already approved**. A proposal has
-no number worth citing yet: file the cited rule, let it be approved, and only
-then file the one that cites it.
+**A citation points at something that can still be USED.** In the body of a rule
+that means one thing only: a rule **in force**. A proposal has no number worth
+citing yet — file the cited rule, let it be approved, and only then file the one
+that cites it — and one that was **denied, retired or superseded is refused** too,
+because a pointer at it reads like law and is not. When the rule you cited has an
+heir, the refusal **names the heir**, so there is one thing to do about it.
+
+In the body of a **task** the door is the same, with two differences, and both
+follow from a task being a message rather than law:
+
+- a task may cite a **task**, and only a task ID that was never opened is
+  refused. A **closed** task stays citable — pointing back at work that is done
+  is what a log is for, and reading tells you the state;
+- a task may cite an **open proposal**, because asking another desk what it
+  thinks of a proposal is the job.
+
+`denied` and `retired` are refused in a task too: a task that hands its reader a
+rule taken out of force is a message that misinforms. The same door runs on
+`tasks_add`, `tasks_amend` **and** on the `outcome` or `reason` you give
+`tasks_close` — that last one matters, because an outcome is written once and
+`closed is closed`.
 
 ## EVERY CALL, IN FULL
 

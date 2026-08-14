@@ -2258,7 +2258,8 @@ class Project:
         self._cites(text, field=field)
         return self._compact(text)
 
-    def _cites(self, body: str, self_id: str = "", field: str = "body") -> list[str]:
+    def _cites(self, body: str, self_id: str = "", field: str = "body",
+               in_task: bool = False) -> list[str]:
         """Parse a body and VALIDATE its citations. Raises, so this is the door.
 
         It opens with `_relics`, the sanitisation every field of every door
@@ -2268,6 +2269,8 @@ class Project:
           · a citation that does not RESOLVE — a chat cannot hallucinate a
             pointer, because the proposal does not go in;
           · a citation towards a rule that is NOT YET APPROVED;
+          · a citation towards a rule that is no longer USABLE — retired, or
+            superseded, and the superseded one is refused by NAMING its heir;
           · a gloss of your own inside the brackets, because what is between
             them is not stored and dropping it silently would be worse.
 
@@ -2277,6 +2280,22 @@ class Project:
         get it approved, then file the one that cites it. A batch whose members
         cite each other can be approved into a state where the pointers were
         only ever right at the moment they were written.
+
+        `in_task` switches the door to the TASK LOG, and it changes two things
+        because a task is not law:
+
+          · a task may cite a TASK, which a rule may not. That is the commonest
+            citation the log has, and it is refused only when it resolves to
+            nothing. A CLOSED task stays citable on purpose: the rule about
+            what is still usable is about FORCE, and a task never had any —
+            it is a message with an outcome, and being readable afterwards is
+            the whole of its value;
+          · a task may cite a PROPOSED rule, because sending somebody a
+            proposal and asking what they think of it is the log doing its job.
+
+        Everything else is the same door, `denied` and `retired` included: a
+        task pointing at a rule that was thrown out or taken out of force is a
+        message that misinforms whoever picks it up.
 
         There is NO escape hatch on the bare-ID check. An exception was
         proposed once — IDs inside backticks do not count — so that a rule
@@ -2303,29 +2322,71 @@ class Project:
                 continue
             if dst not in out:
                 out.append(dst)
-        tasks = [d for d in out if d.startswith(TASK_PREFIX + "-")]
-        if tasks:
+        cited_tasks = [d for d in out if d.startswith(TASK_PREFIX + "-")]
+        rule_ids = [d for d in out if d not in cited_tasks]
+        found: dict = {}
+        if cited_tasks and not in_task:
             raise RulesError(
-                f"a rule cites a rule, never a task: {', '.join(tasks)} in `{field}`. "
+                f"a rule cites a rule, never a task: {', '.join(cited_tasks)} in `{field}`. "
                 "Rules bind and tasks wait — a rule that pointed at a piece of work would "
                 "be law with an expiry date nobody set. Say it in words, or cite the rule "
                 "the work came from.")
-        found = {d: self._rule_row(d) for d in out}
-        missing = [d for d, row in found.items() if row is None]
+        for d in cited_tasks:
+            found[d] = self._task_row(d)
+        gone = sorted(d for d in cited_tasks if found[d] is None)
+        if gone:
+            raise RulesError(
+                f"citation in `{field}` that does not resolve: {', '.join(gone)} "
+                f"{'are' if len(gone) > 1 else 'is'} not a task in this project. A CLOSED "
+                "task may be cited — pointing back at work that is done is what the log is "
+                "for, and the reader is told the state when they read it — but one that was "
+                "never opened is a pointer nobody can follow.")
+        for d in rule_ids:
+            found[d] = self._rule_row(d)
+        missing = [d for d in rule_ids if found[d] is None]
         if missing:
             raise RulesError(
                 f"citation in `{field}` that does not resolve: {', '.join(missing)} "
                 f"{'were' if len(missing) > 1 else 'was'} never defined in this project.")
-        unborn = sorted(d for d, row in found.items()
-                        if row["status"] in ("proposed", "denied"))
+        # A PROPOSED rule may be cited from the task log and nowhere else: asking
+        # another desk what it thinks of a proposal is the log doing its job. A
+        # DENIED one may be cited from neither — it was thrown out, and a pointer
+        # at it hands the reader a decision that was never taken.
+        blocked = ("denied",) if in_task else ("proposed", "denied")
+        unborn = sorted(d for d in rule_ids if found[d]["status"] in blocked)
         if unborn:
             raise RulesError(
+                f"citation towards a rule that was REFUSED: {', '.join(unborn)}. It was "
+                "proposed and thrown out, so it binds nobody and never will. "
+                "rules_list(pending=True) says why. An OPEN proposal may be cited from a "
+                "task, so that another desk can be asked what it thinks of it; a denied one "
+                "may not, from anywhere."
+                if in_task else
                 f"citation towards a rule that is not in force yet: {', '.join(unborn)}. "
                 "You may only cite a rule that has ALREADY been approved. File the cited "
                 "rule first, have it approved, then file this one — a batch whose members "
                 "cite each other can be approved into a state where the pointers were only "
                 "ever right at the moment they were written. If it was refused, "
                 "rules_list(pending=True) says why.")
+        # OUT OF FORCE, and this is the door the 4.0.1 closed. A citation points
+        # at something that can still be USED; a retired rule binds nobody, so a
+        # pointer at it reads as law and is not. Where the row names an heir the
+        # refusal names it too — a refusal that says 'cite this one instead' is
+        # actionable, and the succession is a FIELD of the row, never a citation
+        # in a body, so moving the pointer loses nothing.
+        dead = [d for d in rule_ids if found[d]["status"] == "retired"]
+        if dead:
+            bits = []
+            for d in dead:
+                heir = self._display(found[d]["superseded_by_rule_id"])
+                bits.append(f"{d} → superseded by {heir}" if heir
+                            else f"{d} → retired, and nothing replaced it")
+            raise RulesError(
+                f"citation in `{field}` towards a rule that is out of force: "
+                f"{'; '.join(bits)}. Where an heir is named, cite that one; where none is, "
+                "say it in words. A rule that has been taken out of force still reads like "
+                "law when somebody follows the pointer, which is the whole reason this is "
+                "refused instead of marked.")
         # THE GLOSS IS CHECKED, NOT SWALLOWED. Reading hands back
         # `(VA-0002 — its title)` and pasting that straight back must work — but
         # anything else inside those brackets is the author's own words, and
@@ -2335,8 +2396,9 @@ class Project:
             wanted = self._gloss(found[dst])
             if gloss == wanted or gloss.startswith(wanted + " ·"):
                 continue
+            what = "task" if dst.startswith(TASK_PREFIX + "-") else "rule"
             raise RulesError(
-                f"the text inside ({dst} — …) is not that rule's title. A citation is the "
+                f"the text inside ({dst} — …) is not that {what}'s title. A citation is the "
                 f"ID alone; the title is added when you READ, so the only thing that may "
                 f"sit there is what came back — right now that is {wanted!r}. If you have "
                 "something of your own to say about the rule, say it outside the brackets: "
@@ -2429,10 +2491,22 @@ class Project:
     def _task_prose(self, field: str, text: str) -> str:
         """The task log's prose goes through the same door as the corpus'. It
         was not so until 3.1.0, and the hole was found by an injection: the
-        relics came back in through the titles of tasks."""
+        relics came back in through the titles of tasks.
+
+        Until 4.0.1 it ran the SANITISATION alone: the shape was checked and
+        the pointer was never followed, so `(PE-9999)` went in and came back
+        marked at reading time and nowhere else. Now it resolves them too, with
+        the log's own policy — see `_cites(in_task=True)`.
+
+        There is ONE of these, and all three gestures come through it:
+        `task_add` (title, body), `task_close` (outcome, reason_dropped) and
+        `task_amend` (title, body). `outcome` is the one that would have been
+        missed by fixing the doors one at a time, and it is the worst to miss:
+        it is written once, at the close, and `closed is closed` means nothing
+        can ever repair it."""
         if not (text or "").strip():
             return text or ""
-        self._relics(field, text)
+        self._cites(text, field=field, in_task=True)
         return self._compact(text)
 
     # =================================================================
@@ -3787,23 +3861,54 @@ class Project:
 
         # Citations in PROSE, towards a rule that is retired or was never
         # defined. The body of a rule is only one of the fields it can hide in.
+        #
+        # THE DOOR AND THE SWEEP DO DIFFERENT JOBS, and neither replaces the
+        # other: the door catches what is born crooked, the sweep catches what
+        # BECOMES crooked. A task filed today citing a rule in force is
+        # legitimate; the rule is retired tomorrow and the task now points at a
+        # dead one, and it is already inside. Nothing re-refuses it.
         dangling = []
         seen_fields = (("title", "title"), ("body", "body"), ("reason", "reason"),
                        ("source", "source"))
+
+        def _walk(where: str, text: str, label: str) -> None:
+            for m in RE_CITE.finditer(text or ""):
+                try:
+                    dst = _norm_id(m.group(1))
+                except RulesError:
+                    continue
+                if dst.startswith(TASK_PREFIX + "-"):
+                    # A task cited from a task is only broken when it resolves
+                    # to nothing: a CLOSED one is a legitimate pointer back at
+                    # work that is done, and reading labels its state.
+                    if self._task_row(dst) is None:
+                        dangling.append({"in": where, "field": label, "cites": dst,
+                                         "state": "no such task"})
+                    continue
+                target = self._rule_row(dst)
+                if target is None:
+                    dangling.append({"in": where, "field": label, "cites": dst,
+                                     "state": "never defined"})
+                elif target["status"] in ("retired", "denied"):
+                    state = target["status"]
+                    if state == "retired" and target["superseded_by_rule_id"]:
+                        state = ("superseded by "
+                                 + self._display(target["superseded_by_rule_id"]))
+                    dangling.append({"in": where, "field": label, "cites": dst,
+                                     "state": state})
+
         for r in rules:
             for col, label in seen_fields:
-                for m in RE_CITE.finditer(r[col] or ""):
-                    try:
-                        dst = _norm_id(m.group(1))
-                    except RulesError:
-                        continue
-                    target = self._rule_row(dst)
-                    if target is None:
-                        dangling.append({"in": r["display_id"], "field": label,
-                                         "cites": dst, "state": "never defined"})
-                    elif target["status"] in ("retired", "denied"):
-                        dangling.append({"in": r["display_id"], "field": label,
-                                         "cites": dst, "state": target["status"]})
+                _walk(r["display_id"], r[col], label)
+        # OPEN tasks only, and that is a decision about what a report is FOR.
+        # A closed task cannot be amended — `task_amend` answers `closed is
+        # closed` — so a finding on one is a line nobody can ever clear, and it
+        # would accumulate for the life of the project. Every other section
+        # here is actionable; a section that is not teaches people to skim.
+        for t in self.cx.execute("SELECT * FROM v_task WHERE status='pending' "
+                                 "AND archived_at IS NULL ORDER BY seq"):
+            for col in ("title", "body"):
+                _walk(t["display_id"], t[col], col)
 
         # The overlaps that formed AFTER the rule was written: a consumer that
         # joined a group which the rule already reaches, while it also sits in
