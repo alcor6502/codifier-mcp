@@ -24,8 +24,15 @@ One call:
 
     rules_list(project, consumer)
 
+⚠ **If your consumer is a `skill`, the project's brief and specs do not come.**
+`profile` comes back saying `withheld` and why, never empty and never silently
+dropped. A skill runs one job; the project's identity is what a chat
+deliberates with. **Your own brief and specs still come** — they are your
+mandate. If a skill needs something out of the project's profile, that thing
+belongs in the skill's own brief, or the job belongs to a chat.
+
 It returns, in order: the PROJECT's brief and specs — identity first, then the
-living facts — then your **brief** and your specs, then the
+living facts, and not for a skill — then your **brief** and your specs, then the
 legend of the domains present, your rules in force (universal, then groups from the widest,
 then exceptions), and at the foot **your open tasks in short form** — id, title,
 urgent, age, urgent first then the oldest. Every rule line shows `reach` and the

@@ -2863,6 +2863,47 @@ ok(_CHANNEL in (MANUALS.get("reference-guide.md") or ""),
 # will reflexively document it. That is the day this case goes red, and the
 # answer is to ask Alfredo whether the scaffolding has been switched on, not to
 # write the sentence back.
+# THE PROJECT'S PROFILE REACHES A CONSUMER THROUGH ONE DOOR, and this counts
+# the doors instead of trusting the sentence that says so. A skill is denied
+# the brief and the specs in `list_rules` — but a skill holds the reference
+# code, so it can call everything that code opens, and a second method handing
+# the profile back would make the first one a curtain with a window beside it.
+#
+# Counted from the engine: every `self.profile()` call site, by the METHOD that
+# makes it. Three today, and the other two are out of a skill's reach —
+# `_amend_project` is the admin ladder and `export` is behind the admin code. A
+# FOURTH METHOD is the defect this exists to catch, and it will arrive looking
+# helpful: a `handy_profile()` that saves somebody a call.
+#
+# ⚠ What it does NOT catch, said out loud because the injection proved it: a
+# second `self.profile()` inside a method already on the list stays green. That
+# is deliberate — the question here is REACHABILITY, which is a property of the
+# method and not of how many times it calls something. Widening this to count
+# calls would go red on a refactor that changed nothing about who can read what.
+_PROFILE_CALLERS = {}
+for _fn in ast.walk(ENGINE_TREE):
+    if not isinstance(_fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        continue
+    for _n in ast.walk(_fn):
+        if (isinstance(_n, ast.Call) and isinstance(_n.func, ast.Attribute)
+                and _n.func.attr == "profile"
+                and isinstance(_n.func.value, ast.Name) and _n.func.value.id == "self"):
+            _PROFILE_CALLERS.setdefault(_fn.name, 0)
+            _PROFILE_CALLERS[_fn.name] += 1
+ok(set(_PROFILE_CALLERS) == {"list_rules", "_amend_project", "export"},
+   "the project's profile is handed out by three methods and no more — and only "
+   "list_rules is reachable with the reference code alone",
+   sorted(_PROFILE_CALLERS))
+_LR = next((f for f in ast.walk(ENGINE_TREE)
+            if isinstance(f, ast.FunctionDef) and f.name == "list_rules"), None)
+ok(_LR is not None and "'skill'" in ast.unparse(_LR),
+   "and list_rules is where the skill is told apart")
+ok(_LR is not None and "withheld" in ast.unparse(_LR),
+   "and it WITHHOLDS out loud: the key stays and says so, because a field that "
+   "vanished would read as an empty project to whoever is debugging")
+ok("`skill`, the project's brief and specs do not come" in (MANUALS.get("reference-guide.md") or ""),
+   "and the work manual says it at SESSION START, where a skill will meet it")
+
 _WORK = MANUALS.get("reference-guide.md") or ""
 ok("consumer_key" in _WORK, "consumer_key is still in the manual's signatures, "
                             "because it is still a real parameter")

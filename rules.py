@@ -2832,6 +2832,10 @@ class Project:
         technical half — names, and only the live ones — and the two of them
         together are a session start with nothing paid for twice.
 
+        ⚠ EXCEPT FOR A SKILL, which does not get the project's profile at all.
+        A skill executes one job; the brief and the specs are what a chat
+        deliberates with. It is withheld and SAID so, never dropped in silence.
+
         `query` filters on title and body and hands back the matching fragment.
         `pending=True` answers with the proposal queue instead: reasons and
         proposers, which is what you look at before proposing something that is
@@ -2842,6 +2846,31 @@ class Project:
                              "brief": c["brief"], "specs": c["specs"],
                              "signed": bool(c["secret"])},
                 "legend": self.LEGEND}
+        if c["kind"] == "skill":
+            # A SKILL DOES NOT GET THE PROJECT'S PROFILE, and this is the only
+            # door it could come through: `project_info` carries no profile by
+            # design and `rules_export` is behind the admin code.
+            #
+            # A skill runs ONE job. The project's brief and specs are its
+            # identity and its living facts — the material a chat deliberates
+            # with — and handing them to something that executes does two
+            # unwanted things: it pays for context nobody reads, and it invites
+            # improvisation from the one caller that must not improvise. Its
+            # OWN brief and specs stay: that is its mandate, and it is above.
+            #
+            # WITHHELD, NOT MISSING. The key stays and says why. A payload that
+            # simply dropped a field would look like an empty project to
+            # whoever is debugging it, and the fastest way to a bad hour is a
+            # silence that reads like a fault.
+            head["profile"] = {
+                "withheld": "skill",
+                "note": "a skill does not receive the project's brief and specs: it "
+                        "runs one job, and the project's identity is not part of it. "
+                        "Your own brief and specs are in `consumer` — that is your "
+                        "mandate. If you need something from the project's profile to "
+                        "do the job, the job belongs to a chat, or the thing you need "
+                        "belongs in your own brief.",
+            }
         if pending:
             queue = []
             for row in self.cx.execute("SELECT * FROM v_rule WHERE status='proposed' "

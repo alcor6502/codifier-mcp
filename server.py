@@ -475,6 +475,13 @@ def rules_list(project: str, consumer: str, query: str = "",
     then the oldest. The bodies are NOT here: `tasks_get` carries those, and
     the ceiling on it is why.
 
+    ⚠ IF YOUR CONSUMER IS A SKILL the project's brief and specs do NOT come:
+    `profile` says `withheld` and why. A skill runs one job, and the project's
+    identity is what a chat deliberates with. Your own brief and specs still
+    come, in `consumer` — that is your mandate. If a skill turns out to need
+    something from the project's profile, that thing belongs in the skill's own
+    brief, or the job belongs to a chat.
+
     `query` filters on title and body and hands back the matching fragment.
     `pending=True` shows the proposal QUEUE instead, with the reasons and the
     proposers — look there before you propose, or you will file a twin.

@@ -933,6 +933,42 @@ d = rule(p, "targeted", exceptions=["advisory"], title="by name")
 start = allowed("one call", lambda: p.list_rules("advisory"))
 equals("the PROJECT comes first", (start or {})["profile"]["brief"], "the owner's book")
 equals("then the consumer's own", (start or {})["consumer"]["name"], "advisory")
+
+# A SKILL DOES NOT GET THE PROJECT'S PROFILE. It runs one job; the brief and the
+# specs are what a chat deliberates with, and handing them to something that
+# executes pays for context nobody reads and invites the one caller that must
+# not improvise to do exactly that.
+#
+# The contrast is the case: `news` is a skill and `advisory` is a chat, they
+# call the same method on the same project one line apart, and only one of them
+# gets the book. Withheld and SAID so, never dropped — a payload that simply
+# lost the field would read as an empty project to whoever is debugging it.
+skill_start = allowed("a skill calls the same thing", lambda: p.list_rules("news"))
+equals("and does NOT get the project's brief",
+       (skill_start or {}).get("profile", {}).get("brief"), None)
+equals("it is WITHHELD, and the payload says which kind it was withheld from",
+       (skill_start or {}).get("profile", {}).get("withheld"), "skill")
+yields("and says why, so an empty field never reads as an empty project",
+       lambda: "runs one job" in skill_start.get("profile", {}).get("note", ""), True)
+equals("while its OWN brief still arrives, because that is its mandate",
+       (skill_start or {})["consumer"]["kind"], "skill")
+yields("and the rules still reach it: this withholds the profile, nothing else",
+       lambda: [r["id"] for r in skill_start["rules"]], [u])
+yields("the same on the QUEUE view, which builds the same head",
+       lambda: p.list_rules("news", pending=True).get("profile", {}).get("withheld"),
+       "skill")
+yields("and a HUMAN is not a skill: nothing is withheld from them",
+       lambda: p.list_rules("Alfredo")["profile"]["brief"], "the owner's book")
+# ⚠ AND THE DOOR IS THE ONLY DOOR, which is the half a check on `list_rules`
+# alone would not see. A skill carries the reference code, so it can call
+# everything the reference code opens — if the profile came back through any of
+# those, withholding it here would be a curtain with a window next to it.
+# `project_info` carries no profile BY DESIGN and its docstring says so;
+# `rules_export` is behind the admin code, which a skill has not got. Both are
+# asserted, because "by design" is a sentence and this is a measurement.
+yields("project_info carries no profile at all, for anybody",
+       lambda: [k for k in p.project_info()
+                if k in ("profile", "brief", "specs", "queue_cap")], [])
 equals("then the rules that reach it", [r["id"] for r in (start or {})["rules"]],
        [u, g, d])
 equals("universal first, then the group, then the name",
