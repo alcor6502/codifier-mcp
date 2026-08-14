@@ -102,18 +102,25 @@ from mcp.types import Icon
 from mcp_common_engine import (VERSION as ENGINE_VERSION, cidrs_from_env,
                                describe_cidrs, log_level_from_env)
 from mcp_common_engine.gate import Gate
-from mcp_common_engine.logs import arm_argument_redaction
+from mcp_common_engine.logs import arm_argument_redaction, arm_timestamps
 from mcp_common_engine.refusals import make_tool
 import web
 import rules
 from rules import (Project, Registry, RulesError, RulesFault, VERSION,
                    check_admin)
 
+# The shape of a line, written ONCE and handed to everything that needs it —
+# `basicConfig` here, and the engine's `arm_timestamps` further down, which
+# gives fastmcp's own handlers the same shape. The engine takes the format as
+# an argument and carries no default on purpose: a default there would be a
+# second copy of this string, and two copies of a string agree only until one
+# of them is edited.
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
 # for every library loaded, not for ours: that is where the noise came from.
 # Only our own logger follows LOG_LEVEL.
-logging.basicConfig(level=logging.WARNING,
-                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(level=logging.WARNING, format=LOG_FORMAT)
 log = logging.getLogger("codifier-mcp")
 # Resolved in the engine's log_level_from_env for the same reason as the IP
 # filter: one expression, so the service and the preflight cannot disagree.
@@ -256,6 +263,23 @@ mcp = FastMCP("codifier-mcp", auth=auth,
 # a handler's does — and the raise is left to stop the boot, because a service
 # that starts having protected nothing is worse than one that does not start.
 arm_argument_redaction()
+# The sister cure, same handlers, same moment, and the same reason it cannot be
+# armed earlier. fastmcp's logger has `propagate=False` and installs handlers
+# and a formatter of its own, so it obeys neither our LOG_LEVEL nor our line
+# shape: its records came out as `WARNING: Invalid arguments for tool …`, with
+# no date, no time and no logger name, while every line of ours carried all
+# three.
+#
+# Cosmetic until it is not. A line without an hour does not correlate with
+# anything — not with our own lines, not with the host's, not with a dropped
+# call somebody is trying to explain — and the malformed-argument line is
+# exactly the one an investigation reaches for. It is handed LOG_FORMAT, the
+# same NAME that reached basicConfig above and not a second copy of the string.
+#
+# The engine refuses if there is no handler, and the refusal is left to stop
+# the boot: no handler means the assumption both cures rest on is false, and
+# the redaction one line above is then protecting nothing either.
+arm_timestamps(LOG_FORMAT)
 
 
 # The refusal-to-ToolError conversion and its one log line live in the

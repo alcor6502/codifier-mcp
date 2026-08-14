@@ -1674,6 +1674,69 @@ ok(not _SWALLOWED,
    "and it is not wrapped in a try: the raise is what stops a boot that would "
    "protect nothing", _SWALLOWED)
 
+# ---------------------------------------------------------------------
+# The sister cure: fastmcp's own lines get our line shape, so they carry a
+# date. Same handlers, same moment, same reasons — so the same checks, plus
+# the one that is only true of this one: the format must arrive as the NAME
+# that basicConfig was handed, never as a second copy of the string.
+# ---------------------------------------------------------------------
+sole_import("arm_timestamps", "mcp_common_engine.logs")
+
+_STAMP = [n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
+          and ast.unparse(n.func) == "arm_timestamps"]
+ok(len(_STAMP) == 1, "server.py arms the timestamps, exactly once", len(_STAMP))
+if _STAMP and _MCP_ASSIGN:
+    ok(_STAMP[0].lineno > _MCP_ASSIGN[0].lineno,
+       "and AFTER the server object, like its sister: earlier there is no "
+       "handler to format",
+       f"arm at line {_STAMP[0].lineno}, server at line {_MCP_ASSIGN[0].lineno}")
+
+_STAMP_STMTS = [n for n in SERVER_TREE.body if isinstance(n, ast.Expr)
+                and isinstance(n.value, ast.Call)
+                and ast.unparse(n.value.func) == "arm_timestamps"]
+ok(len(_STAMP_STMTS) == 1,
+   "and it is a module-level statement, not tucked inside a branch",
+   len(_STAMP_STMTS))
+
+ok(not [ast.unparse(t)[:60] for t in ast.walk(SERVER_TREE)
+        if isinstance(t, ast.Try)
+        and any(isinstance(n, ast.Call) and ast.unparse(n.func) == "arm_timestamps"
+                for n in ast.walk(t))],
+   "and its raise is not swallowed either: no handler means the redaction next "
+   "door is protecting nothing")
+
+# THE check that is this cure's own. The engine takes the format as an argument
+# and carries no default, so that each server keeps its line shape in ONE
+# place; hand it a literal here and there are two copies of the string, which
+# agree exactly until somebody edits one. So: one Name, and the SAME name that
+# reached basicConfig.
+_BASIC = [n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
+          and ast.unparse(n.func) == "logging.basicConfig"]
+ok(len(_BASIC) == 1, "logging.basicConfig is called once", len(_BASIC))
+_basic_fmt = next((k.value for c in _BASIC for k in c.keywords if k.arg == "format"),
+                  None)
+ok(isinstance(_basic_fmt, ast.Name),
+   "and it is handed a NAMED format, not a literal",
+   ast.unparse(_basic_fmt) if _basic_fmt is not None else "absent")
+_stamp_fmt = _STAMP[0].args[0] if _STAMP and _STAMP[0].args else None
+ok(isinstance(_stamp_fmt, ast.Name),
+   "arm_timestamps is handed a NAMED format too",
+   ast.unparse(_stamp_fmt) if _stamp_fmt is not None else "absent")
+ok(isinstance(_basic_fmt, ast.Name) and isinstance(_stamp_fmt, ast.Name)
+   and _basic_fmt.id == _stamp_fmt.id,
+   "and it is the SAME name: one line shape, in one place",
+   f"{ast.unparse(_basic_fmt) if _basic_fmt else '?'} vs "
+   f"{ast.unparse(_stamp_fmt) if _stamp_fmt else '?'}")
+
+# And the string itself is written once. A second literal of the same shape
+# somewhere else in the file would be the copy this whole arrangement exists to
+# avoid, sitting there waiting for one of the two to be edited.
+_FMT_LITERALS = [n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Constant)
+                 and isinstance(n.value, str) and "%(asctime)s" in n.value]
+ok(len(_FMT_LITERALS) == 1,
+   "the line shape is spelled out exactly once in the file",
+   len(_FMT_LITERALS))
+
 # MEASURED, on the three secrets this surface actually carries. The static
 # checks above pin that the cure is armed, once, in the right place — none of
 # them can say that it WORKS, and the payload here is not a document body like
