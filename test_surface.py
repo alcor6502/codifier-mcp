@@ -2844,6 +2844,35 @@ ok(_LIST is not None and "authored" in (ast.get_docstring(_LIST) or "")
 ok(_CHANNEL in (MANUALS.get("reference-guide.md") or ""),
    "and the work manual says it where a chat will actually meet it")
 
+# `consumer_key` IS SCAFFOLDING, AND THE MANUAL DOES NOT TEACH IT. Alfredo's
+# call, 2026-Ago-14: the per-consumer secret exists in the engine and is not
+# switched on — `secret` is NULL for everybody, so `_check_consumer_key`
+# returns on its first line and the name is what identifies a consumer. Until
+# somebody starts being clever, the only code a chat is told about is the
+# admin's.
+#
+# The sentence that was there — "if your consumer has a secret, every gesture
+# in your name takes consumer_key" — was worse than nothing: a chat cannot
+# check whether its own consumer has a secret, so it described a condition the
+# reader has no way to evaluate, about a thing that never happens.
+#
+# ⚠ This is a DECISION and not an omission, which is why it is pinned. The
+# parameter stays in the signature blocks — it is a real parameter and the
+# signature check above requires the manual to name it — so the next person to
+# write a card per tool will meet `consumer_key` with nothing said about it and
+# will reflexively document it. That is the day this case goes red, and the
+# answer is to ask Alfredo whether the scaffolding has been switched on, not to
+# write the sentence back.
+_WORK = MANUALS.get("reference-guide.md") or ""
+ok("consumer_key" in _WORK, "consumer_key is still in the manual's signatures, "
+                            "because it is still a real parameter")
+_SIG_LINES = [ln for ln in _WORK.splitlines() if SIG_LINE.match(ln) or ln.startswith(" " * 14)]
+_PROSE = "\n".join(ln for ln in _WORK.splitlines() if ln not in _SIG_LINES)
+ok("consumer_key" not in _PROSE,
+   "and the PROSE does not teach it: the per-consumer secret is scaffolding, "
+   "not a thing a chat has to carry",
+   [ln.strip()[:60] for ln in _PROSE.splitlines() if "consumer_key" in ln])
+
 # TK is reserved, and the two letter-pair checks that used to be written twice
 # are ONE door now. The literal is counted: a second copy is how a reservation
 # added to one door stops holding on the other.

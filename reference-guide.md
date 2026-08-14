@@ -144,12 +144,10 @@ sequence, and the one you are given comes back in the verdict.
    a secret: it lives in your instructions, never in a vault file.
 6. **`authored=True` shows the tasks you opened on other desks**, status and
    outcome included: check before re-sending a reminder.
-7. **If your consumer has a secret**, every gesture in your name takes
-   `consumer_key`. No secret configured: the name suffices.
-8. **Caps are declared.** Ten ids per `_get`, refused not trimmed; past the byte
+7. **Caps are declared.** Ten ids per `_get`, refused not trimmed; past the byte
    ceiling the text truncates and says so; list cuts hit the fresh work and state
    the real total.
-9. **Refusals are `refused` lines that name the port.** A traceback is a bug,
+8. **Refusals are `refused` lines that name the port.** A traceback is a bug,
    not an answer.
 
 ## TASKS
