@@ -605,6 +605,64 @@ yields("zero is a closed queue, and it is not the same as no ceiling",
 reg.close()
 
 # =====================================================================
+print("\n— NO REFUSAL IN THE PARSER CAN REACH THE LINE IT IS ABOUT —")
+
+# The cases above pin the messages that exist TODAY. This one pins the next
+# one somebody writes, and it is archivist's half of the same cure: the raw
+# line stays in scope for the whole loop body, so a branch added tomorrow can
+# interpolate it back without anybody noticing — which is exactly how it got
+# there the first time.
+#
+# From the AST, not from a text search: `f"…{line}…"` and `"…".format(line)`
+# and `% line` are three spellings of one mistake, and a search for `{line!r}`
+# catches one of them. What is forbidden is the CONTENT — the raw line, the
+# split fields, the two codes. What is allowed is everything a person needs:
+# the line NUMBER, the file, the name once the count is right, and the shape.
+import ast                                                          # noqa: E402
+
+_FORBIDDEN = {"line", "raw", "parts", "p", "ref", "adm"}
+_src = open(os.path.join(os.path.dirname(os.path.abspath(rules.__file__)),
+                         "rules.py"), encoding="utf-8").read()
+_fn = next((n for n in ast.walk(ast.parse(_src))
+            if isinstance(n, ast.FunctionDef) and n.name == "_registry_lines"), None)
+_present = _fn is not None
+equals("_registry_lines is where the registry is parsed, and it is found", _present, True)
+
+_leaks: list[str] = []
+if _present:
+    for _n in ast.walk(_fn):
+        # Every string a message can be built from: an f-string, a .format(),
+        # and the % operator. A name that is forbidden may not reach any of
+        # the three.
+        _names: list[str] = []
+        if isinstance(_n, ast.JoinedStr):
+            _names = [x.id for v in _n.values if isinstance(v, ast.FormattedValue)
+                      for x in ast.walk(v.value) if isinstance(x, ast.Name)]
+        elif isinstance(_n, ast.Call) and isinstance(_n.func, ast.Attribute) \
+                and _n.func.attr == "format":
+            _names = [x.id for a in _n.args for x in ast.walk(a) if isinstance(x, ast.Name)]
+        elif isinstance(_n, ast.BinOp) and isinstance(_n.op, ast.Mod) \
+                and isinstance(_n.left, (ast.Constant, ast.JoinedStr)):
+            _names = [x.id for x in ast.walk(_n.right) if isinstance(x, ast.Name)]
+        _leaks += [f"{ast.unparse(_n)[:40]} carries {x}" for x in _names if x in _FORBIDDEN]
+
+equals("no message it builds can carry the line, the fields or the codes",
+       (_leaks or ["clean"]), ["clean"])
+
+# The other direction, or the check above is satisfied by a parser that says
+# nothing at all: the line NUMBER must still reach the messages, because that
+# is the whole of what the person needs in order to act.
+_uses_n = False
+if _present:
+    for _n in ast.walk(_fn):
+        if isinstance(_n, ast.JoinedStr):
+            _uses_n = _uses_n or any(
+                isinstance(x, ast.Name) and x.id == "n"
+                for v in _n.values if isinstance(v, ast.FormattedValue)
+                for x in ast.walk(v.value))
+equals("and the line NUMBER does reach them", _uses_n, True)
+
+# =====================================================================
 for d in _roots:
     shutil.rmtree(d, ignore_errors=True)
 print(f"\n{_passed} cases, {len(_failed)} failed")

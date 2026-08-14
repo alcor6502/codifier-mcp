@@ -1335,9 +1335,19 @@ def _registry_lines(text: str, where: str) -> list[tuple]:
             # diagnosis — a separator lost between the name and the reference
             # code shows up as one field of sixty characters where two were
             # meant.
-            shape = " | ".join(f"[{len(p)} chars]" for p in parts)
+            #
+            # The two numbers are bound to their OWN names before the message,
+            # so that not one name holding content — `line`, `raw`, `parts`,
+            # `ref`, `adm` — appears inside a string this function builds. That
+            # is what `test_registry` checks from the AST, and it is the half
+            # of the cure that outlives this branch: the raw line stays in
+            # scope for the whole loop, so the next refusal written here could
+            # reach it, which is how it got in the first time.
+            widths = [len(p) for p in parts]
+            count = len(parts)
+            shape = " | ".join(f"[{w} chars]" for w in widths)
             raise RulesFault(
-                f"{where} line {n}: {len(parts)} field(s) where {REGISTRY_FIELDS} are "
+                f"{where} line {n}: {count} field(s) where {REGISTRY_FIELDS} are "
                 f"expected. A project line is `name | reference code | admin code` "
                 f"and nothing else is served — comment it out with # while you fix "
                 f"it. That line, by shape: {shape}")
