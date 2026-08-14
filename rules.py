@@ -240,9 +240,19 @@ TASKS_STALE_DAYS = 30
 
 # Identical answer for a missing code and a wrong one: a message that told them
 # apart would be an oracle.
-ERR_PROJECT = ("project not specified: this needs the project CODE, the one at the top "
-               "of its instructions. Without it the registry does not answer — and there "
-               "is no way to list projects: either you have it, or you ask for it.")
+# ONE message for a code that is missing and for a code that is wrong, and the
+# wording has to hold both without lying about either. It used to open with
+# "project not specified", which is true of the first case and MISLEADING in
+# the second: somebody who mistyped a code reads that they passed no argument
+# and goes to check the call instead of the code. "not recognised" covers the
+# two without telling them apart — and telling them apart is the oracle this
+# refusal exists to avoid. Found on the live service, 2026-Ago-14, by asking
+# for a project by NAME and then by a code that does not exist: both answered
+# this, and the second answer sent the reader the wrong way.
+ERR_PROJECT = ("project not recognised: this needs the project CODE, the one at the top "
+               "of its instructions — not its name, and not a code from somewhere else. "
+               "Without one that resolves the registry does not answer, and there is no "
+               "way to list projects: either you have it, or you ask for it.")
 
 # One message for every way administration can fail to open — wrong reference
 # code, wrong admin code, missing either. Which half was wrong is not said, on

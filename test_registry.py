@@ -605,6 +605,35 @@ yields("zero is a closed queue, and it is not the same as no ceiling",
 reg.close()
 
 # =====================================================================
+print("\n— A MISSING CODE, A WRONG CODE AND A NAME ANSWER THE SAME —")
+
+# The no-oracle property, and until today nothing checked it: three ways of
+# failing to name a project have to come back INDISTINGUISHABLE, or the
+# difference between them tells whoever holds half a credential which half is
+# the good one. The wording is not what is pinned here — the IDENTITY is.
+r = _root()
+_write(r, _line(name="Palestra"))
+reg = rules.Registry(r)
+_msgs = []
+for _arg in ("", "Palestra", "Zzzzzzzz99", REF[:-1]):
+    try:
+        reg.project(_arg)
+        _msgs.append("NOT REFUSED")
+    except Exception as exc:                       # noqa: BLE001
+        _msgs.append(str(exc))
+equals("missing, name, unknown and truncated code are ONE message",
+       len(set(_msgs)), 1)
+# And that one message must not describe only the first of the four. It used to
+# open with "project not specified", which is true when nothing was passed and
+# misleading when something wrong was: the reader goes to check the call
+# instead of the code. Found on the live service on 2026-Ago-14.
+equals("and it does not say 'not specified' when something WAS specified",
+       "not specified" in _msgs[0], False)
+equals("and it still names what is needed: the CODE",
+       "CODE" in _msgs[0], True)
+reg.close()
+
+# =====================================================================
 print("\n— NO REFUSAL IN THE PARSER CAN REACH THE LINE IT IS ABOUT —")
 
 # The cases above pin the messages that exist TODAY. This one pins the next
