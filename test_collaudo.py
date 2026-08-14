@@ -491,6 +491,16 @@ yields("while READING puts the current title back in",
 refused("a rule that cites a TASK", lambda: p.propose(
     "VA", "R", "t", "see (TK-0001)", "why", "all", "architect"),
     "cites a rule, never a task")
+# THE BARE TASK ID, which is the twin of the bare rule ID and was getting in
+# everywhere: TK is not a domain, so the sanitisation's list of codes never
+# held it. A forgotten bracket around a task pointer was stored and seen by
+# nobody — `dangling_citations` reads citations, and that is not one. It is the
+# commonest typo now that pointing at a task is the commonest citation.
+refused("a bare TASK id in a rule", lambda: p.propose(
+    "VA", "R", "t", "see TK-0001 over there", "why", "all", "architect"), "bare ID")
+refused("and a bare TASK id in a task, where it is likeliest",
+        lambda: p.task_add("architect", "t", "see TK-0001 over there", "architect"),
+        "bare ID")
 
 # =====================================================================
 print("\n— A CITATION POINTS AT WHAT CAN STILL BE USED —")

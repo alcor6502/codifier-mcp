@@ -1855,8 +1855,7 @@ class Project:
             raise
         self.cx.execute("COMMIT")
 
-    def _verify_auth(self, auth_code: str, entity: str, action: str,
-                     fields=None) -> None:
+    def _verify_auth(self, auth_code: str, entity: str, action: str) -> None:
         """THE SECOND FACTOR, CHECKED BEFORE ANYTHING IS SAID ABOUT THE STATE.
 
         Call it as the first statement of a gesture that needs one, before the
@@ -1875,12 +1874,29 @@ class Project:
         factor does not defend against a stolen admin code, it defends against
         a distracted admin — and it can only do that if it is asked first.
 
+        ⚠ THE TASK DOORS DO NOT DO THIS YET, and saying so here is the point of
+        saying it at all. `task_close` and `task_amend` check `consumer_key` —
+        which is a credential, the consumer's own secret — LAST, after the
+        task's existence, its state and its owner, so `TK-0001 belongs to
+        advisory` reaches somebody who has not got the secret. Found by the
+        review of the same release that wrote this paragraph. It is the same
+        principle and it is a change to three tools nobody asked for, so it is
+        written down rather than made quietly: an exception that lives in
+        somebody's head is how the doors disagree in the first place.
+
         ⚠ VERIFYING IS NOT BURNING. This only reads; the code is spent inside
         `_gesture`, in the transaction of the gesture that succeeded. Moving
         the burn up here would mean a refusal further down eats the code and
         sends the caller back to the page for a typo, which is exactly what the
-        late burn was designed to prevent."""
-        if self.port_for(entity, action, fields) == "auth":
+        late burn was designed to prevent.
+
+        It asks `port_for` rather than assuming: both call sites today are
+        rule gestures that always want a code, so the condition is constant —
+        but the ladder is the one place that knows, and a door that decided for
+        itself is how the doors get out of step. `amend_project` does not come
+        through here: it has already asked `port_for` with its `fields`, which
+        this signature deliberately does not take."""
+        if self.port_for(entity, action) == "auth":
             _auth_row(self, auth_code)
 
     @contextlib.contextmanager
@@ -2275,7 +2291,14 @@ class Project:
                 "a DIFFERENT rule and nobody was told. Nothing is deleted here and nothing "
                 "is rewritten for you: say it in words — 'the old rule about mergers' — or "
                 "cite by its real ID the rule that replaced it.")
-        doms = set(self._domain_codes())
+        # TK IS IN THE SET, and it is not a domain: no project may declare it
+        # as one, so it would never arrive from `_domain_codes`. Without it a
+        # forgotten bracket around a TASK id — `see TK-0001` — went in, was
+        # stored, and was seen by nobody: `dangling_citations` reads citations
+        # and that is not one. It matters now more than it did, because since
+        # 4.0.1 pointing at a task is the commonest citation the log has, which
+        # makes the missing bracket the commonest typo.
+        doms = set(self._domain_codes()) | {TASK_PREFIX}
         stray = sorted({f"{m.group(1).upper()}-{m.group(2)}"
                         for m in RE_BARE.finditer(RE_CITE.sub(" ", text))
                         if m.group(1).upper() in doms})
@@ -2305,7 +2328,7 @@ class Project:
         self._cites(text, field=field)
         return self._compact(text)
 
-    def _cites(self, body: str, self_id: str = "", field: str = "body",
+    def _cites(self, body: str, field: str = "body",
                in_task: bool = False) -> list[str]:
         """Parse a body and VALIDATE its citations. Raises, so this is the door.
 
@@ -2365,8 +2388,6 @@ class Project:
             dst = _norm_id(m.group(1))
             if m.group(2) is not None:
                 glossed.append((dst, m.group(2).strip()))
-            if dst == self_id:
-                continue
             if dst not in out:
                 out.append(dst)
         cited_tasks = [d for d in out if d.startswith(TASK_PREFIX + "-")]
@@ -2564,7 +2585,7 @@ class Project:
         the log's own policy — see `_cites(in_task=True)`.
 
         There is ONE of these, and all three gestures come through it:
-        `task_add` (title, body), `task_close` (outcome, reason_dropped) and
+        `task_add` (title, body), `task_close` (outcome, reason) and
         `task_amend` (title, body). `outcome` is the one that would have been
         missed by fixing the doors one at a time, and it is the worst to miss:
         it is written once, at the close, and `closed is closed` means nothing
