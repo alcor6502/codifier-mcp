@@ -155,6 +155,20 @@ your desk in short form — urgent first, then oldest, so when the cap cuts it
 cuts the fresh work — with the recently closed ones trailing; `since` and
 `until` open the window on the older closed ones.
 
+**A task is a channel with two readers** — the desk it sits on, and the hand
+that opened it — and that is worth saying out loud, because it makes the log two
+things and not one:
+
+- a **message between chats**. `look at this proposal and tell me what you
+  think` is a task, and an open proposal may be cited in the body for exactly
+  that reason;
+- a way to find out **whether another chat did the work**. Open the task, then
+  read it back with `tasks_list(authored=True)`: you get status and outcome, so
+  you learn it was closed without having to ask anybody.
+
+Neither needs a tool you have not got. Reads are project-wide — the boundary is
+the reference code — which is what makes the second reading possible at all.
+
 Tasks **do not expire**. One pending for more than 30 days comes out MARKED, and
 that is all: a deadline nobody set is not a deadline, and a task that vanished
 on a timer is work nobody decided to drop.

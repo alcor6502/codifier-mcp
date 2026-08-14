@@ -563,6 +563,15 @@ def tasks_add(project: str, consumer: str, title: str, body: str,
     afterwards, because a door that let the receiver clear it would put the
     lever in the hand of the one with an interest in clearing it.
 
+    A TASK IS A CHANNEL WITH TWO READERS — the desk it sits on and the hand
+    that opened it — and that makes it two things rather than one. It is a
+    MESSAGE between chats: `look at this proposal and tell me what you think`,
+    and an open proposal may be cited in the body for exactly that. It is also
+    the way to find out WHETHER ANOTHER CHAT DID THE WORK: open the task, then
+    read it back with `tasks_list(authored=True)` and see whether it was closed
+    and with what outcome. Neither needs a new tool; what was missing was the
+    name for it.
+
     ⚠ Opening a task for a HUMAN consumer does NOT notify them: a human calls
     no tool, and their mail is seen by whoever reads `tasks_overview` or the
     administration page. Tasks are not a notification channel to the owner.
@@ -584,8 +593,10 @@ def tasks_list(project: str, consumer: str, query: str = "", since: str = "",
     fragment.
 
     `authored=True` turns the view round: the tasks THIS consumer opened on
-    other desks, with status and outcome. A task for somebody else is also a
-    message, and a sender who cannot see it close sends it again.
+    other desks, with status and outcome. This is the SECOND READING of the
+    channel, and it is what lets one chat check on another without asking: you
+    opened the task, this tells you whether it was closed and what came of it.
+    A sender who cannot see it close sends it again.
 
     A task pending for more than the staleness window comes out MARKED, and
     that is all: tasks do not expire. Truncation is always declared with the

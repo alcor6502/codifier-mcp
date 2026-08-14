@@ -2808,6 +2808,29 @@ if _ELIST is not None:
 ok("task_range" not in METHODS and "task_search" not in METHODS,
    "and the engine folded them too, rather than keeping a second door open")
 
+# THE CHANNEL, pinned in all three places it is said. This is PROSE and nothing
+# else guards prose: the mechanism was there and working from the first day —
+# `authored=True` returns somebody else's desk with status and outcome — and
+# what was missing was the NAME for it, which is the part a chat reads before
+# it thinks of using it. A name that lives only in prose is one careless
+# rewrite from gone, and the compaction pass of the next release is exactly
+# that rewrite. So: it survives, or these go red and somebody decides on
+# purpose.
+# ⚠ The phrase is the WHOLE phrase, and that is not fussiness. `"channel" in
+# doc` was the first version of this check and it was green under an injection
+# that had deleted the sentence: tasks_add already said "tasks are not a
+# notification channel to the owner", about something else entirely, and that
+# older sentence answered for the one being tested.
+_CHANNEL = "channel with two readers"
+_ADD = next((t for t in TOOLS if t.name == "tasks_add"), None)
+ok(_ADD is not None and _CHANNEL in (ast.get_docstring(_ADD) or "").lower(),
+   "tasks_add says a task is a CHANNEL WITH TWO READERS, not only an errand")
+ok(_LIST is not None and "authored" in (ast.get_docstring(_LIST) or "")
+   and "second reading" in (ast.get_docstring(_LIST) or "").lower(),
+   "tasks_list names the authored view as the channel's second reading")
+ok(_CHANNEL in (MANUALS.get("reference-guide.md") or ""),
+   "and the work manual says it where a chat will actually meet it")
+
 # TK is reserved, and the two letter-pair checks that used to be written twice
 # are ONE door now. The literal is counted: a second copy is how a reservation
 # added to one door stops holding on the other.
