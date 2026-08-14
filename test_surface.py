@@ -1737,35 +1737,6 @@ ok(len(_FMT_LITERALS) == 1,
    "the line shape is spelled out exactly once in the file",
    len(_FMT_LITERALS))
 
-# MEASURED, on the three secrets this surface actually carries. The static
-# checks above pin that the cure is armed, once, in the right place — none of
-# them can say that it WORKS, and the payload here is not a document body like
-# the twin's: it is the admin code, the one-time code and a consumer's secret,
-# which travel as arguments on the calls that change things. So the filter is
-# run against a record shaped like the one fastmcp emits when it rejects a
-# malformed call, and the values are looked for in what comes out.
-try:
-    import logging as _logging
-
-    from mcp_common_engine.logs import _redacted as _redact_values   # noqa: WPS436
-
-    # The shape pydantic hands fastmcp when it rejects a call: a list of error
-    # entries, and the caller's arguments under `input`. Written out here
-    # rather than mocked, because the whole cure is keyed to that one field
-    # name — a probe with a shape of its own would prove something else.
-    _PAYLOAD = {"project": "PROJECTCODE1234", "key": "ADMINCODE-TOPSECRET",
-                "auth_code": "ONETIME-987654", "consumer_key": "CONSUMER-SECRET"}
-    _out = repr(_redact_values(([{"type": "missing", "loc": ("reason",),
-                                  "msg": "Field required",
-                                  "input": _PAYLOAD}],)))
-    _leaked = sorted(v for v in _PAYLOAD.values() if v in _out)
-    ok(not _leaked, "and it redacts the whole payload: not one of the project "
-       "code, the admin code, the one-time code or a consumer's secret survives "
-       "into the line", _leaked)
-    ok("<redacted>" in _out, "and what is printed says it was redacted", _out[:60])
-except ImportError as _e:                                            # noqa: PERF203
-    ok(False, "the engine's redaction can be measured here", str(_e))
-
 print("\n== the template is publishable ==")
 
 import web as _webmod                                           # noqa: E402
@@ -1924,6 +1895,118 @@ try:
     ok(root.tag == "Container", f"the template parses as XML ({len(root.findall('Config'))} fields)")
 except ET.ParseError as e:
     ok(False, "the template parses as XML", str(e))
+
+print("\n== the HTTP mode is read, passed explicitly, and printed ==")
+
+# A knob whose value is decided by a literal is a knob that does nothing, and
+# this one has a second way to go wrong that the others do not: fastmcp
+# resolves its own FASTMCP_STATELESS_HTTP when the argument is None, so LEAVING
+# IT OUT does not mean "stateful", it means "whatever the environment says" —
+# and the startup line would then name a mode that is not running. Measured on
+# fastmcp 3.4.5: `http_app()` with FASTMCP_STATELESS_HTTP=true drops GET from
+# /mcp; `http_app(stateless_http=False)` with the same variable does not. The
+# explicit argument is the whole guarantee.
+# The list comes from the AST and not from an import: server.py needs fastmcp
+# and uvicorn, neither of which this suite has — which is the whole reason this
+# file reads the source instead of running it. Written the other way once, and
+# it died on `import uvicorn` before reaching a single verdict.
+_MODES_NODE = next((n.value for n in SERVER_TREE.body if isinstance(n, ast.Assign)
+                    and any(getattr(t, "id", "") == "HTTP_MODES" for t in n.targets)),
+                   None)
+_HTTP_MODES = ast.literal_eval(_MODES_NODE) if _MODES_NODE is not None else None
+ok(_HTTP_MODES == ("stateful", "stateless"),
+   "the two modes are a closed list in the code", _HTTP_MODES)
+
+_HTTP_APP = [n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
+             and ast.unparse(n.func).endswith("http_app")]
+ok(len(_HTTP_APP) == 1, "mcp.http_app is built once", len(_HTTP_APP))
+_kw = next((k for c in _HTTP_APP for k in c.keywords if k.arg == "stateless_http"), None)
+ok(_kw is not None,
+   "and it is handed stateless_http EXPLICITLY, so fastmcp's own variable "
+   "cannot decide the mode behind the startup line's back")
+ok(_kw is not None and any(isinstance(x, ast.Name) and x.id == "HTTP_MODE"
+                           for x in ast.walk(_kw.value)),
+   "and the value comes from HTTP_MODE, not from a literal",
+   ast.unparse(_kw.value) if _kw is not None else "absent")
+
+# Read from the environment through the one function, once. A second
+# os.environ.get("HTTP_MODE") anywhere is a second place the mode is decided.
+_MODE_READS = [n for n in ast.walk(SERVER_TREE) if isinstance(n, ast.Call)
+               and ast.unparse(n.func) in ("os.environ.get", "os.getenv")
+               and n.args and isinstance(n.args[0], ast.Constant)
+               and n.args[0].value == "HTTP_MODE"]
+ok(len(_MODE_READS) == 1, "HTTP_MODE is read from the environment exactly once",
+   len(_MODE_READS))
+
+# And it reaches the startup line. A mode nobody can read after an Apply is a
+# mode nobody can confirm — the same argument that put the host and the UI port
+# on that line.
+_START_LINE = next((c for c in ast.walk(_MAIN) if isinstance(c, ast.Call)
+                    and ast.unparse(c.func) == "log.info"), None) if _MAIN else None
+ok(_START_LINE is not None and any(
+    isinstance(a, ast.Name) and a.id == "HTTP_MODE" for a in _START_LINE.args),
+   "and the startup line is handed it")
+
+# Handed is not printed. Taking the `(http %s)` out of the format while leaving
+# the argument in place left every check above green — the value reaches the
+# call and goes nowhere. So the line is checked whole: as many placeholders as
+# arguments, which is the one property that cannot be true while a field is
+# quietly missing.
+if _START_LINE is not None and isinstance(_START_LINE.args[0], (ast.Constant, ast.JoinedStr)):
+    _fmt = "".join(v.value for v in _START_LINE.args[0].values
+                   if isinstance(v, ast.Constant)) \
+        if isinstance(_START_LINE.args[0], ast.JoinedStr) else _START_LINE.args[0].value
+    _slots = len(re.findall(r"%[sdr]", _fmt))
+    ok(_slots == len(_START_LINE.args) - 1,
+       "and the startup line has one placeholder per field: nothing is handed "
+       "to it that it does not print",
+       f"{_slots} placeholders, {len(_START_LINE.args) - 1} arguments")
+
+# The dropdown offers EXACTLY what the code accepts. Unraid builds the popup
+# from `Default="a|b"`, so this is the one place the two lists could drift —
+# and a mode offered in the form that the code falls back out of would look
+# like the service ignoring you.
+_MODE_FIELD = re.search(r'<Config[^>]*Target="HTTP_MODE"[^>]*Default="([^"]*)"', TEMPLATE)
+ok(_MODE_FIELD is not None, "the template declares HTTP_MODE")
+if _MODE_FIELD:
+    ok(tuple(_MODE_FIELD.group(1).split("|")) == _HTTP_MODES,
+       "and its dropdown offers exactly the values the code accepts",
+       _MODE_FIELD.group(1))
+_MODE_VALUE = re.search(r'<Config[^>]*Target="HTTP_MODE"[^>]*>([^<]*)</Config>', TEMPLATE)
+ok(_MODE_VALUE is not None and _MODE_VALUE.group(1) == "stateless",
+   "and the template SHIPS stateless, while the code defaults to stateful: "
+   "one is for whoever installs today, the other protects whoever installed "
+   "yesterday",
+   _MODE_VALUE.group(1) if _MODE_VALUE else "absent")
+
+# MEASURED, on the three secrets this surface actually carries. The static
+# checks above pin that the cure is armed, once, in the right place — none of
+# them can say that it WORKS, and the payload here is not a document body like
+# the twin's: it is the admin code, the one-time code and a consumer's secret,
+# which travel as arguments on the calls that change things. So the filter is
+# run against a record shaped like the one fastmcp emits when it rejects a
+# malformed call, and the values are looked for in what comes out.
+try:
+    import logging as _logging
+
+    from mcp_common_engine.logs import _redacted as _redact_values   # noqa: WPS436
+
+    # The shape pydantic hands fastmcp when it rejects a call: a list of error
+    # entries, and the caller's arguments under `input`. Written out here
+    # rather than mocked, because the whole cure is keyed to that one field
+    # name — a probe with a shape of its own would prove something else.
+    _PAYLOAD = {"project": "PROJECTCODE1234", "key": "ADMINCODE-TOPSECRET",
+                "auth_code": "ONETIME-987654", "consumer_key": "CONSUMER-SECRET"}
+    _out = repr(_redact_values(([{"type": "missing", "loc": ("reason",),
+                                  "msg": "Field required",
+                                  "input": _PAYLOAD}],)))
+    _leaked = sorted(v for v in _PAYLOAD.values() if v in _out)
+    ok(not _leaked, "and it redacts the whole payload: not one of the project "
+       "code, the admin code, the one-time code or a consumer's secret survives "
+       "into the line", _leaked)
+    ok("<redacted>" in _out, "and what is printed says it was redacted", _out[:60])
+except ImportError as _e:                                            # noqa: PERF203
+    ok(False, "the engine's redaction can be measured here", str(_e))
 
 print("\n== the helpers come from the engine, once ==")
 

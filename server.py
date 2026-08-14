@@ -163,6 +163,57 @@ PORT = int(env("PORT", "3001"))
 # once, here, because the startup line prints it and 0.0.0.0 is the one field
 # on that line where being wrong matters.
 BIND_HOST = os.environ.get("BIND_HOST", "127.0.0.1")
+
+# The two ways this server can speak HTTP, and the list is closed here and in
+# the template's dropdown for the same reason LOG_LEVEL's is: a container built
+# by hand has no template.
+#
+# STATEFUL is the legacy shape — an `initialize` handshake, an `Mcp-Session-Id`
+# on every following request, and a GET stream on /mcp. STATELESS drops all
+# three: each request is served on its own, and /mcp keeps only POST and
+# DELETE. It does NOT stop a connection from dying — if the cause is a rekey
+# underneath, the request in flight dies either way — and nobody has proved
+# that it cures anything. What it removes is the SHARED STATE: a dropped call
+# costs one call instead of a session to resynchronise, and the retry is clean.
+# For a server that never speaks first — no notifications, no sampling, no
+# subscriptions — the session buys nothing and can only break.
+HTTP_MODES = ("stateful", "stateless")
+
+
+def http_mode_from_env() -> tuple[str, str]:
+    """The mode, and what had to be rejected to get there.
+
+    Default `stateful` in the CODE, which is the behaviour of every version
+    before this one: Unraid does not propagate a new variable to containers
+    already installed, so a default that differed from yesterday would change
+    the behaviour of somebody who touched nothing. The TEMPLATE ships
+    `stateless` instead, and the two are not in contradiction — the template is
+    what whoever installs today chooses, the code's default is what protects
+    whoever installed yesterday.
+
+    An unrecognised value FALLS BACK and says so, exactly like LOG_LEVEL:
+    refusing to boot over a typo in a knob that has a working answer would be a
+    service down for a spelling mistake. Empty means unset means the default,
+    and that is not a wrong value and is not reported."""
+    raw = (os.environ.get("HTTP_MODE") or "").strip().lower()
+    if not raw:
+        return HTTP_MODES[0], ""
+    if raw not in HTTP_MODES:
+        return HTTP_MODES[0], raw
+    return raw, ""
+
+
+# Resolved ONCE, here, and passed EXPLICITLY to http_app below. Explicit
+# because fastmcp resolves its own `FASTMCP_STATELESS_HTTP` when the argument
+# is None: left implicit, that variable could put the service in a mode the
+# startup line does not name, and the startup line is the only place anybody
+# reads what is actually running.
+HTTP_MODE, _HTTP_REJECTED = http_mode_from_env()
+if _HTTP_REJECTED:
+    # At WARNING, so it survives the level it is reporting on — same as the
+    # LOG_LEVEL fallback two blocks up.
+    log.warning("HTTP_MODE=%r is not %s — using %s", _HTTP_REJECTED,
+                " or ".join(HTTP_MODES), HTTP_MODES[0])
 # Resolved in web.port_from_env for the same reason as the IP filter and the
 # log level: one expression, so the service and the preflight cannot disagree.
 WEB_PORT = web.port_from_env()
@@ -765,7 +816,8 @@ async def _serve() -> None:
                               access_log=False, lifespan="on")
 
     servers = (
-        uvicorn.Server(cfg(mcp.http_app(), BIND_HOST, PORT)),
+        uvicorn.Server(cfg(mcp.http_app(stateless_http=HTTP_MODE == "stateless"),
+                           BIND_HOST, PORT)),
         uvicorn.Server(cfg(web.build(registry=registry, log=log,
                                      master=WEB_UI_PASSWORD, refusal=RulesError,
                                      fault=RulesFault,
@@ -780,10 +832,14 @@ if __name__ == "__main__":
     # on it is READ and not spelled out a second time — the host, because
     # 0.0.0.0 exposes the service to the LAN and a line that kept saying
     # 127.0.0.1 would be lying about exactly that, and the UI's port, because
-    # it is what a person needs in order to reach the page at all.
-    log.info("codifier-mcp %s — engine %s — starting on %s:%s — base_url %s — allowed user: %s "
+    # it is what a person needs in order to reach the page at all. The HTTP
+    # mode is on it for the same reason and one more: it is the one field a
+    # variable of fastmcp's own could have changed behind our back, so a line
+    # that named a mode without reading it would be the wrong kind of quiet.
+    log.info("codifier-mcp %s — engine %s — starting on %s:%s (http %s) — base_url %s "
+             "— allowed user: %s "
              "— IP filter: %s — token store: %s — db: %s (process uid %s) — web UI: http://%s:%s",
-             VERSION, ENGINE_VERSION, BIND_HOST, PORT, BASE_URL, ALLOWED_LOGIN,
+             VERSION, ENGINE_VERSION, BIND_HOST, PORT, HTTP_MODE, BASE_URL, ALLOWED_LOGIN,
              describe_cidrs(ALLOWED_CIDRS),
              os.environ.get("FASTMCP_HOME", "(default — NOT persistent!)"),
              DB_DIR, os.geteuid(), WEB_BIND_HOST, WEB_PORT)
