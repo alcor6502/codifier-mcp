@@ -3986,6 +3986,12 @@ class Project:
         unreached = []
         for c in self.cx.execute("SELECT consumer_id, name, kind FROM consumer "
                                  "WHERE retired_at IS NULL ORDER BY name"):
+            # A HUMAN IS A DESTINATION, NOT A SUBJECT, and this line is the
+            # whole of it. They receive tasks; no rule binds them through the
+            # registry, because a rule that binds a person says so in its body.
+            # Without this they would ALL sit in this list, permanently, for
+            # doing exactly what they are for — and a report with a permanent
+            # resident is a report people stop reading.
             if c["kind"] == "human":
                 continue
             if not self._reaching(c["consumer_id"]):

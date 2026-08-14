@@ -70,7 +70,10 @@ the admin code only — a task closed wrong reopens as a new task.
   pointer that is born broken, this catches the one that GOES broken when its
   target is later retired. Closed tasks are left out on purpose — `tasks_amend`
   answers `closed is closed`, so a finding there could never be cleared.
-  It reports; it does not correct. It is
+  `consumers_no_rule_reaches` leaves out the `human` ones: a human is a
+  destination and not a subject — they receive tasks, and no rule binds them
+  through the registry — so listing them would mean listing every one of them
+  for ever. It reports; it does not correct. It is
   also the ONE place the RETIRED are readable — domains, consumers and groups
   under `retired`, with date and reason. `project_info` lists the live alone,
   and a retired name is still a name TAKEN: a `create` on it is refused, so

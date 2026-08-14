@@ -998,6 +998,23 @@ equals("a domain nothing was ever filed under is reported",
        (rep or {})["domains_with_no_rules"], ["ST"])
 equals("and a consumer no rule reaches", (rep or {})["consumers_no_rule_reaches"],
        ["news"])
+# A HUMAN IS A DESTINATION, NOT A SUBJECT — and this was true before it was
+# said out loud: the assertion above proved it and named nothing, so a refactor
+# that dropped the exclusion would have failed a case about something else.
+# `Alfredo` and `news` are in exactly the same position — alive, and reached by
+# no rule in force — and only one of them is reported. That contrast IS the
+# rule, and it goes red the moment the exclusion goes.
+equals("a human reached by no rule is NOT reported: they receive tasks, "
+       "and no rule binds them through the registry",
+       [c for c in (rep or {})["consumers_no_rule_reaches"] if c == "Alfredo"], [])
+yields("and they are alive and unreached all the same, which is what makes the "
+       "silence a decision instead of an absence",
+       lambda: (p.cx.execute("SELECT kind FROM consumer WHERE name='Alfredo' "
+                             "AND retired_at IS NULL").fetchone()[0],
+                bool(p._reaching(p.cx.execute(
+                    "SELECT consumer_id FROM consumer WHERE name='Alfredo'"
+                ).fetchone()[0]))),
+       ("human", False))
 p.cx.execute("INSERT INTO rule_audience_group (rule_id, group_id) VALUES (3,1)")
 yields("an audience row next to a universal rule is reported before it bites",
        lambda: p.status()["stray_audience_rows"][0]["rule"], "VA-0003")

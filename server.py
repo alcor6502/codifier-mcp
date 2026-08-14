@@ -746,6 +746,18 @@ def project_status(project: str, key: str) -> dict:
     after the fact — an exception a group has since swallowed, a domain or a
     consumer nothing reaches any more.
 
+    `dangling_citations` reads the prose of every rule and the title and body of
+    every OPEN task. Closed tasks are out of it on purpose: `tasks_amend`
+    answers `closed is closed`, so a finding on one is a line nobody could ever
+    clear.
+
+    `consumers_no_rule_reaches` leaves out the consumers of kind `human`, and
+    that is deliberate rather than a side effect. A human is a DESTINATION and
+    not a subject: they receive tasks, no rule binds them through the registry —
+    a rule that binds a person says so in its body — so every human alive would
+    sit in that list for ever, and a list with a permanent resident is a list
+    people stop reading.
+
     It is also the ONE place the RETIRED are readable — domains, consumers and
     groups, with the date and the reason. `project_info` shows the live alone,
     and a retired name is still a name TAKEN: a create on it is refused, so
