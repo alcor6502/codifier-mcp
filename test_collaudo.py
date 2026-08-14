@@ -345,13 +345,15 @@ refused("retiring without a reason", lambda: p.amend_project(
 refused("a group with no members", lambda: p.amend_project(
     "group", "vuoti", "create", {"members": []}), "at least one consumer")
 refused("a group emptied instead of retired", lambda: p.amend_project(
-    "group", "automatismi", "amend", {"members": []}), "retire it")
+    "group", "automatismi", "amend", {"members": []},
+    auth_code=code(p)), "retire it")
 refused("reviving something that is not retired", lambda: p.amend_project(
-    "consumer", "advisory", "revive", {}), "nothing to revive")
+    "consumer", "advisory", "revive", {}, auth_code=code(p)), "nothing to revive")
 refused("the project created from a tool", lambda: p.amend_project(
     "project", "", "create", {}), "catastrophic has no tool")
 refused("a negative queue cap", lambda: p.amend_project(
-    "project", "", "amend", {"queue_cap": -1}), "none of the three")
+    "project", "", "amend", {"queue_cap": -1},
+    auth_code=code(p)), "none of the three")
 
 # A NAME IS ONE WORD, and the space is the mistake worth naming: it is the
 # character the eye does not find. Both entities, because a group is quoted the
@@ -365,7 +367,8 @@ refused("and the refusal names the space, not just the pattern",
 refused("a GROUP name with a space in it", lambda: p.amend_project(
     "group", "i deliberativi", "create", {"members": ["architect"]}), "ONE WORD")
 refused("and a rename cannot smuggle one back in", lambda: p.amend_project(
-    "consumer", "advisory", "amend", {"name": "fidelity advisory"}), "ONE WORD")
+    "consumer", "advisory", "amend", {"name": "fidelity advisory"},
+    auth_code=code(p)), "ONE WORD")
 allowed("a dash is not a space", lambda: p.amend_project(
     "consumer", "fidelity-advisory", "create", {"kind": "chat"}, actor="architect"))
 allowed("and neither is an underscore", lambda: p.amend_project(
@@ -632,10 +635,11 @@ universal = rule(p, title="binds everyone")
 targeted = rule(p, "targeted", groups=["deliberativi"], title="binds the deliberative")
 v = p.get_rules([universal], history=True)["rules"][0]["history"][-1]["version"]
 refused("a narrowing with no reason", lambda: p.amend_rule(
-    universal, "targeted", ["deliberativi"], [], v, "", "architect"), "reason is required")
+    universal, "targeted", ["deliberativi"], [], v, "", "architect",
+    auth_code=code(p)), "reason is required")
 refused("writing against a version that moved", lambda: p.amend_rule(
-    universal, "targeted", ["deliberativi"], [], 99, "why", "architect"),
-    "somebody changed it after you read it")
+    universal, "targeted", ["deliberativi"], [], 99, "why", "architect",
+    auth_code=code(p)), "somebody changed it after you read it")
 narrowed = allowed("a UNIVERSAL rule narrowed onto a group — the gesture the DDL blocked",
                    lambda: p.amend_rule(universal, "targeted", ["deliberativi"], [],
                                         v, "only the deliberative desks now", "architect",
@@ -650,12 +654,13 @@ def ver(rid):
 
 refused("widening by one consumer", lambda: p.amend_rule(
     targeted, "targeted", ["deliberativi"], ["news"], ver(targeted), "one more",
-    "architect"), "it would newly bind news")
+    "architect", auth_code=code(p)), "it would newly bind news")
 refused("widening all the way back to everyone", lambda: p.amend_rule(
-    targeted, "all", [], [], ver(targeted), "everyone now", "architect"),
-    "not a narrowing")
+    targeted, "all", [], [], ver(targeted), "everyone now", "architect",
+    auth_code=code(p)), "not a narrowing")
 refused("and the refusal carries the cure", lambda: p.amend_rule(
-    targeted, "all", [], [], ver(targeted), "everyone now", "architect"), "supersede")
+    targeted, "all", [], [], ver(targeted), "everyone now", "architect",
+    auth_code=code(p)), "supersede")
 p.amend_project("group", "deliberativi", "amend", {"members": ["architect"]},
                 actor="architect", auth_code=code(p))
 # A group whose members have all ENDED: the new perimeter is a subset of the
@@ -665,16 +670,19 @@ p.amend_project("group", "soli", "create", {"members": ["news"]}, actor="archite
 p.amend_project("consumer", "news", "retire", {}, reason="the skill was withdrawn",
                 actor="architect", auth_code=code(p))
 refused("a narrowing that leaves NOBODY is a retirement in disguise",
-        lambda: p.amend_rule(targeted, "targeted", ["soli"], [], ver(targeted), "why", "architect"),
+        lambda: p.amend_rule(targeted, "targeted", ["soli"], [], ver(targeted), "why",
+                             "architect", auth_code=code(p)),
         "retirement in disguise")
 refused("and it points at the door that gesture really goes through",
-        lambda: p.amend_rule(targeted, "targeted", ["soli"], [], ver(targeted), "why", "architect"),
+        lambda: p.amend_rule(targeted, "targeted", ["soli"], [], ver(targeted), "why",
+                             "architect", auth_code=code(p)),
         "rules_retire")
 refused("the content is not touched from here", lambda: p.amend_project(
     "rule", "x", "amend", {}), "entity 'rule'")
 refused("a rule that is not in force has no perimeter to narrow", lambda: (
     p.propose("VA", "R", "still queued", "b", "why", "all", "architect"),
-    p.amend_rule("VA-0003", "targeted", ["automatismi"], [], 1, "why", "architect")),
+    p.amend_rule("VA-0003", "targeted", ["automatismi"], [], 1, "why", "architect",
+                 auth_code=code(p))),
     "not in force")
 
 # =====================================================================
@@ -683,19 +691,23 @@ p = project()
 only_news = rule(p, "targeted", exceptions=["news"], title="the news rule")
 refused("retiring the last consumer a rule in force reaches",
         lambda: p.amend_project("consumer", "news", "retire", {}, reason="finished",
-                                actor="architect"), "the news rule")
+                                actor="architect", auth_code=code(p)),
+        "the news rule")
 refused("and it says what to do about it",
         lambda: p.amend_project("consumer", "news", "retire", {}, reason="finished",
-                                actor="architect"), "binding nobody")
+                                actor="architect", auth_code=code(p)),
+        "binding nobody")
 p2 = project()
 grp = rule(p2, "targeted", groups=["automatismi"], title="the automatic rule")
 refused("pulling out of a group the only people a rule in force reaches",
         lambda: p2.amend_project("group", "automatismi", "amend",
-                                 {"members": ["architect"]}, actor="architect"),
+                                 {"members": ["architect"]}, actor="architect",
+                                 auth_code=code(p2)),
         "the automatic rule")
 refused("retiring that group outright, same guard",
         lambda: p2.amend_project("group", "automatismi", "retire", {},
-                                 reason="done", actor="architect"),
+                                 reason="done", actor="architect",
+                                 auth_code=code(p2)),
         "the automatic rule")
 allowed("taking ONE member out, when the rule still reaches somebody",
         lambda: p2.amend_project("group", "automatismi", "amend",
@@ -720,20 +732,66 @@ refused("a group CREATED to mirror a rule's exceptions",
 print("\n— RETIRING A RULE —")
 p = project()
 rid = rule(p, title="on the way out")
-refused("retiring without a reason", lambda: p.retire(rid, ""), "price of a retirement")
-refused("retiring something that was never defined", lambda: p.retire("VA-0099", "why"),
-        "never defined")
+refused("retiring without a reason", lambda: p.retire(rid, "", auth_code=code(p)),
+        "price of a retirement")
+refused("retiring something that was never defined",
+        lambda: p.retire("VA-0099", "why", auth_code=code(p)), "never defined")
 allowed("a rule in force ends", lambda: p.retire(rid, "the reason it stopped applying",
                                                  "architect", auth_code=code(p)))
-refused("and it does not end twice", lambda: p.retire(rid, "again"), "already retired")
+refused("and it does not end twice", lambda: p.retire(rid, "again", auth_code=code(p)),
+        "already retired")
 p = project()
 rule(p, title="in force")
 refused("retiring a domain that still has rules in force",
         lambda: p.amend_project("domain", "VA", "retire", {}, reason="done",
-                                actor="architect"), "in force")
+                                actor="architect", auth_code=code(p)), "in force")
 refused("and the refusal names them",
         lambda: p.amend_project("domain", "VA", "retire", {}, reason="done",
-                                actor="architect"), "in force")
+                                actor="architect", auth_code=code(p)), "in force")
+# =====================================================================
+print("\n— THE CREDENTIALS ARE ASKED FIRST, AND THE STATE SAYS NOTHING —")
+# Observed on the live service: with the admin code and an INVENTED one-time
+# code, retiring a rule that does not exist replied `PE-9999: never defined in
+# this project`. The state came out of a door whose second lock was never
+# opened. It was argued that this was harmless — whoever holds the admin code
+# reads the whole corpus anyway — and that argument is true and beside the
+# point: it makes the ordering something to be re-decided at every door, and
+# the doors then disagree. The house rule holds instead: every parameter is
+# validated, the credentials first, and the refusal says nothing about what was
+# being reached for.
+p = project()
+alive = rule(p, title="a rule that does exist")
+_absent = _refusal(lambda: p.retire("VA-0099", "why", "architect", auth_code="000000"))
+_present = _refusal(lambda: p.retire(alive, "why", "architect", auth_code="000000"))
+equals("an invented one-time code refuses the same way whether the rule exists "
+       "or not — the refusal is BYTE FOR BYTE the same", _absent, _present)
+yields("and it names the credential", lambda: "auth_code" in _absent, True)
+yields("while saying nothing about the rule: not the ID, not 'never defined', "
+       "not 'already retired'",
+       lambda: not any(w in _absent for w in ("VA-0099", "never defined",
+                                              "already retired", alive)), True)
+
+# ⚠ VERIFYING IS NOT BURNING, and this is the case that guards the cure against
+# itself. The early check only READS; the code is spent inside the transaction
+# of the gesture that succeeded. Move the burn up with the check and a typo
+# further down eats the code and sends the caller back to the maintenance page
+# — which is the exact defect the late burn was designed to prevent, and it
+# would arrive disguised as a security improvement.
+live_code = code(p)
+refused("a gesture that fails AFTER the code was verified",
+        lambda: p.retire(alive, "", "architect", auth_code=live_code),
+        "price of a retirement")
+yields("and the code is still live: verified early, spent late",
+       lambda: p.auth_codes()["count_live"], 1)
+allowed("so the SAME code still works on the second attempt",
+        lambda: p.retire(alive, "the reason it stopped applying", "architect",
+                         auth_code=live_code))
+yields("and only now is it spent", lambda: p.auth_codes()["count_live"], 0)
+yields("by the gesture that succeeded, which is what the log says",
+       lambda: p.auth_codes()["spent"][0]["spent_action"], "rule.retire")
+
+p = project()
+rule(p, title="in force")
 allowed("a domain with nothing under it retires",
         lambda: p.amend_project("domain", "ST", "retire", {}, reason="never used",
                                 actor="architect", auth_code=code(p)))

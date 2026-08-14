@@ -1623,22 +1623,17 @@ def check_admin(registry: Registry, project: str, key: str) -> Project:
     return prj
 
 
-def check_auth_code(prj: Project, auth_code: str, action: str) -> int:
-    """The second factor, SPENT — and it must be called inside the gesture's
-    own transaction.
+def _auth_row(prj: Project, auth_code: str):
+    """The second factor VERIFIED and not spent: present, this project's, not
+    already burned, not expired. Raises with the reason, returns the row.
 
-    That is the whole of "burned in the same transaction as the SUCCEEDED
-    gesture": the burn is written first and rolls back with everything else if
-    the gesture is refused, so a typo further down the call does not cost a
-    trip to the page. A code still inside its minutes and already spent is
-    refused too — expiry alone would leave a spent code working, and the
-    database says so as well (trg_auth_code_spent_once), because a guarantee
-    that lives only in the function that checks it is a habit.
-
-    The refusals say which of the four it was, on purpose: whoever gets here
-    already holds the admin code, so there is nothing left to reveal, and the
-    difference between "expired" and "already spent" is the difference between
-    minting another and going to look for what spent it."""
+    It is a function of its own because VERIFYING AND SPENDING HAPPEN AT
+    DIFFERENT MOMENTS, and that is the whole of the design: the check runs
+    EARLY, before anything is said about what the caller was reaching for, and
+    the burn runs LATE, inside the transaction of a gesture that succeeded. Put
+    them back together at either end and one of the two guarantees goes — burn
+    early and a typo further down costs a trip to the page, check late and the
+    refusal has already answered a question about the state."""
     given = (auth_code or "").strip()
     if not given:
         raise RulesError(ERR_AUTH_CODE)
@@ -1661,6 +1656,30 @@ def check_auth_code(prj: Project, auth_code: str, action: str) -> int:
             f"that auth_code expired on {row['expires_at']}. They live minutes on "
             "purpose — mint another, and mint it for the gesture you are about to "
             "make rather than in advance.")
+    return row
+
+
+def check_auth_code(prj: Project, auth_code: str, action: str) -> int:
+    """The second factor, SPENT — and it must be called inside the gesture's
+    own transaction.
+
+    That is the whole of "burned in the same transaction as the SUCCEEDED
+    gesture": the burn is written first and rolls back with everything else if
+    the gesture is refused, so a typo further down the call does not cost a
+    trip to the page. A code still inside its minutes and already spent is
+    refused too — expiry alone would leave a spent code working, and the
+    database says so as well (trg_auth_code_spent_once), because a guarantee
+    that lives only in the function that checks it is a habit.
+
+    The refusals say which of the four it was, on purpose: whoever gets here
+    already holds the admin code, so there is nothing left to reveal, and the
+    difference between "expired" and "already spent" is the difference between
+    minting another and going to look for what spent it.
+
+    It re-runs the verification rather than trusting the early one: the two are
+    minutes apart in the worst case, and a code that expired in between must
+    not be burned by a gesture that no longer had it."""
+    row = _auth_row(prj, auth_code)
     prj.cx.execute("UPDATE auth_code SET spent_at=?, spent_action=? WHERE code_id=?",
                    (_now(), action, row["code_id"]))
     return row["code_id"]
@@ -1835,6 +1854,34 @@ class Project:
             self.cx.execute("ROLLBACK")
             raise
         self.cx.execute("COMMIT")
+
+    def _verify_auth(self, auth_code: str, entity: str, action: str,
+                     fields=None) -> None:
+        """THE SECOND FACTOR, CHECKED BEFORE ANYTHING IS SAID ABOUT THE STATE.
+
+        Call it as the first statement of a gesture that needs one, before the
+        row is looked up. Without it the order was the other way round and the
+        service answered a question nobody was entitled to ask: with the admin
+        code and an INVENTED one-time code, `rules_retire` on a rule that does
+        not exist replied `PE-9999: never defined in this project`. The state
+        came out through a door whose second lock had not been opened.
+
+        The house rule is the ordinary one — validate every parameter, the
+        credentials first, and refuse without saying anything about what was
+        being reached for. It was argued once that this case was harmless
+        because whoever holds the admin code can read the whole corpus anyway.
+        That is true and it is not the point: it makes the ordering an argument
+        to be re-made at every door, and the doors then disagree. The second
+        factor does not defend against a stolen admin code, it defends against
+        a distracted admin — and it can only do that if it is asked first.
+
+        ⚠ VERIFYING IS NOT BURNING. This only reads; the code is spent inside
+        `_gesture`, in the transaction of the gesture that succeeded. Moving
+        the burn up here would mean a refusal further down eats the code and
+        sends the caller back to the page for a typo, which is exactly what the
+        late burn was designed to prevent."""
+        if self.port_for(entity, action, fields) == "auth":
+            _auth_row(self, auth_code)
 
     @contextlib.contextmanager
     def _gesture(self, auth_code: str, action: str, needs_auth: bool):
@@ -3098,6 +3145,7 @@ class Project:
         goes through the page: propose a supersede with the wider audience. The
         CONTENT is not touched from here either — a rule that must SAY
         something else is a new decision."""
+        self._verify_auth(auth_code, "rule", "amend")
         row = self._rule_row(rid)
         if row is None:
             raise RulesError(f"{rid}: never defined in this project.")
@@ -3159,6 +3207,7 @@ class Project:
         """End a rule without an heir. With an heir the road is the supersede,
         which retires the victim inside the same decision — this is for the rule
         that simply stops applying."""
+        self._verify_auth(auth_code, "rule", "retire")
         row = self._rule_row(rid)
         if row is None:
             raise RulesError(f"{rid}: never defined in this project.")
@@ -3368,6 +3417,17 @@ class Project:
     ENTITIES = ("project", "domain", "consumer", "group")
     ACTIONS = ("create", "amend", "retire", "revive")
 
+    # THE COMBINATIONS THAT HAVE NO TOOL, declared here rather than discovered
+    # inside a handler. It is the SHAPE of the call and not the state of the
+    # project, which is what decides where it is refused: before the
+    # credentials, with the entity and the action, because sending somebody to
+    # the maintenance page to mint a one-time code for a gesture that does not
+    # exist is a trip that ends in the same refusal.
+    NO_TOOL = {("project", "create"), ("project", "retire"), ("project", "revive")}
+    NO_TOOL_WHY = ("the project is not created, retired or revived from here: it is a "
+                   "line in projects.txt and a folder on disk, and both are Unraid's. "
+                   "What is catastrophic has no tool.")
+
     # The fields each entity accepts, per action. Written once and read by both
     # the door and the ladder below: a field the door accepts and the ladder
     # has never heard of would be a field with no gate.
@@ -3466,6 +3526,8 @@ class Project:
                              "Rules and tasks have their own tools.")
         if action not in self.ACTIONS:
             raise RulesError(f"action {action!r}: one of {', '.join(self.ACTIONS)}.")
+        if (entity, action) in self.NO_TOOL:
+            raise RulesError(self.NO_TOOL_WHY)
         # The order of these two matters: on a retirement EVERY field is
         # unknown, and "not a field" would send the caller looking for the
         # right spelling of something that has no business being there.
@@ -3490,6 +3552,18 @@ class Project:
         # one-time code has to burn. `create` needs none — a created thing is
         # attached to nothing — and `specs` alone needs neither.
         needs_auth = self.port_for(entity, action, fields) == "auth"
+        # AND THE SECOND FACTOR IS CHECKED HERE, before the handler is reached,
+        # because the handlers are where the state lives: `_amend_consumer`
+        # answers "this project has no consumer by that name" and would answer
+        # it to somebody whose one-time code was never valid.
+        #
+        # It cannot be literally the first line, and that is not a compromise:
+        # `port_for` needs `fields` to know whether a code is wanted at all, so
+        # the field names have to be validated before the question can be
+        # asked. What comes before this point says nothing about the state of
+        # the project — only about the shape of the call.
+        if needs_auth:
+            _auth_row(self, auth_code)
         code, verb = auth_code, f"{entity}.{action}"
 
         def gesture():
@@ -3502,11 +3576,12 @@ class Project:
 
     def _amend_project(self, name, action, fields, reason, actor,
                      gesture) -> dict:
+        # The impossible combinations are refused by `amend_project`, from
+        # NO_TOOL, before the credentials are asked for. This is the last line
+        # and it says the same thing from the same constant: a message written
+        # twice is a message that goes out of step once.
         if action != "amend":
-            raise RulesError(
-                "the project is not created, retired or revived from here: it is a line "
-                "in projects.txt and a folder on disk, and both are Unraid's. What is "
-                "catastrophic has no tool.")
+            raise RulesError(self.NO_TOOL_WHY)
         row = self._profile_row()
         brief = fields.get("brief", row["brief"] if row else None)
         specs = fields.get("specs", row["specs"] if row else None)

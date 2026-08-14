@@ -17,6 +17,14 @@ alone it elevates nobody. Chained gestures mint one code per gesture, one at a
 time. The one declared exception: closing or amending someone else's task takes
 the admin code only — a task closed wrong reopens as a new task.
 
+**The credentials are checked first, and a refusal on them tells you nothing
+else.** If the `auth_code` is missing, invented, spent or expired, that is what
+comes back — not whether the rule you named exists, not what state it is in.
+So a refusal naming the `auth_code` is never evidence about the target: mint a
+live one and ask again. The code is **verified** early and **spent** late, in
+the transaction of the gesture that succeeded, which is why a call refused
+further down for a typo does not cost you a trip back to the page.
+
     project_amend(project, entity, name, action, fields={}, reason='',
                   auth_code='', key='')
     rules_amend(project, id, reach, groups, exceptions, expected_version,
