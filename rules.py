@@ -1308,6 +1308,16 @@ def _registry_lines(text: str, where: str) -> list[tuple]:
     """Parse the registry. Every refusal names the LINE, and the line number
     is the one an editor shows — comments and blanks counted in.
 
+    NO REFUSAL HERE EVER ECHOES THE CONTENT OF THE LINE IT IS ABOUT. Two of
+    the three fields are the project's codes, in clear, and a diagnostic
+    message travels: it goes to stdout at boot, into the container log, and
+    from there into whatever gets pasted somewhere else when help is asked
+    for. The line number is what the person needs — they have the file open —
+    and once the field count is right the name is quotable, because then it is
+    the name. The count itself is diagnosed by SHAPE: a lost separator shows
+    up as a first field far too long, which is exactly what somebody staring
+    at the line cannot see.
+
     Nothing here is repaired quietly. A registry read half-right is worse than
     one that will not read at all, because the half that got through looks
     like the whole."""
@@ -1320,11 +1330,17 @@ def _registry_lines(text: str, where: str) -> list[tuple]:
             continue
         parts = [p.strip() for p in line.split("|")]
         if len(parts) != REGISTRY_FIELDS:
+            # The shape, never the content: the codes are on this line and the
+            # count is what is wrong with it, so the lengths carry the whole
+            # diagnosis — a separator lost between the name and the reference
+            # code shows up as one field of sixty characters where two were
+            # meant.
+            shape = " | ".join(f"[{len(p)} chars]" for p in parts)
             raise RulesFault(
                 f"{where} line {n}: {len(parts)} field(s) where {REGISTRY_FIELDS} are "
                 f"expected. A project line is `name | reference code | admin code` "
                 f"and nothing else is served — comment it out with # while you fix "
-                f"it: {line!r}")
+                f"it. That line, by shape: {shape}")
         name, ref, adm = parts
         if not RE_PROJECT_NAME.match(name):
             raise RulesFault(

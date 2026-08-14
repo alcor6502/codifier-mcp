@@ -91,6 +91,31 @@ def refused(name, gesture, expect):
             print(f"  FAIL  {name}: refusal does not name it — {msg[:70]}")
 
 
+def hides(name, gesture, secrets_):
+    """The gesture must be refused, and the refusal must NOT contain any of
+    `secrets_`. The other half of `refused`: that one pins what a message has
+    to say, this one pins what it must not — and a message is the one place a
+    secret leaves the process without anybody deciding that it should."""
+    global _passed
+    try:
+        gesture()
+        _failed.append(f"{name}: NOT REFUSED — the router let it through")
+        print(f"  FAIL  {name}: not refused")
+        return
+    except Exception as exc:                       # noqa: BLE001 — any refusal
+        msg = str(exc)
+    leaked = [s for s in secrets_ if s and s in msg]
+    if leaked:
+        # The leaked value is NOT printed here either: this file's output is
+        # read in a terminal and pasted into chats like any other log.
+        _failed.append(f"{name}: the refusal carries {len(leaked)} secret(s) it "
+                       f"was handed")
+        print(f"  FAIL  {name}: {len(leaked)} secret(s) in the refusal")
+    else:
+        _passed += 1
+        print(f"  ok    {name}")
+
+
 def equals(name, got, want):
     global _passed
     if got == want:
@@ -184,6 +209,39 @@ r = _root()
 _write(r, _line() + f"Palestra | {REF}x | {ADM}y | extra\n")
 refused("a line with four fields is refused, naming the line",
         lambda: rules.Registry(r), "line 2")
+
+# The refusal above is the ONE that used to quote the offending line whole —
+# and two of its three fields are the project's codes, in clear. The message
+# goes to stdout at boot, so it lands in the container's log and from there
+# into whatever gets pasted when help is asked for. A diagnostic message must
+# never carry the material it is describing when that material is a secret.
+#
+# The count is the thing that is wrong, so the SHAPE diagnoses it whole: a
+# separator lost between the name and the reference code shows up as one field
+# far too long. Both directions are checked here — the codes are gone AND the
+# lengths arrived — because a message stripped of everything would be a
+# refusal nobody can act on, which is the failure mode of curing this badly.
+r = _root()
+_write(r, f"Financial Portfolio {REF} | {ADM}\n")
+hides("a malformed line does not put the codes in the log",
+      lambda: rules.Registry(r), (REF, ADM))
+refused("and it says the line, the count and the SHAPE instead",
+        lambda: rules.Registry(r), "chars]")
+refused("so a lost separator is visible as one field far too long",
+        lambda: rules.Registry(r), f"[{len('Financial Portfolio ' + REF)} chars]")
+
+# The other three doors were already clean, and they stay checked: once the
+# count is right, `parts[0]` IS the name and quoting it is quoting a name.
+r = _root()
+_write(r, f"Financial Portfolio | {REF} | short\n")
+hides("a code that is not 8-32 characters is refused without printing any code",
+      lambda: rules.Registry(r), (REF,))
+r = _root()
+_write(r, _line() + f"Palestra | {REF} | {ADM}\n")
+hides("a code written twice is refused with the LINE NUMBER, not the code",
+      lambda: rules.Registry(r), (REF, ADM))
+refused("and that refusal points at the line the twin is on",
+        lambda: rules.Registry(r), "line 1")
 
 r = _root()
 _write(r, "  | %s | %s\n" % (REF, ADM))
