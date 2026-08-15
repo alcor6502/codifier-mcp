@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-5.0.1-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-5.0.2-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -979,6 +979,22 @@ on that person's row — a human is the only kind of consumer that may carry one
 and the schema refuses it on a chat or a skill. Proposals go to the project's
 **approver**, the one human marked for it on the profile page.
 
+**A message is a subject and a caption, and says everything once.** The subject
+is the whole headline — `TK-0003 — Aprimi su iPad`, or `Proposed Rule VA-0007 —
+<title>` — because that is the line an inbox list shows, and a reply, and a
+search. It is not printed again inside: under the icon there is the **project's
+name**, which is the one word that changes between messages and tells you which
+register just spoke, and under that two italic lines saying who sent it and
+where to read it. Nothing else, and no disclaimer. `TK-` already says *task*,
+which is why the word is not in a task's subject; `VA-` does not say *proposed*,
+which is why a proposal's spells it out. ⚠ The title is CUT at 70 characters
+there and carried nowhere else — this message is a knock on the door, and the
+register is where the work is read.
+
+The message sets **no background colour**, on purpose: Apple Mail in dark mode
+inverts a message that sets none, and a card painted white stays a white card
+with unreadable text on it.
+
 **People are looked after on the page, all of it.** A consumer of kind
 `human` is created, renamed, retired and revived there, their address is typed
 there, and the mark that says whose desk hears about the proposals is set there
@@ -1473,12 +1489,13 @@ all four are the FastMCP ones any self-hosted server of this shape will meet:
 | `rules.py` | the engine: the registry, the projects, the DDL and the version |
 | `server.py` | the MCP tools; parameters in the schema, prose in the manuals |
 | `web.py` | the administration page: sessions, the lot and its digest, the codes |
+| `mail.py` | the post: what a message looks like, the relay, the daily brake |
 | `preflight.py` | the blocking startup checks, and the IP-filter parser |
 | `reference-guide.md` · `reference-guide-admin.md` | the two manuals, cut into cards and served from the image |
 | `entrypoint.sh` | permissions, preflight, start |
 | `Dockerfile` · `requirements.txt` | the image, and the engine pinned to a tag |
 | `codifier-mcp.xml` | Unraid template, every field documented — it **is** the configuration |
-| `codifier-icon.png` | the icon, used in **two** places — see below |
+| `codifier-icon.png` · `codifier-icon-64.png` | the icon, in two sizes, used in **three** places — see below |
 | `test_*.py` | the five suites, no network needed |
 
 ### The icon, and where it is actually seen
@@ -1491,6 +1508,17 @@ copies of one string have an expiry date.
 Passing `icons` buys **the OAuth consent page** — the page seen when the
 connector is added or reconnected — where FastMCP renders it in place of its
 own logo.
+
+The third place is **the post**, and it is the reason there are two files.
+`mail.py` EMBEDS `codifier-icon-64.png` in every message rather than linking it:
+a `<img src="https://…">` weighs nothing and is blocked by default in most
+clients — Apple Mail's *Protect Mail Activity* among them — so the ordinary
+case would be a broken placeholder, which is worse than no logo at all. The 64px
+PNG-8 is about 2 KB against the 256's 24 KB, for a picture drawn at 16 pixels;
+it is the only icon inside the image, and it is in the `Dockerfile`'s `COPY`
+line for this reason and no other. The 256 stays in the repository and out of
+the image — the two places above serve it from a raw GitHub URL, and nothing in
+the container reads it.
 
 It does **not** buy the icon in Claude's connector list. That surface ignores
 `serverInfo.icons`, which the MCP spec has carried since revision `2025-11-25`

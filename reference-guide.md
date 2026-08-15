@@ -306,7 +306,8 @@ So when the cap cuts, it cuts the fresh work. Recently closed ones trail.
   that vanished on a timer is work nobody decided to drop. Since 5.0.0 rules
   answer the same way, for the same sentence.
 - **A task opened for a `human` who carries an address is EMAILED to them**,
-  since 5.0.0 — the ID, who sent it, and where to read it, never the text. A
+  since 5.0.0 — the ID and the title in the subject line, who sent it and where
+  to read it in the message, never the task's text. A
   human without an address is not written to, and neither is anybody if the
   container has no mail configured: there is no on/off switch, and both ways to
   be quiet are absences. The verdict carries `posted`, true or false, because a

@@ -163,12 +163,19 @@ class Mailer:
 
     # ---------- the one way out ----------
 
-    def _compose(self, project: str, subject: str, headline: str,
-                 lines) -> EmailMessage:
+    def _compose(self, project: str, subject: str, lines) -> EmailMessage:
         """ONE source for both halves. The plain text and the HTML are built
         from the SAME `lines`, so they cannot drift — which is the failure a
         multipart message invites: two versions of a sentence, and the one
         nobody reads goes stale first.
+
+        THE SUBJECT IS THE TITLE, and the title is not printed a second time
+        inside. `TK-0003 — Aprimi su iPad` used to be the line every inbox
+        shows AND the first line of the message, and the second one bought
+        nothing: nobody opens a message without having just read its subject.
+        Which is why there is no `headline` parameter any more — one title, in
+        one place, and a title that cannot disagree with itself is the strongest
+        form of the promise above.
 
         Layout deliberately sober, and with no background colour: Apple Mail in
         dark mode inverts a message that does not set one, and a card painted
@@ -187,11 +194,15 @@ class Mailer:
         #
         # 7-bit clean means the message no longer depends on what the server
         # says it can take.
-        msg.set_content(headline + "\n\n" + "\n\n".join(lines) + "\n",
-                        cte="quoted-printable")
+        msg.set_content("\n\n".join(lines) + "\n", cte="quoted-printable")
 
+        # THE BODY IS A CAPTION, not the news: the news is the subject. Smaller
+        # than the name above it and italic, so the eye reads the header as the
+        # message and these two lines as the note under it — which is what they
+        # are, since neither ever changes except for a name.
         paragraphs = "".join(
-            f'<p style="margin:0 0 .85rem">{_html.escape(t)}</p>' for t in lines)
+            f'<p style="margin:0 0 .7rem;font-size:.9rem;font-style:italic;'
+            f'color:#4b5563">{_html.escape(t)}</p>' for t in lines)
         body_html = (
             '<div style="font-family:-apple-system,BlinkMacSystemFont,'
             "'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.55;"
@@ -203,22 +214,24 @@ class Mailer:
             # — Palestra or Financial Portfolio, which is what tells you which
             # register just spoke.
             #
-            # 14px bold against a 32px icon: a LABEL, deliberately smaller than
-            # the headline below it. And if the image never loads, the line
-            # does not fall apart — the name is text and was always going to
-            # be there, which is why `alt` is empty rather than a word that
-            # would compete with it.
+            # AND IT IS THE BIGGEST THING IN THE MESSAGE, now that the title
+            # has gone up into the subject: the project name takes the size the
+            # title used to have, and the icon halves to 16px so it sits beside
+            # that line instead of towering over it. The picture is a mark, not
+            # a picture.
+            #
+            # If the image never loads the line does not fall apart — the name
+            # is text and was always going to be there, which is why `alt` is
+            # empty rather than a word that would compete with it.
             '<table role="presentation" cellpadding="0" cellspacing="0" '
-            'border="0" style="margin:0 0 1.5rem"><tr>'
-            f'<td style="padding-right:.55rem;vertical-align:middle">'
-            f'<img src="cid:{ICON_CID}" width="32" height="32" alt="" '
-            'style="display:block;border-radius:7px"></td>'
+            'border="0" style="margin:0 0 1rem"><tr>'
+            f'<td style="padding-right:.5rem;vertical-align:middle">'
+            f'<img src="cid:{ICON_CID}" width="16" height="16" alt="" '
+            'style="display:block;border-radius:4px"></td>'
             '<td style="vertical-align:middle">'
-            f'<div style="font-size:14px;font-weight:700;color:#111827;'
-            f'letter-spacing:.01em">{_html.escape(project)}</div>'
+            f'<div style="font-size:1.18rem;font-weight:600;color:#111827">'
+            f'{_html.escape(project)}</div>'
             '</td></tr></table>'
-            f'<p style="margin:0 0 1.1rem;font-size:1.18rem;font-weight:600;'
-            f'color:#111827">{_html.escape(headline)}</p>'
             f'{paragraphs}</div>')
         msg.add_alternative(body_html, subtype="html", cte="quoted-printable")
 
@@ -236,8 +249,7 @@ class Mailer:
                                  ICON, e)
         return msg
 
-    def send(self, project: str, to: str, subject: str, headline: str,
-             lines) -> bool:
+    def send(self, project: str, to: str, subject: str, lines) -> bool:
         """True if it went. NEVER raises: a notification that can make a write
         fail is worse than no notification, and every caller of this is a
         caller whose transaction has already committed.
@@ -267,7 +279,7 @@ class Mailer:
                 f"until tomorrow. The work itself is unaffected — tasks are opened "
                 f"and proposals are queued as usual — but you will not hear about "
                 f"them by mail. If this arrived out of nowhere, something is looping.")
-        msg = self._compose(project, subject, headline, lines)
+        msg = self._compose(project, subject, lines)
         msg["To"] = to
         try:
             self._deliver(msg)
@@ -342,10 +354,19 @@ def task_opened(mailer: Mailer, prj, tid: str, owner: str, sender: str,
     if row is None:
         return False
     mark = "URGENT · " if urgent else ""
-    # THE SUBJECT IS THE TASK ITSELF, short: it is what an inbox list shows, and
-    # "TK-0001 is on your desk" spent that line telling the reader the one thing
-    # they could work out from the sender. The ID and the project are in the
-    # message, where there is room for them.
+    # THE SUBJECT IS THE WHOLE HEADLINE: the ID and the task, in the line an
+    # inbox list shows. It said `TK-0001 is on your desk` once, which spent that
+    # line telling the reader the one thing they could work out from the sender;
+    # then it said `Task: <title>` and printed `TK-0001 — <title>` again at the
+    # top of the message. This is both of those, once.
+    #
+    # `TK-` is what says "task", and it says it in every list, every reply and
+    # every search — which is why the word itself is not there.
+    #
+    # ⚠ The title is CUT here and nowhere else carries it, since the body no
+    # longer repeats it. That is on purpose: this message is a knock on the
+    # door, and 70 characters of a title is a knock. The text is in the
+    # register, which is where the task is read.
     #
     # NO DISCLAIMER either. It explained that the address on the row is why the
     # message arrived — true, and known to the one person who can change it,
@@ -353,8 +374,7 @@ def task_opened(mailer: Mailer, prj, tid: str, owner: str, sender: str,
     # footer that teaches the eye to stop before the end.
     return mailer.send(
         prj.name, row["email"],
-        f"{mark}Task: {_short(title)}",
-        f"{tid} — {title}",
+        f"{mark}{tid} — {_short(title)}",
         [f"{sender} opened it for you in {prj.name}.",
          "Read it with tasks_get, or on the project's page."])
 
@@ -369,10 +389,13 @@ def proposal_queued(mailer: Mailer, prj, rid: str, title: str,
     who = prj.approver()
     if not who or not who["email"]:
         return False
+    # THE WORDS STAY HERE, and they are the difference from a task: `TK-` is a
+    # prefix that says what it is, `VA-` is not — an approved rule and a
+    # proposed one wear the same one. So the kind is spelled, and the headline
+    # is the whole of it.
     return mailer.send(
         prj.name, who["email"],
-        f"Proposed Rule: {_short(title)}",
-        f"{rid} — {title}",
+        f"Proposed Rule {rid} — {_short(title)}",
         [f"Proposed by {proposed_by} in {prj.name}.",
          "It binds nobody until you approve it on the project's lot page, where "
          "the whole queue is decided in one turn against its digest: what is not "
