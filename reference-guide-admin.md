@@ -252,5 +252,8 @@ stale. One factor.
   per-desk call can answer, because `tasks_list` is one desk at a time.
 - Ceilings are declared in the answer, so a truncated overview never looks like
   a quiet project.
-- Humans have desks here too, and this is where their post is actually read:
-  opening a task for a human notifies nobody.
+- Humans have desks here too, with their **address**: this is the one payload
+  that carries it, because it is behind the admin code and `project_info`
+  travels on the reference code. It is also what a digest would be composed
+  from — this container composes none, and posts one task at a time as it is
+  opened.

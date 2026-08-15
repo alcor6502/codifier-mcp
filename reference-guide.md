@@ -258,11 +258,19 @@ whether another chat did the work — read it back with `tasks_list(authored=Tru
 - **`idem_key`** is how a retried call does not become twins: same key, same
   desk, and you get the existing task back with `already_open: true` instead of
   a second one. Use it whenever you might be re-running.
-- ⚠ **Opening a task for a HUMAN does not notify them.** Humans call no tools.
-  The answer says so rather than leaving you to assume:
+- **Opening a task for a HUMAN emails them, if their row carries an address.**
+  They call no tool, so the register is not where they would find it. The
+  answer says which of the two happened rather than leaving you to assume:
 
-      alfredo is a human: this does NOT notify them. Their post is read from
-      the overview or from the web page.
+      alfredo is a human: they call no tool, and their post is read from the
+      overview or from the web page. There is an address on this row, so an
+      email goes out too — the `posted` field of this answer says whether it did.
+
+  ⚠ **`posted` is the field to read, not the note.** The note says what is on
+  the row; `posted` says whether the message left. It is `false` when the
+  container has no mail configured at all, and that is a legitimate state and
+  not a fault — an `idem_key` that absorbed a repeat also posts nothing,
+  because nothing happened.
 
 - Citations in `title` and `body`: the door is the one on `rules_propose`, with
   two differences, and both follow from a task being a message rather than law.

@@ -2978,6 +2978,29 @@ ok(_MAIL_ASKS == ["approver", "postbox"],
 # of the three they open first.
 _GONE_WITH_THE_EXPIRY = ("expiring", "provisional", "permanence", "renew the",
                          "promote the", "expires_at")
+# AND THE ONE THAT WENT WITH THE POST ARRIVING. Until 5.0.0 opening a task for
+# a human notified nobody, and three documents said so — one of them quoting
+# the engine's own note verbatim. The sentence became false the moment mail.py
+# landed, and nothing went red: the check on `project_status` looked at a
+# docstring, and this file had no case about a promise made in prose.
+#
+# Found by Alfredo asking where the address is set, which is the kind of hole a
+# suite is worst at: everything was consistent with itself and wrong about the
+# world.
+for _fname, _src4 in (("reference-guide.md", GUIDE_SRC),
+                      ("reference-guide-admin.md",
+                       MANUALS.get("reference-guide-admin.md") or ""),
+                      ("README.md",
+                       source_or_none(os.path.join(HERE, "README.md")) or ""),
+                      ("server.py", SERVER_SRC),
+                      ("rules.py", RULES_SRC)):
+    # THE CLAIM, not the words. "the proposals notify nobody" is true and is
+    # about something else, so the tokens are anchored on `them` — the human —
+    # and on the one phrase that can only ever be the stale promise.
+    _lie = [w for w in ("not notify them", "notifies nobody") if w in _src4]
+    ok(not _lie,
+       f"{_fname} does not claim a human goes unnotified: since 5.0.0 they are "
+       f"emailed when their row carries an address", _lie)
 for _fname, _src3 in (("reference-guide.md", GUIDE_SRC),
                       ("reference-guide-admin.md",
                        MANUALS.get("reference-guide-admin.md") or ""),

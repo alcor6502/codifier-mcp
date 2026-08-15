@@ -976,6 +976,15 @@ on that person's row — a human is the only kind of consumer that may carry one
 and the schema refuses it on a chat or a skill. Proposals go to the project's
 **approver**, the one human marked for it on the profile page.
 
+**The address and the flag are set in two different places, and the split is
+the point.** The `email` is a field of the consumer like its name or its brief,
+so it goes in through `project_amend` with the admin code — creating a person
+and giving them an address is one gesture, and the seeding of a project happens
+from a chat. The **approver flag** is not a field of anything and no tool
+reaches it: it is marked on the profile page, by whoever holds its password,
+because deciding who gets told about a project's proposals is not the same kind
+of act as recording where somebody's post goes.
+
 **There is no on/off switch, anywhere.** The two ways to be quiet are both
 ABSENCES: no `SMTP_HOST` on the container, so nothing is ever sent; no address
 on a consumer, so that person is not written to. Two ways to turn something off

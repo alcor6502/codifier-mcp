@@ -1189,9 +1189,25 @@ refused("a task for a desk that does not exist",
 t1 = allowed("opening a task for ANOTHER desk is free",
              lambda: p.task_add("advisory", "check the drift",
                                 "Against (VA-0001).", "architect"))
-h = allowed("and one for a human, which does not notify them",
+h = allowed("and one for a human",
             lambda: p.task_add("Alfredo", "sign the form", "b", "architect"))
-equals("and it says so", "does NOT notify" in (h or {}).get("note", ""), True)
+# THE PROMISE THAT WENT STALE. Until 5.0.0 this case asserted that the verdict
+# said "does NOT notify", and it went on passing after mail.py landed: the
+# engine's note and the manual quoting it were stale TOGETHER, so the check
+# that compares the two stayed green. A promise is only watched from the side
+# it can go wrong on.
+equals("and the note says what is on the ROW — no address here, so nothing is "
+       "emailed, and that is a choice and not a fault",
+       "NO address on this row" in (h or {}).get("note", ""), True)
+p.amend_project("consumer", "Alfredo", "amend", {"email": "a@example.com"},
+                actor="architect", auth_code=code(p))
+h2 = allowed("and with an address on the row it says the other thing",
+             lambda: p.task_add("Alfredo", "sign the other form", "b", "architect"))
+equals("naming the field that actually answers whether it went",
+       "`posted` field" in (h2 or {}).get("note", ""), True)
+equals("and the ENGINE never claims it sent anything: it cannot know whether "
+       "this container has a mail host, and it has no business opening a socket",
+       "posted" in (h2 or {}), False)
 same = allowed("the same idem_key on the same desk absorbs the repeat",
                lambda: (p.task_add("advisory", "x", "b", "architect", idem_key="k1"),
                         p.task_add("advisory", "x", "b", "architect", idem_key="k1"))[1])

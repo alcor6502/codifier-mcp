@@ -4551,10 +4551,12 @@ class Project:
         the POINT of the log: the audit that finds something routes it to the
         owner who can fix it, instead of carrying it.
 
-        Opening one for a HUMAN does not notify them. A human calls no tool;
-        their post is seen by whoever reads the overview or the page. Tasks are
-        not a notification channel to the owner, and the manual says so next to
-        this call."""
+        Opening one for a HUMAN with an address on their row DOES notify
+        them, since 5.0.0 — but not from here. This layer writes the task and
+        says what it can see on the row; the post leaves from the surface,
+        after this transaction has committed, and `posted` on the tool's
+        verdict says whether it went. A database that opened a socket would be
+        a database whose transactions depend on somebody else's network."""
         owner = self._consumer_row(consumer)
         who = (created_by or "").strip()
         if not who:
@@ -4597,8 +4599,32 @@ class Project:
                                   "last_insert_rowid()").fetchone()[0]
         out = {"id": tid, "owner": owner["name"], "urgent": bool(urgent)}
         if owner["kind"] == "human":
-            out["note"] = (f"{owner['name']} is a human: this does NOT notify them. Their "
-                           "post is read from the overview or from the web page.")
+            # WHAT THIS LAYER KNOWS, and nothing more. Until 5.0.0 the sentence
+            # here said a human was not reached at all, which was true and is
+            # not any more — the surface posts after the write. But the ENGINE
+            # cannot say whether the message went: it does not know whether the
+            # container has a mail host, and it has no business opening a
+            # socket. So it says what it can see on the ROW, and `posted` on
+            # the tool's verdict says what actually happened.
+            #
+            # TWO WHOLE SENTENCES and not a stem plus two tails, at the cost of
+            # repeating nine words. The manual quotes these verbatim, and the
+            # check that keeps a card honest matches a quoted block against ONE
+            # message: a note assembled from three pieces can only be quoted in
+            # fragments, and a fragment in a manual is a sentence nobody can
+            # recognise when it comes back from the service.
+            if owner["email"]:
+                out["note"] = (
+                    f"{owner['name']} is a human: they call no tool, and their post is "
+                    "read from the overview or from the web page. There is an address "
+                    "on this row, so an email goes out too — the `posted` field of this "
+                    "answer says whether it did.")
+            else:
+                out["note"] = (
+                    f"{owner['name']} is a human: they call no tool, and their post is "
+                    "read from the overview or from the web page. There is NO address "
+                    "on this row, so nothing is emailed: that is a choice somebody "
+                    "made, not a fault.")
         return out
 
     def task_list(self, consumer: str, query: str = "", since: str = "",
