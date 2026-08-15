@@ -50,8 +50,8 @@ down for a typo does not cost you a trip back to the page.
 ## WHAT IS NOT HERE
 
 **The web UI**, which no chat can reach: approve or deny the batch against the
-digest, write the project's own profile, mint one-time auth codes,
-per-project backup,
+digest, write the project's own profile, mark who its proposals are posted
+to, mint one-time auth codes, per-project backup,
 consultation, log. Approval is the act these tools deliberately do not have.
 
 # COMMANDS
@@ -69,6 +69,26 @@ The project's STRUCTURE — the one door for all of it.
   REQUIRED. It is the hand the history records. A call without it is refused
   before anything else is looked at: a register that cannot say whose gesture a
   row was answers the wrong question six months later.
+- **A `human` is a different shape, and the schema holds it, not the code.**
+  Only a human may carry an **`email`**, and a human has **no `brief` and no
+  `specs`**: a person already knows who they are and what they have to do, and
+  two writable fields nobody ever reads are the same disease as an address on a
+  chat. Both refusals come from the database as well as from here, because root
+  opening the file with `sqlite3` is a documented road and a guarantee that
+  lives only in Python is one that road walks past.
+  The address check is LOOSE on purpose — one `@`, a domain with a dot, no
+  spaces — because refusing a legal address is a worse failure than letting a
+  typo through, and a typo announces itself as post that never arrives.
+- **`rules_list` on a human is REFUSED**, not answered empty: no rule binds a
+  person through this registry, and an empty list would read as a project with
+  nothing in it. Their desk is real — `tasks_list` and `tasks_overview` answer
+  for it, and the overview is where their address is read.
+- **`approver` is not a field of this command**, and that is the decision, not
+  an omission. It marks the ONE human a project's proposals are posted to, and
+  it is marked on the administration page by whoever holds its password. It
+  GRANTS NOTHING — hence the name: the page is opened by the password, this is
+  an address. At most one per project, and that is a unique index in the
+  database rather than a count in code.
 - **THE PROJECT ITSELF IS NOT HERE.** Its `brief`, its `specs` and its
   `queue_cap` are written by a person on the administration page, behind that
   page's password — not by this command and not by the admin code either. The

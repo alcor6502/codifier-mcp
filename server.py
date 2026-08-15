@@ -46,6 +46,12 @@ Configuration, all through environment variables:
                           project holding that project's database. Born
                           optional with a working default in the code
   BACKUP_DIR              VACUUM INTO copies (default: <db dir>/backup)
+  SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASSWORD / SMTP_FROM / SMTP_SECURITY
+                          the post. All optional, all with working defaults:
+                          without a host nothing is sent and nothing complains.
+                          There is no on/off switch — the two ways to be quiet
+                          are both absences, no host here and no address on a
+                          consumer
   ADMIN_AUTH_CODE_DURATION  how long a one-time auth code lives, in minutes
                           (default 5). Born optional with a working default in
                           the code: Unraid does not propagate new variables to
@@ -104,6 +110,7 @@ from mcp_common_engine import (VERSION as ENGINE_VERSION, cidrs_from_env,
 from mcp_common_engine.gate import Gate
 from mcp_common_engine.logs import arm_argument_redaction, arm_timestamps
 from mcp_common_engine.refusals import make_tool
+import mail
 import web
 import rules
 from rules import (Project, Registry, RulesError, RulesFault, VERSION,
@@ -234,6 +241,10 @@ BACKUP_DIR = os.environ.get("BACKUP_DIR") or os.path.join(DB_DIR, "backup")
 ALLOWED_CIDRS = cidrs_from_env()
 
 registry = Registry(DB_DIR, auth_code_minutes=ADMIN_AUTH_CODE_DURATION)
+# HANDED THE LOGGER, and it reads the environment through one function of its
+# own: a module that reached for either itself would be a second place where
+# the configuration is decided.
+mailer = mail.from_env(log=log)
 for _name, _objects in registry.repaired().items():
     log.warning("schema rebuilt at open for %s: %s — somebody had removed these objects",
                 _name, ", ".join(_objects))
@@ -245,8 +256,8 @@ for _name, _objects in registry.repaired().items():
 if registry.born_empty():
     log.warning("created empty for: %s — expected on a new project, and the mark of a "
                 "folder not renamed on any other day", ", ".join(registry.born_empty()))
-log.info("registry %s — %s — %s projects",
-         VERSION, registry.file, registry.projects()["count"])
+log.info("registry %s — %s — %s projects — mail %s",
+         VERSION, registry.file, registry.projects()["count"], mailer.describe())
 
 auth = GitHubProvider(
     client_id=env("GITHUB_CLIENT_ID"),
@@ -560,11 +571,22 @@ def rules_propose(project: str, domain: str, type: str, title: str, body: str,
     corrected, no number is spent and no queue slot is taken.
 
     `consumer_key` is only for a consumer that has been given a secret; where
-    none is set, the name is enough."""
-    return _project(project).propose(domain, type, title, body, reason, reach,
-                                     proposed_by, groups=groups,
-                                     exceptions=exceptions, supersedes=supersedes,
-                                     source=source, consumer_key=consumer_key)
+    none is set, the name is enough.
+
+    A proposal entering the queue POSTS to whoever is marked as this project's
+    approver, if there is one and if they carry an address. Nobody marked, no
+    address, or no SMTP host, and it is queued in silence — the queue is on the
+    lot page either way."""
+    prj = _project(project)
+    out = prj.propose(domain, type, title, body, reason, reach, proposed_by,
+                      groups=groups, exceptions=exceptions,
+                      supersedes=supersedes, source=source,
+                      consumer_key=consumer_key)
+    # AFTER the write. Same reason as the task log's: the proposal is in the
+    # queue whatever the network is doing.
+    out["posted"] = mail.proposal_queued(mailer, prj, out["id"], title,
+                                         proposed_by)
+    return out
 
 
 @tool
@@ -587,15 +609,28 @@ def tasks_add(project: str, consumer: str, title: str, body: str,
     and with what outcome. Neither needs a new tool; what was missing was the
     name for it.
 
-    ⚠ Opening a task for a HUMAN consumer does NOT notify them: a human calls
-    no tool, and their mail is seen by whoever reads `tasks_overview` or the
-    administration page. Tasks are not a notification channel to the owner.
+    Opening one for a HUMAN who carries an address POSTS IT TO THEM, since
+    5.0.0 — a knock on the door with the ID and the sender, never the text: the
+    work is read in the register. A human without an address is not written to,
+    and neither is anybody if the container has no SMTP host: the two ways to
+    be quiet are both absences, and there is no switch. The verdict says which
+    happened, because a notification nobody can confirm is a notification
+    nobody trusts.
 
     `idem_key` makes the call safe to repeat: the same key on the same desk
-    hands back the pending task instead of a twin."""
-    return _project(project).task_add(consumer, title, body, created_by,
-                                      urgent=urgent, idem_key=idem_key,
-                                      consumer_key=consumer_key)
+    hands back the pending task instead of a twin — and an absorbed repeat
+    posts nothing, because nothing happened."""
+    prj = _project(project)
+    out = prj.task_add(consumer, title, body, created_by, urgent=urgent,
+                       idem_key=idem_key, consumer_key=consumer_key)
+    # AFTER the write, and outside its transaction by construction: the engine
+    # has already committed by the time this line runs, so an unreachable SMTP
+    # server cannot turn an opened task into a failed gesture. `already_open`
+    # is the absorbed repeat — nothing happened, so nobody is told.
+    if "already_open" not in out:
+        out["posted"] = mail.task_opened(mailer, prj, out["id"], out["owner"],
+                                         created_by, urgent=urgent)
+    return out
 
 
 @tool

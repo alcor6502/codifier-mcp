@@ -685,17 +685,35 @@ CREATE TABLE IF NOT EXISTS domain_version (
 -- ---------------------------------------------------------------------
 -- Consumers: whoever is under the rules
 -- ---------------------------------------------------------------------
--- Chats, skills and — since rev. 5 — HUMANS. A human calls no tool, but is a
--- valid owner of a task: the owner's mail is read from the overview and from
--- the web UI, and that is exactly why opening a task for a human does not
--- notify anybody.
+-- Chats, skills and — since rev. 5 — HUMANS. A human calls no tool but is a
+-- valid owner of a task, and since 5.0.0 a task opened on their desk sends
+-- them an email if they have one.
 --
 -- `brief` is the mandate — the boundaries — and moves on the admin code, so a
 -- chat holding only the reference code cannot rewrite its own remit. `specs`
--- are operational data and move on the reference code. `secret` is NULL
--- until somebody decides that this consumer's gestures must be signed: set
--- it, and every gesture in its name carries `consumer_key`. It is switched on
--- one consumer at a time, without rewiring anything.
+-- are operational data and move on the reference code, under that consumer's
+-- OWN name. `secret` is NULL until somebody decides that this consumer's
+-- gestures must be signed: set it, and every gesture in its name carries
+-- `consumer_key`. It is switched on one consumer at a time.
+--
+-- `email` and `approver` are new in 5.0.0, and what keeps them honest is the
+-- three CHECKs below rather than anything in Python:
+--
+--   · only a HUMAN may have an email. `kind` was NOT collapsed into "has an
+--     address or not", and that was considered: it also carries the chat /
+--     skill distinction, which has a real effect (a skill does not receive the
+--     project's brief and specs), and a human who wants no post must stay
+--     possible;
+--   · a human has NO brief and NO specs. Two writable fields nobody ever reads
+--     are the same disease as an address on a chat, so they are forbidden
+--     rather than merely unused;
+--   · `approver` is a FLAG and not a privilege, and the name says so on
+--     purpose. It grants nothing: the administration page is opened by the
+--     password, which is one per container. All it says is who receives the
+--     email when a proposal enters this project's queue. At most one per
+--     project, and that is the partial unique index below and not a count in
+--     Python — a guarantee that lives in the code is a guarantee the sqlite3
+--     shell walks past.
 CREATE TABLE IF NOT EXISTS consumer (
   consumer_id    INTEGER PRIMARY KEY,
   name           TEXT NOT NULL,   -- spelling is DATA; identity is the surrogate
@@ -703,12 +721,22 @@ CREATE TABLE IF NOT EXISTS consumer (
   brief          TEXT,
   specs          TEXT,
   secret         TEXT,
+  email          TEXT,
+  approver       INTEGER NOT NULL DEFAULT 0 CHECK (approver IN (0,1)),
   created_at     TEXT NOT NULL,
   retired_at     TEXT,
   retired_reason TEXT,
   actor          TEXT,
-  CHECK (retired_at IS NULL OR TRIM(IFNULL(retired_reason,'')) <> '')
+  CHECK (retired_at IS NULL OR TRIM(IFNULL(retired_reason,'')) <> ''),
+  CHECK (email IS NULL OR kind = 'human'),
+  CHECK (kind <> 'human' OR (brief IS NULL AND specs IS NULL)),
+  CHECK (approver = 0 OR kind = 'human')
 );
+
+-- ONE approver per project, and it is an index because a count in Python is a
+-- race: two writes in two threads both read zero and both write one.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_one_approver ON consumer(approver)
+    WHERE approver = 1;
 
 -- Identity is the casefolded name: `Architect` and `architect` are one
 -- consumer, and the spelling stays the author's.
@@ -721,6 +749,8 @@ CREATE TABLE IF NOT EXISTS consumer_version (
   kind        TEXT,
   brief       TEXT,
   specs       TEXT,
+  email       TEXT,
+  approver    INTEGER,
   retired_at  TEXT,
   timestamp   TEXT NOT NULL,
   action      TEXT NOT NULL,     -- created/amended/renamed/retired/revived
@@ -1050,16 +1080,17 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS trg_consumer_ins AFTER INSERT ON consumer BEGIN
   INSERT INTO consumer_version (consumer_id, version, name, kind, brief, specs,
-                                retired_at, timestamp, action, actor)
+                                email, approver, retired_at, timestamp, action, actor)
   VALUES (NEW.consumer_id, {_f(_NEXT_CONSUMER_V, 'NEW')}, NEW.name, NEW.kind,
-          NEW.brief, NEW.specs, NEW.retired_at, NEW.created_at, 'created', NEW.actor);
+          NEW.brief, NEW.specs, NEW.email, NEW.approver, NEW.retired_at,
+          NEW.created_at, 'created', NEW.actor);
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_consumer_upd AFTER UPDATE ON consumer BEGIN
   INSERT INTO consumer_version (consumer_id, version, name, kind, brief, specs,
-                                retired_at, timestamp, action, actor)
+                                email, approver, retired_at, timestamp, action, actor)
   VALUES (NEW.consumer_id, {_f(_NEXT_CONSUMER_V, 'NEW')}, NEW.name, NEW.kind,
-          NEW.brief, NEW.specs, NEW.retired_at, {_NOW},
+          NEW.brief, NEW.specs, NEW.email, NEW.approver, NEW.retired_at, {_NOW},
           CASE
             WHEN NEW.retired_at IS NOT NULL AND OLD.retired_at IS NULL THEN 'retired'
             WHEN NEW.retired_at IS NULL AND OLD.retired_at IS NOT NULL THEN 'revived'
@@ -1327,7 +1358,7 @@ VIEWS = ("v_rule", "v_task")
 
 # Only the indexes that carry a GUARANTEE, never the ones that carry speed.
 INDEXES = ("ux_domain_fold", "ux_consumer_fold", "ux_group_fold",
-           "ux_rule_supersedes", "ux_task_idem")
+           "ux_rule_supersedes", "ux_task_idem", "ux_one_approver")
 
 TRIGGERS = ("trg_profile_ins", "trg_profile_upd",
             "trg_domain_ins", "trg_domain_upd",
@@ -2726,12 +2757,22 @@ class Project:
         consumers = []
         for c in self.cx.execute("SELECT * FROM consumer WHERE retired_at IS NULL "
                                  "ORDER BY name"):
-            consumers.append({"name": c["name"], "kind": c["kind"],
-                              "brief": c["brief"], "specs": c["specs"],
-                              # The secret itself never leaves the database; what
-                              # a caller needs to know is whether its gestures
-                              # have to be signed.
-                              "signed": bool(c["secret"])})
+            d = {"name": c["name"], "kind": c["kind"],
+                 "brief": c["brief"], "specs": c["specs"],
+                 # The secret itself never leaves the database; what a caller
+                 # needs to know is whether its gestures have to be signed.
+                 "signed": bool(c["secret"])}
+            if c["kind"] == "human":
+                # A HUMAN'S ROW IS A DIFFERENT SHAPE, and saying so beats
+                # showing two nulls: they have no mandate by construction, and
+                # whether they are posted to is the one thing about them a
+                # caller can act on. The address itself is not here — it is not
+                # a working chat's business, and `tasks_overview`, behind the
+                # admin code, is where it is read.
+                d.pop("brief"), d.pop("specs")
+                d["posted_to"] = bool(c["email"])
+                d["approver"] = bool(c["approver"])
+            consumers.append(d)
         groups = []
         for g in self.cx.execute("SELECT * FROM consumer_group WHERE retired_at IS NULL "
                                  "ORDER BY name"):
@@ -2891,8 +2932,21 @@ class Project:
         `query` filters on title and body and hands back the matching fragment.
         `pending=True` answers with the proposal queue instead: reasons and
         proposers, which is what you look at before proposing something that is
-        already in there."""
+        already in there.
+
+        ⚠ AND ON A HUMAN IT IS REFUSED, not answered empty. A human calls no
+        tool and no rule binds them through the registry, so the honest answer
+        is not "no rules" — an empty list reads as a project with nothing in
+        it, and somebody would go looking for the rules that went missing.
+        Their desk is real and `tasks_list` serves it."""
         c = self._consumer_row(consumer)
+        if c["kind"] == "human":
+            raise RulesError(
+                f"{c['name']} is a human, and this call is refused rather than answered "
+                "empty: no rule binds a person through this registry — one that does "
+                "says so in its body — so an empty list here would read as a project "
+                "with no rules in it. Their desk is real: tasks_list and tasks_overview "
+                "answer for it.")
         head = {"project": self.name, "profile": self.profile(),
                 "consumer": {"name": c["name"], "kind": c["kind"],
                              "brief": c["brief"], "specs": c["specs"],
@@ -3512,8 +3566,13 @@ class Project:
     FIELDS = {
         "domain": {"create": ("code", "description", "reason"),
                    "amend": ("description",)},
-        "consumer": {"create": ("name", "kind", "brief", "specs", "secret"),
-                     "amend": ("name", "brief", "specs", "secret")},
+        # `approver` is NOT here, and that is the decision: the flag that
+        # says where a project's proposals are posted is marked from the
+        # administration page, by the person who holds its password. Alfredo:
+        # "I know I am the super user because I have the password of the web
+        # UI." A tool for it would be a tool for deciding who gets told.
+        "consumer": {"create": ("name", "kind", "brief", "specs", "secret", "email"),
+                     "amend": ("name", "brief", "specs", "secret", "email")},
         "group": {"create": ("name", "members"),
                   "amend": ("name", "members")},
     }
@@ -3846,14 +3905,26 @@ class Project:
                     f"kind {kind!r}: one of {', '.join(KINDS)}. A human calls no tool but "
                     "owns tasks; it is not guessed from the name, because a wrong guess "
                     "would be written in silence.")
+            mail = self._valid_email(fields.get("email"), kind)
+            self._no_mandate_on_a_human(kind, fields)
             with gesture():
                 self.cx.execute(
-                    "INSERT INTO consumer (name, kind, brief, specs, secret, created_at, "
-                    "actor) VALUES (?,?,?,?,?,?,?)",
+                    "INSERT INTO consumer (name, kind, brief, specs, secret, email, "
+                    "created_at, actor) VALUES (?,?,?,?,?,?,?,?)",
                     (who, kind, self._prose("brief", fields.get("brief") or "") or None,
                      self._prose("specs", fields.get("specs") or "") or None,
-                     (fields.get("secret") or "").strip() or None, _now(), actor))
-            return {"entity": "consumer", "action": "created", "name": who, "kind": kind}
+                     (fields.get("secret") or "").strip() or None, mail, _now(), actor))
+            out = {"entity": "consumer", "action": "created", "name": who, "kind": kind}
+            if kind == "human":
+                out["note"] = (
+                    "a human receives tasks and no rules: rules_list on this name is "
+                    "REFUSED, not answered empty. "
+                    + (f"Post opened on this desk goes to {mail}." if mail else
+                       "No email, so nothing is posted anywhere — which is a legitimate "
+                       "choice and not an omission.")
+                    + " Whether this is the person the PROPOSALS go to is marked on the "
+                      "administration page, never from here.")
+            return out
 
         row = self._consumer_row(name, live=False)
         if action == "amend":
@@ -3872,11 +3943,15 @@ class Project:
             secret = row["secret"]
             if "secret" in fields:
                 secret = (fields["secret"] or "").strip() or None
+            mail = row["email"]
+            if "email" in fields:
+                mail = self._valid_email(fields["email"], row["kind"])
+            self._no_mandate_on_a_human(row["kind"], fields)
             with gesture():
                 self.cx.execute(
-                    "UPDATE consumer SET name=?, brief=?, specs=?, secret=?, actor=? "
-                    "WHERE consumer_id=?",
-                    (new_name, brief, specs, secret, actor, row["consumer_id"]))
+                    "UPDATE consumer SET name=?, brief=?, specs=?, secret=?, email=?, "
+                    "actor=? WHERE consumer_id=?",
+                    (new_name, brief, specs, secret, mail, actor, row["consumer_id"]))
             out = {"entity": "consumer", "action": "amended", "name": new_name,
                    "changed": sorted(fields)}
             if new_name != row["name"]:
@@ -3922,6 +3997,95 @@ class Project:
         return {"entity": "consumer", "action": "revived", "name": row["name"],
                 "note": "it is back in every perimeter it was named in: nothing had been "
                         "deleted."}
+
+    @staticmethod
+    def _valid_email(raw, kind: str):
+        """An address, or None — and only on a human.
+
+        Deliberately NOT a pattern that tries to be RFC 5322: the addresses
+        that go in here are typed once, by the person who owns them, and a
+        clever regular expression refusing a legal address is a worse failure
+        than a sloppy one letting a typo through. What is checked is what a
+        refusal can be honest about — one `@`, something either side, no
+        spaces — and the schema does the part that matters, which is that a
+        chat or a skill cannot have one at all."""
+        if raw is None:
+            return None
+        mail = str(raw).strip()
+        if not mail:
+            return None
+        if kind != "human":
+            raise RulesError(
+                f"only a consumer of kind `human` carries an email, and this one is a "
+                f"{kind}. A chat and a skill are reached by being called, not by post: "
+                "an address on one is a field nobody would ever read, and the schema "
+                "refuses it too.")
+        local, sep, domain = mail.partition("@")
+        if not sep or not local or "." not in domain or any(c.isspace() for c in mail):
+            raise RulesError(
+                f"{mail!r} does not look like an address: one @, something before it and "
+                "a domain with a dot after it, and no spaces. This is the loose check on "
+                "purpose — refusing a legal address is worse than letting a typo "
+                "through, and a typo shows up as post that never arrives.")
+        return mail
+
+    @staticmethod
+    def _no_mandate_on_a_human(kind: str, fields) -> None:
+        """A human has no brief and no specs. Alfredo, deciding it: "I know
+        perfectly well who I am and what I have to do."
+
+        The schema refuses it too — this is the message that can name the
+        field. Two writable fields that nobody ever reads are the same disease
+        as an address on a chat, and the cure is the same: forbid, do not
+        merely leave unused."""
+        if kind != "human":
+            return
+        stray = sorted(f for f in ("brief", "specs") if (fields or {}).get(f))
+        if stray:
+            raise RulesError(
+                f"{', '.join(stray)}: a human has no {' and no '.join(stray)}. A brief is "
+                "a mandate for something that executes, and a person already knows who "
+                "they are and what they have to do — a field nobody reads is a field "
+                "somebody will maintain for nothing.")
+
+    def set_approver(self, name: str, actor: str = "web ui") -> dict:
+        """Mark WHO receives this project's proposals, or clear it.
+
+        From the administration page and from nowhere else: it is not in
+        `FIELDS`, so no tool reaches it. The flag GRANTS NOTHING — the page is
+        opened by the password, which is one per container — it is an address
+        and not a privilege, which is why it is called `approver` and not
+        `superuser`.
+
+        An empty `name` clears it, and then the proposals notify nobody.
+        Coherent with the rest: everything here switches off by absence."""
+        with self._transaction():
+            self.cx.execute("UPDATE consumer SET approver=0, actor=? WHERE approver=1",
+                            (actor,))
+            if not (name or "").strip():
+                return {"approver": None,
+                        "note": "nobody is marked: a proposal entering the queue notifies "
+                                "no one. Nothing else changes — the queue is on the lot "
+                                "page as it always was."}
+            row = self._consumer_row(name)
+            if row["kind"] != "human":
+                raise RulesError(
+                    f"{row['name']} is a {row['kind']}: only a human is marked. The flag "
+                    "says where a proposal is POSTED, and a chat is not reached by post.")
+            self.cx.execute("UPDATE consumer SET approver=1, actor=? WHERE consumer_id=?",
+                            (actor, row["consumer_id"]))
+        return {"approver": row["name"], "email": row["email"],
+                "note": (f"proposals entering the queue are posted to {row['email']}."
+                         if row["email"] else
+                         f"{row['name']} has no email, so nothing is posted. Give them "
+                         "one, or accept that the queue is only seen by opening it.")}
+
+    def approver(self) -> dict | None:
+        """The marked human, or None. One row, read where it is needed — the
+        page that marks it and the notification that reads it."""
+        row = self.cx.execute("SELECT name, email FROM consumer WHERE approver=1 "
+                              "AND retired_at IS NULL").fetchone()
+        return None if row is None else {"name": row["name"], "email": row["email"]}
 
     @staticmethod
     def _rename_note(old: str, new: str) -> str:
@@ -4640,19 +4804,32 @@ class Project:
             if not rows and c["retired_at"]:
                 continue
             out, total = self._order_and_cap(rows, now)
-            desks.append({"consumer": c["name"], "kind": c["kind"],
-                          "retired": bool(c["retired_at"]),
-                          "open": total,
-                          "urgent": sum(1 for r in rows if r["urgent"]),
-                          "stale": sum(1 for r in rows
-                                       if self._age_days(r["created_at"], now)
-                                       >= TASKS_STALE_DAYS),
-                          "tasks": out})
+            desk = {"consumer": c["name"], "kind": c["kind"],
+                    "retired": bool(c["retired_at"]),
+                    "open": total,
+                    "urgent": sum(1 for r in rows if r["urgent"]),
+                    "stale": sum(1 for r in rows
+                                 if self._age_days(r["created_at"], now)
+                                 >= TASKS_STALE_DAYS),
+                    "tasks": out}
+            if c["kind"] == "human":
+                # THE ADDRESS IS HERE AND NOT IN `project_info`, and the
+                # difference is the credential: this call is behind the admin
+                # code, that one travels on the reference code and is read by
+                # every working chat. It is here because this is the payload a
+                # digest is composed from — which the container deliberately
+                # does not compose itself.
+                desk["email"] = c["email"]
+                desk["approver"] = bool(c["approver"])
+            desks.append(desk)
         return {"project": self.name, "desks": desks,
                 "caps": {"list": TASKS_LIST_CAP, "get_ids": GET_IDS,
                          "get_bytes": GET_BYTES, "stale_days": TASKS_STALE_DAYS},
-                "note": "humans appear here too: it is where their post is read, because "
-                        "a human calls no tool."}
+                "note": "humans appear here too, with their address: it is where their "
+                        "post is read, because a human calls no tool. This container "
+                        "composes no digest — it posts one task at a time, as it is "
+                        "opened — so a roll-up is somebody else's job, and this payload "
+                        "is what it is made of."}
 
     def prune_tasks(self, before: str, actor: str = "web ui") -> dict:
         """ARCHIVE what is finished and older than a date. It marks, it does

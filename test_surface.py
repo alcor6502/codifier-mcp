@@ -2394,7 +2394,7 @@ for var in ("WEB_PORT", "WEB_UI_PASSWORD",
 # added or removed. Type="Port" and Type="Path" targets are mappings, not
 # variables, and are not in this question.
 _ENV_READERS = set()
-for _mod in ("server.py", "web.py", "rules.py", "preflight.py"):
+for _mod in ("server.py", "web.py", "rules.py", "mail.py", "preflight.py"):
     _t = parse(os.path.join(HERE, _mod))
     for _n in ast.walk(_t):
         if isinstance(_n, ast.Call) and ast.unparse(_n.func) in (
@@ -3901,15 +3901,16 @@ for _n in ast.walk(WEB_TREE):
 ok(bool(_ROUTES), f"web.py declares its routes explicitly: {len(_ROUTES)}")
 _POSTS = sorted(r for r in _ROUTES if "POST" in r[1])
 ok([(r[0], r[2]) for r in _POSTS] == [("/login", "login"), ("/logout", "logout"),
+                                      ("/p/{project}/approver", "approver_action"),
                                       ("/p/{project}/backup", "project_backup"),
                                       ("/p/{project}/batch", "batch_action"),
                                       ("/p/{project}/codes", "codes_mint"),
                                       ("/p/{project}/profile", "profile_action")],
-   "and exactly six of them take POST: the door, the exit, and the four "
+   "and exactly seven of them take POST: the door, the exit, and the five "
    "gestures — the lot, minting a one-time code, writing the project's own "
-   "profile, and the backup, which asks for no master because it handles no "
-   "secret. Renewal left with the expiry in 5.0.0 and the profile arrived in "
-   "its place; creating a project and rekeying it are not here either, "
+   "profile, marking who its proposals are posted to, and the backup, which "
+   "asks for no master because it handles no secret. Renewal left with the "
+   "expiry in 5.0.0; creating a project and rekeying it are not here either, "
    "because a project is a line in a file",
    [(r[0], r[2]) for r in _POSTS])
 # Every writing route is UNDER a project, and that is the shape of "a project
@@ -4020,7 +4021,8 @@ for _name, _fn in _BUILD_FUNCS.items():
 # a handler leaves: the renewals action left in 5.0.0 and the floor would have
 # stayed at three. The equality fails on either mistake, and it fails saying
 # which name moved.
-ok(sorted(_GUARDED) == ["batch_action", "codes_mint", "profile_action"],
+ok(sorted(_GUARDED) == ["approver_action", "batch_action", "codes_mint",
+                        "profile_action"],
    f"the writing handlers are exactly these, guarded: {sorted(_GUARDED)}",
    sorted(_GUARDED))
 

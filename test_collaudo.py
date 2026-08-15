@@ -1025,8 +1025,76 @@ yields("and the rules still reach it: this withholds the profile, nothing else",
 yields("the same on the QUEUE view, which builds the same head",
        lambda: p.list_rules("news", pending=True).get("profile", {}).get("withheld"),
        "skill")
-yields("and a HUMAN is not a skill: nothing is withheld from them",
-       lambda: p.list_rules("Alfredo")["profile"]["brief"], "the owner's book")
+# A HUMAN IS NOT A SKILL, and since 5.0.0 the answer is a third one rather
+# than either of the other two: not withheld, not served — REFUSED. A human
+# calls no tool and no rule binds them through the registry, so an empty list
+# would read as a project with no rules in it and somebody would go looking for
+# what went missing. The refusal names the desk that IS real.
+refused("a human asking for its rules is refused, not answered empty",
+        lambda: p.list_rules("Alfredo"), "refused rather than answered empty")
+yields("and the refusal points at the desk that does exist",
+       lambda: "tasks_list" in _refusal(lambda: p.list_rules("Alfredo")), True)
+allowed("while its desk answers", lambda: p.task_list("Alfredo"))
+allowed("and so does the cross view, which is where their post is read",
+        lambda: p.task_overview())
+
+# THE PEOPLE AND THE POST. The engine's half; the schema's half is in
+# test_schema, written by hand with sqlite3, because a guarantee that lives
+# only in Python is one the sqlite3 shell walks past.
+pm = project()
+allowed("a human with an address",
+        lambda: pm.amend_project("consumer", "Marta", "create",
+                                 {"kind": "human", "email": "marta@example.com"},
+                                 actor="architect"))
+refused("an address on a chat", lambda: pm.amend_project(
+    "consumer", "robot", "create", {"kind": "chat", "email": "r@example.com"},
+    actor="architect"), "only a consumer of kind `human`")
+refused("and on a skill either", lambda: pm.amend_project(
+    "consumer", "cron", "create", {"kind": "skill", "email": "c@example.com"},
+    actor="architect"), "only a consumer of kind `human`")
+refused("something that is not an address", lambda: pm.amend_project(
+    "consumer", "Giulia", "create", {"kind": "human", "email": "giulia"},
+    actor="architect"), "does not look like an address")
+allowed("but the check is LOOSE on purpose: refusing a legal address is worse "
+        "than letting a typo through, and a typo shows up as post that never "
+        "arrives",
+        lambda: pm.amend_project("consumer", "Giulia", "create",
+                                 {"kind": "human", "email": "g+tag@sub.example.co.uk"},
+                                 actor="architect"))
+refused("a brief on a human", lambda: pm.amend_project(
+    "consumer", "Paolo", "create", {"kind": "human", "brief": "do things"},
+    actor="architect"), "a human has no brief")
+refused("and specs on a human", lambda: pm.amend_project(
+    "consumer", "Paolo", "create", {"kind": "human", "specs": "cash 50k"},
+    actor="architect"), "a human has no specs")
+yields("a human's row in project_info is a DIFFERENT SHAPE, and says so rather "
+       "than showing two nulls",
+       lambda: sorted(k for k in next(
+           c for c in pm.project_info()["consumers"] if c["name"] == "Marta")),
+       ["approver", "kind", "name", "posted_to", "signed"])
+yields("and the ADDRESS is not in it: that call travels on the reference code, "
+       "and a working chat has no business with somebody's mail",
+       lambda: any("email" in c for c in pm.project_info()["consumers"]), False)
+yields("it is in the overview instead, which is behind the admin code and is "
+       "the payload a digest would be composed from",
+       lambda: next(d["email"] for d in pm.task_overview()["desks"]
+                    if d["consumer"] == "Marta"), "marta@example.com")
+
+# THE APPROVER: a flag, not a privilege, and no tool reaches it.
+yields("nobody is marked to begin with", lambda: pm.approver(), None)
+refused("and no tool can mark one: it is not a field", lambda: pm.amend_project(
+    "consumer", "Marta", "amend", {"approver": True}, actor="architect",
+    auth_code=code(pm)), "not a field of consumer")
+allowed("the page marks it", lambda: pm.set_approver("Marta"))
+yields("and it is read back", lambda: pm.approver()["name"], "Marta")
+refused("a chat cannot be one: the flag says where a proposal is POSTED",
+        lambda: pm.set_approver("architect"), "only a human is marked")
+yields("marking a second one MOVES it rather than adding one",
+       lambda: (pm.set_approver("Giulia"), pm.approver()["name"],
+                pm.cx.execute("SELECT COUNT(*) FROM consumer WHERE approver=1"
+                              ).fetchone()[0])[1:], ("Giulia", 1))
+yields("and an empty name clears it: everything here switches off by absence",
+       lambda: (pm.set_approver(""), pm.approver())[1], None)
 # ⚠ AND THE DOOR IS THE ONLY DOOR, which is the half a check on `list_rules`
 # alone would not see. A skill carries the reference code, so it can call
 # everything the reference code opens — if the profile came back through any of

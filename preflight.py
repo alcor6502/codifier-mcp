@@ -32,6 +32,12 @@ preflight that passes while three databases are broken.
   approval    ADMIN_AUTH_CODE_DURATION, the one knob the approval road
               still reads, validated at the edge instead of at the first
               minting
+  mail        whether this container posts at all, and said out loud either
+              way: a service that silently never sends is indistinguishable
+              from one whose mail is broken, and that is a mystery nobody
+              wants to solve at 2am. It does NOT reach the SMTP server — a
+              preflight that opened a socket would make the boot depend on
+              somebody else's network
   web         the administration UI: its password present, long enough and not
               a placeholder, and its port neither publishable by the Funnel nor
               the MCP's own
@@ -231,6 +237,37 @@ def c_approval():
             "the UI approves, behind its password")
 
 
+@check("mail")
+def c_mail():
+    """Is the post configured, and does what is configured parse. BLOCKING on
+    a malformed value and silent on an absent one, which is the whole shape of
+    this feature: no host means nothing is sent and nothing complains.
+
+    It does not connect. A preflight that opened an SMTP socket would put the
+    boot of this service at the mercy of somebody else's network, and the
+    failure it would catch — a wrong password — announces itself in the log
+    the first time a task is opened, at WARNING, without stopping anything.
+
+    THE LINE IS PRINTED EITHER WAY, and that is the point of the check as much
+    as the validation is: `mail: off` at boot is the difference between "this
+    container does not post" and "the post is broken", and those two look
+    identical from the outside for weeks."""
+    from mail import SECURITY, from_env
+    port = os.environ.get("SMTP_PORT", "").strip()
+    if port and (not port.isdigit() or not 1 <= int(port) <= 65535):
+        raise RuntimeError(f"SMTP_PORT={port!r}: a port number, 1 to 65535")
+    sec = os.environ.get("SMTP_SECURITY", "").strip().lower()
+    if sec and sec not in SECURITY:
+        raise RuntimeError(f"SMTP_SECURITY={sec!r}: one of {', '.join(SECURITY)}")
+    m = from_env()
+    if m.host and not m.sender:
+        raise RuntimeError(
+            "SMTP_HOST is set and SMTP_FROM is not: a message with no sender is "
+            "refused by every submission service, so this would be a post that "
+            "never arrives and only says so in the log")
+    return m.describe()
+
+
 @check("web")
 def c_web():
     """The administration UI, refused AT THE EDGE. Two mistakes live here and
@@ -404,7 +441,7 @@ def c_manuals():
     return f"{len(MANUALS)} manuals, in the image · cards: {', '.join(counts)}"
 
 
-CHECKS = [c_db, c_schema, c_writable, c_ownership, c_approval,
+CHECKS = [c_db, c_schema, c_writable, c_ownership, c_approval, c_mail,
           c_web, c_oauth, c_token_store, c_funnel, c_node_key, c_cidrs, c_dns,
           c_manuals]
 

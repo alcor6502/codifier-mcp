@@ -40,8 +40,8 @@ silence.
 
 WHERE THE MASTER IS RETYPED, AND WHERE IT IS NOT. Every gesture that WRITES
 asks for it again — deciding the lot, minting a one-time code, editing the
-project's profile — because a session alone is a browser left open on the
-iPad. The backup
+project's profile, marking who its proposals are posted to — because a session
+alone is a browser left open on the iPad. The backup
 does not, and the log page does not: a `VACUUM INTO` changes nothing and drops
 a file on the server's disk, and the log is a ring in memory. A master retyped
 where it defends nothing does not add a guard, it teaches the hand to type it
@@ -1093,11 +1093,60 @@ def build(*, registry, log, master: str, refusal, fault,
     # It is the same shape as the lot and the minting, and deliberately not a
     # new one: session, master retyped for the action, refusals as sentences.
 
-    def _profile_html(name: str, prj, message: str = "", ok_msg: str = "") -> str:
+    def _approver_html(name: str, prj) -> str:
+        """WHO GETS THE POST when a proposal enters the queue, marked from
+        here and from nowhere else.
+
+        It is not a field of any tool, and that is the decision: a flag that
+        says where a project's proposals are announced is marked by the person
+        holding this page's password. Alfredo: "I know I am the super user
+        because I have the password of the web UI."
+
+        And it GRANTS NOTHING — hence `approver` and not `superuser`. Access to
+        this page is the password, which is one per container; this says where
+        an email goes. Choosing nobody is a legitimate answer and the menu
+        offers it: then a proposal notifies no one, which is the same shape as
+        every other switch here — off by absence.
+        """
+        humans = [c for c in prj.project_info()["consumers"] if c["kind"] == "human"]
+        now = prj.approver()
+        if not humans:
+            return ("<h2>Proposals go to</h2><p class='note'>This project has no "
+                    "consumer of kind <code>human</code>, so there is nobody to "
+                    "post to. Create one with an address, and mark it here.</p>")
+        opts = "".join(
+            f"<option value='{_esc(c['name'])}'"
+            + (" selected" if now and now["name"] == c["name"] else "")
+            + f">{_esc(c['name'])}"
+            + ("" if c.get("posted_to") else " — no address, so nothing is posted")
+            + "</option>" for c in humans)
+        return (f"<h2>Proposals go to</h2>"
+                f"<form method='post' action='/p/{_esc(name)}/approver'>"
+                f"<label for='who'>One person, or nobody. This grants nothing "
+                f"— what opens this page is the password — it only says where "
+                f"an email is sent when a proposal enters the queue.</label>"
+                f"<select id='who' name='who'>"
+                f"<option value=''{'' if now else ' selected'}>— nobody: "
+                f"proposals are queued in silence —</option>{opts}</select>"
+                f"<label for='amaster'>Master — once for this action</label>"
+                f"<input id='amaster' type='password' name='master' "
+                f"autocomplete='current-password' required>"
+                f"<p><button type='submit'>Mark</button></p></form>"
+                + (f"<p class='note'>Now: <b>{_esc(now['name'])}</b>"
+                   + (f" · {_esc(now['email'])}</p>" if now["email"] else
+                      " · no address, so nothing is posted</p>")
+                   if now else
+                   "<p class='note'>Nobody is marked: a proposal entering the "
+                   "queue notifies no one, and is seen by opening the lot "
+                   "page.</p>"))
+
+    def _profile_html(name: str, prj, message: str = "", ok_msg: str = "",
+                      approver_msg: str = "") -> str:
         prof = prj.profile()
         cap = prof["queue_cap"]
         head = (f"<p class='bad'>{_esc(message)}</p>" if message else "") + \
-               (f"<p class='ok'>{_esc(ok_msg)}</p>" if ok_msg else "")
+               (f"<p class='ok'>{_esc(ok_msg)}</p>" if ok_msg else "") + \
+               (f"<p class='ok'>{_esc(approver_msg)}</p>" if approver_msg else "")
         return (head
                 + f"<form method='post' action='/p/{_esc(name)}/profile'>"
                   "<label for='brief'>Brief — the project's identity: whose it "
@@ -1131,7 +1180,8 @@ def build(*, registry, log, master: str, refusal, fault,
                 + (f"<p class='note'>Last written {_esc(prof['updated_at'])}.</p>"
                    if prof["updated_at"] else
                    "<p class='note'>Never written: this project has no profile "
-                   "yet, which is a legitimate state and not a fault.</p>"))
+                   "yet, which is a legitimate state and not a fault.</p>")
+                + _approver_html(name, prj))
 
     async def profile_page(request):
         def render(name, prj):
@@ -1184,6 +1234,40 @@ def build(*, registry, log, master: str, refusal, fault,
             _profile_html(name, prj, ok_msg=f"Written: {said}. Every chat of "
                                             f"this project reads it from the "
                                             f"next rules_list."),
+            nav=_project_nav(name)))
+
+    async def approver_action(request):
+        """Mark the human the proposals are posted to, or clear it. Same shape
+        as every other gesture that writes: session, master retyped once,
+        refusals as sentences."""
+        if not _session_ok(request):
+            return _guest(request)
+        name = request.path_params["project"]
+        prj = _open(name)
+        if prj is None:
+            return _no_project(name)
+        form = await request.form()
+        if not secrets.compare_digest((form.get("master") or "").strip(), master):
+            log.warning("refused web approver: wrong master, from %s", _client(request))
+            return HTMLResponse(
+                _page(f"{name} — profile",
+                      _profile_html(name, prj,
+                                    message="Wrong master. Nothing was marked."),
+                      nav=_project_nav(name)), status_code=401)
+        try:
+            v = prj.set_approver((form.get("who") or "").strip())
+        except fault:
+            raise
+        except refusal as e:
+            log.info("refused web approver: %s", e)
+            return HTMLResponse(
+                _page(f"{name} — profile",
+                      _profile_html(name, prj, message=str(e)),
+                      nav=_project_nav(name)), status_code=400)
+        log.info("approver of %s is now %s", name, v["approver"])
+        return HTMLResponse(_page(
+            f"{name} — profile",
+            _profile_html(name, prj, approver_msg=v["note"]),
             nav=_project_nav(name)))
 
     async def status_page(request):
@@ -1247,6 +1331,7 @@ def build(*, registry, log, master: str, refusal, fault,
         Route("/p/{project}/codes", codes_mint, methods=["POST"]),
         Route("/p/{project}/profile", profile_page, methods=["GET"]),
         Route("/p/{project}/profile", profile_action, methods=["POST"]),
+        Route("/p/{project}/approver", approver_action, methods=["POST"]),
         Route("/p/{project}/rules", rules_page, methods=["GET"]),
         Route("/p/{project}/rule/{rule}", rule_page, methods=["GET"]),
         Route("/p/{project}/status", status_page, methods=["GET"]),

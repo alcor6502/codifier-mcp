@@ -289,6 +289,58 @@ refused("a group the history points at",
         "FOREIGN KEY")
 
 # =====================================================================
+print("\n— THE PEOPLE (rev. 5.0.0) —")
+# These four are the ones the mandate asked to be proved BY HAND with sqlite3
+# and not from the engine. The engine refuses all four with a better sentence,
+# but a guarantee that lives only in Python is a guarantee the sqlite3 shell on
+# the server walks straight past — and root opening the file by hand is a
+# documented, legitimate road out of a lost key. So the schema holds them.
+refused("an email on a CHAT",
+        lambda c: c.execute("UPDATE consumer SET email='x@y.co' WHERE kind='chat'"),
+        "CHECK")
+refused("an email on a SKILL",
+        lambda c: c.execute("UPDATE consumer SET email='x@y.co' WHERE kind='skill'"),
+        "CHECK")
+allowed("and on a HUMAN it goes in",
+        lambda c: c.execute("UPDATE consumer SET email='alfredo@example.com'"
+                            " WHERE kind='human'"))
+refused("a brief on a HUMAN",
+        lambda c: c.execute("UPDATE consumer SET brief='x' WHERE kind='human'"),
+        "CHECK")
+refused("and specs on a HUMAN",
+        lambda c: c.execute("UPDATE consumer SET specs='x' WHERE kind='human'"),
+        "CHECK")
+refused("a human created WITH a brief in the same INSERT — the check is on the "
+        "row and not on the update",
+        lambda c: c.execute("INSERT INTO consumer (name,kind,brief,created_at,actor)"
+                            " VALUES ('Marta','human','x',?,'architect')", (NOW,)),
+        "CHECK")
+refused("the approver flag on a chat",
+        lambda c: c.execute("UPDATE consumer SET approver=1 WHERE kind='chat'"),
+        "CHECK")
+refused("and a value that is neither 0 nor 1",
+        lambda c: c.execute("UPDATE consumer SET approver=2 WHERE kind='human'"),
+        "CHECK")
+allowed("one approver, on a human",
+        lambda c: c.execute("UPDATE consumer SET approver=1 WHERE kind='human'"))
+# THE ONE THAT NEEDS TWO HUMANS, and it is the case the partial unique index
+# exists for: a count in Python is a race — two threads read zero and both
+# write one — and this is a guarantee about a project, which is a file several
+# hands reach.
+refused("a SECOND approver in the same project",
+        lambda c: (c.execute("INSERT INTO consumer (name,kind,created_at,actor)"
+                             " VALUES ('Marta','human',?,'architect')", (NOW,)),
+                   c.execute("UPDATE consumer SET approver=1"
+                             " WHERE kind='human'")),
+        "UNIQUE")
+allowed("while any number of humans WITHOUT the flag is fine: the index is "
+        "partial, so the zeros do not collide",
+        lambda c: (c.execute("INSERT INTO consumer (name,kind,created_at,actor)"
+                             " VALUES ('Marta','human',?,'architect')", (NOW,)),
+                   c.execute("INSERT INTO consumer (name,kind,created_at,actor)"
+                             " VALUES ('Giulia','human',?,'architect')", (NOW,))))
+
+# =====================================================================
 print("\n— THE TASK LOG —")
 refused("completed with no outcome",
         lambda c: (_task(c),
