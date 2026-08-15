@@ -13,12 +13,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Explicit, never COPY *.py: with a wildcard the three test files end up inside
 # the image, and an image should carry what it runs and nothing else.
-# `codifier-icon.png` is here for the POST, not for the MCP surface: the
-# surface serves it from a raw GitHub URL and never needed the file. mail.py
-# embeds it in every message, because a linked image is blocked by default in
-# most clients and a broken placeholder is worse than no logo.
+# `codifier-icon-64.png` is here for the POST, and it is the ONLY icon in the
+# image: mail.py embeds it in every message, because a linked image is blocked
+# by default in most clients and a broken placeholder is worse than no logo.
+# The 256 stays in the repository and out of here — the MCP surface and the
+# Unraid template serve it from a raw GitHub URL, and nothing in the container
+# reads it. 1.9 KB against 24 KB, measured, for a picture drawn at 32 pixels.
 COPY rules.py server.py web.py mail.py preflight.py entrypoint.sh \
-     reference-guide.md reference-guide-admin.md codifier-icon.png ./
+     reference-guide.md reference-guide-admin.md codifier-icon-64.png ./
 RUN chmod +x entrypoint.sh
 
 # OAuth store (tokens, registrations) on a persistent volume: it survives

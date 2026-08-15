@@ -57,14 +57,30 @@ DAILY_CAP = 10
 # The icon, EMBEDDED and not linked. A `<img src="https://…">` weighs nothing
 # and is blocked by default in most clients — Apple Mail's Protect Mail
 # Activity among them — so the ordinary case would be a broken placeholder,
-# which is worse than no logo at all. Embedding costs about 24 KB a message,
-# which against ten messages a day is nothing.
+# which is worse than no logo at all.
+#
+# ITS OWN 64px FILE, and both halves of that were measured rather than guessed.
+# The 256 the surface serves costs 24 KB a message; the same art at 64, PNG-8
+# with a 128-colour palette, costs 1.9 KB — the same picture at a twelfth of
+# the weight, and lossless.
+#
+# ⚠ NOT a JPEG, which was asked for and is the wrong format here twice over.
+# 27% of this image is fully transparent — the rounded corners — and JPEG has
+# no alpha, so it would arrive as a white square, which in dark mode is exactly
+# the thing you notice. And it buys 500 bytes: q75 measured 1.4 KB against
+# PNG-8's 1.9. Half a kilobyte is not worth a logo that breaks on half the
+# screens it lands on.
+#
+# 64 in the file and 32 on the page: the doubled source is what keeps it crisp
+# on a retina screen, and 32 next to 14px bold is the size Alfredo asked for —
+# "a favicon, a bit bigger".
 #
 # ⚠ It must be in the image: it is in the Dockerfile's COPY line for this
-# reason and no other — the MCP surface serves it from a raw GitHub URL and
-# never needed the file itself.
+# reason and no other. The 256 stays in the repository because the MCP surface
+# and the Unraid template serve it from a raw GitHub URL, and it is NOT in the
+# container — nothing there reads it.
 ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                    "codifier-icon.png")
+                    "codifier-icon-64.png")
 ICON_CID = "codifier-icon"
 
 # `starttls` is the default because it is what port 587 speaks, and 587 is what
@@ -187,16 +203,16 @@ class Mailer:
             # — Palestra or Financial Portfolio, which is what tells you which
             # register just spoke.
             #
-            # 14px bold against a 42px icon: a LABEL, deliberately smaller than
+            # 14px bold against a 32px icon: a LABEL, deliberately smaller than
             # the headline below it. And if the image never loads, the line
             # does not fall apart — the name is text and was always going to
             # be there, which is why `alt` is empty rather than a word that
             # would compete with it.
             '<table role="presentation" cellpadding="0" cellspacing="0" '
             'border="0" style="margin:0 0 1.5rem"><tr>'
-            f'<td style="padding-right:.65rem;vertical-align:middle">'
-            f'<img src="cid:{ICON_CID}" width="42" height="42" alt="" '
-            'style="display:block;border-radius:9px"></td>'
+            f'<td style="padding-right:.55rem;vertical-align:middle">'
+            f'<img src="cid:{ICON_CID}" width="32" height="32" alt="" '
+            'style="display:block;border-radius:7px"></td>'
             '<td style="vertical-align:middle">'
             f'<div style="font-size:14px;font-weight:700;color:#111827;'
             f'letter-spacing:.01em">{_html.escape(project)}</div>'
