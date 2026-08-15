@@ -9,7 +9,11 @@ Self-hosted. Nothing leaves your machine except towards the conversation that
 asked. Rules are never deleted, IDs are never reused, and history is written by
 the database itself.
 
-🇮🇹 [Leggi in italiano](README.it.md)
+*An Italian translation was maintained until `v4.1.0` and is still readable at
+that tag. It was dropped rather than left to rot: two files of prose cannot be
+kept honest by a test, and one that is wrong is worse than one that is missing,
+because it gets believed. The twin project dropped its own for the same reason
+after a sweep found seven divergences, all seven on the translated side.*
 
 ---
 
@@ -41,7 +45,7 @@ ID cannot be reused, the reason cannot be omitted, deletion does not exist, and
 history is written by triggers — so a change made by hand with `sqlite3` is in
 there too. What used to be discipline is now a constraint.
 
-## The model in six sentences
+### The model in six sentences
 
 **A project is one database**, named in a text registry the owner writes by
 hand. Projects do not see each other and no tool lists them: a project is a
@@ -76,7 +80,7 @@ rewrite what was true yesterday.
 **Tasks live in the same registry and are modelled as the opposite of a rule**:
 no audience, no approval, no expiry. Rules bind; tasks wait.
 
-## How a rule gets in
+### How a rule gets in
 
     proposed ──(approved batch)──> active + provisional ──(promotion)──> permanent
         │                              │
@@ -113,7 +117,7 @@ How many proposals may wait at once is `queue_cap`, and it belongs to the
 **project**, kept in the project's own database — not to the container, which
 serves several. NULL is unlimited, 0 closes the queue, N is N.
 
-## The number is not yours to pick
+### The number is not yours to pick
 
 `rules_propose` takes the **domain**, not the ID: the registry assigns the next
 number in it, four digits, and hands it back. A number is not a choice, it is a
@@ -125,22 +129,22 @@ There is no numbering-gap report, and that is the same decision seen from the
 other side: with a counter a gap cannot happen, so a report of one could only
 ever have meant somebody chose.
 
-## Citations are marked, checked, and expanded
+### Citations are marked, checked, and expanded
 
 A citation is an ID in **round brackets**, `(VA-0002)`. An ordinary parenthesis
 is ordinary prose — what makes a token a citation is the shape `XX-NNNN`, not
-the bracket — so the vault's own `[[wiki links]]` stay free.
+the bracket — so a document's own `[[wiki links]]` stay free.
 
 At the door the registry refuses a bare ID left outside a bracket of its own
 (case does not save you), one that does not resolve, one pointing at a rule that
-is **not approved yet**, and any note of your own written inside the brackets —
+is **not in force yet**, and any note of your own written inside the brackets —
 what is in there is not stored, and a registry that quietly dropped your words
 would be worse than one that refuses them. Only the domains the project declared
-are hunted, so a ticket number or a locale in a URL stays prose. That last is the one that shapes the work: file the cited
-rule, have it approved, then file the rule that cites it. The number of a
-proposal is not final until it is in, so a batch whose members cite each other
-can be approved into a state where its pointers were right only while they were
-being written.
+are hunted, so a ticket number or a locale in a URL stays prose. That last is
+the one that shapes the work: file the cited rule, have it approved, then file
+the rule that cites it. The number of a proposal is not final until it is in, so
+a batch whose members cite each other can be approved into a state where its
+pointers were right only while they were being written.
 
 On the way out every citation carries the current title of what it points at:
 
@@ -150,7 +154,7 @@ The gloss is generated, never stored — what goes into the database is the bare
 pointer, which is why it cannot go stale — and a pointer at a retired rule
 arrives already marked as such, in the text.
 
-## What it looks like
+### What it looks like
 
 ```
 rules_list(project="<code>", consumer="tax")
@@ -169,6 +173,715 @@ and the tasks open on your desk: one call, because the alternative was four, and
 a chat that must make four calls before it can work gets three of them wrong
 once.
 
+---
+
+## How it is built
+
+Every piece was chosen for a specific reason, and the reasons are worth stating:
+they are the same ones you need if you want to adapt it.
+
+### MCP — Model Context Protocol
+
+The protocol the model uses to talk to external tools. An MCP server exposes
+**tools**: functions with a name, typed parameters and a description. The model
+reads the descriptions and decides on its own when to call them.
+
+That has a consequence which governs the whole design: **every tool's
+description rides at the head of every request**, always, even when none of them
+is used — and it arrives *isolated*, read without the rest of the surface in
+view. Hence the refusal to multiply tools, and hence the division of labour,
+which since 4.1.0 has three levels instead of two:
+
+- **the description** carries the signature and one line of what the tool does,
+  and nothing else;
+- **`reference_guide()`** is the model: projects and codes, consumers, the shape
+  of a citation, the rules of the house. Only what a signature cannot say, and
+  it is fetched when it is wanted;
+- **`reference_guide("rules_propose")`** is one command's card — its arguments,
+  the cases nobody guesses, and the refusals it raises, quoted as the service
+  actually words them.
+
+The reason for the third level is that the second was all-or-nothing: to learn
+one thing about one tool, a caller paid for the entire manual. The manual as a
+whole grew when it was cut into cards; what shrank is the price of one question.
+
+Documentation for humans is in this README, which costs a conversation nothing.
+
+### FastMCP
+
+The Python implementation of the protocol. It handles HTTP transport, schema
+serialisation and — the part that really earns its keep — the whole **OAuth 2.1
+dance with Dynamic Client Registration and PKCE** that a remote connector
+requires. Writing that by hand would have been the bulk of the work.
+
+Two of its behaviours shaped code here rather than the other way round. It runs
+synchronous tools **in a thread from a pool**, which a SQLite connection opened
+at import does not survive; and it logs a refusal the way it logs a crash unless
+the refusal says otherwise. Both are in *Traps already paid for*.
+
+### OAuth 2.1 with GitHub login
+
+The service has no users of its own: it delegates login to GitHub and then
+**refuses anyone who is not the single configured username**. Anyone on GitHub
+can *attempt* to log in; the refusal comes from the server, not from GitHub.
+
+Since v1.2 the refusal covers **every request, the handshake included**: a
+stranger who authenticates with their own GitHub account does not open a session
+at all, and never sees that the tools exist. Refusals are logged with the reason,
+because from the client a refused stranger and a broken deployment produce the
+same symptom — the connector will not connect.
+
+Why GitHub rather than a password: a password on an exposed service is a secret
+living in plaintext somewhere with no revocation. An OAuth identity has expiry,
+revocation and no client-side secret.
+
+### Tailscale Funnel, and the page it cannot publish
+
+The MCP server listens on `127.0.0.1` and does **not know** how traffic reaches
+it. The Funnel runs in the same container and publishes that port on a public
+HTTPS URL with a valid certificate, without opening a port on the router and
+without exposing a home IP address.
+
+The administration page is the opposite, deliberately. It is **not** published by
+the Funnel and must never be: the Funnel can publish only ports 443, 8443 and
+10000, so those three are refused for the UI at boot — on one of them the page
+that promulgates rules would be on the internet. The page is reached on the
+server's own LAN address, behind its own password.
+
+### SQLite, with the history in triggers
+
+One file per project, WAL mode, and the parts that matter are not in the tool
+code:
+
+- **versioning is written by triggers**, so a change made by hand with `sqlite3`
+  is recorded exactly like one made through a tool. Discipline you have to
+  remember is not a guarantee;
+- **there is no DELETE**: retiring is a state, and an ID is never reused;
+- **the invariants are constraints**, not checks in Python — `targeted` with
+  nobody named, `all` with somebody named, an audience that is not contained in
+  the one it narrows.
+
+The database must live on **local storage**. WAL needs real file locking, and
+over SMB or NFS locks are advisory at best — a failure that is silent, and
+therefore the worst kind.
+
+### Docker, running as root
+
+The container runs as **root**, and the databases are 0644. This is the opposite
+of the vault twin, which drops privileges, and it is deliberate: from the share
+you read the database and you do not touch it, because a write by hand would
+bypass the triggers and break history in silence.
+
+The one file that is not world-readable is the registry, `projects.txt`, which
+carries every code in clear: 0600, root only, and the mode is re-imposed at
+every re-read rather than only at creation.
+
+### Blocking preflight
+
+The preflight checks run at startup. If **a single one** fails the service
+**does not start** — it exits 2 — and a check that crashes counts as failed, not
+as passed.
+
+It looks excessive until it happens to you: a wrong mount that makes the registry
+appear empty, a Funnel publishing the wrong port, a node key with expiry still
+enabled that will switch everything off in six months, a database of a schema
+generation this build does not know. A service that refuses to start and tells
+you why beats one that starts and misbehaves.
+
+---
+
+## Architecture
+
+```
+   The model (hosted)
+        │  HTTPS + OAuth 2.1 (DCR + PKCE)
+        ▼
+   Tailscale Funnel  ──►  https://<host>.<tailnet>.ts.net
+        │  (in the same container)
+        ▼
+   127.0.0.1:3001   server.py  ── the 16 MCP tools
+        │                        ├─ GitHub identity filter
+        │                        └─ source IP filter
+        │
+        │                web.py  ── the administration page
+        │                     ▲     0.0.0.0:9443, LAN only, its own password
+        │                     │
+        ▼                     ▼
+   rules.py  ── Registry (projects.txt)  ──►  Project (one SQLite database)
+        │
+        ▼
+   /db  ── projects.txt (0600) · one folder per project · backup/
+```
+
+Two servers, one process, one engine. They share a database, and that is the
+reason they are not two containers: two processes on one SQLite database do not
+share the lock that makes a multi-statement transaction atomic.
+
+---
+
+## Installation
+
+Written for Unraid 7 with the Tailscale plugin, which is what the template
+targets, but this is an ordinary container: two mounts, one port mapping and a
+handful of environment variables. Read step 1 to the end before you start —
+about forty-five minutes, most of it waiting for GitHub.
+
+⚠ **One change at a time.** If something does not work, fix it before going on.
+This is not general prudence: change two things at once and you have two
+suspects and an evening.
+
+<details>
+<summary><b>1 · Prerequisites</b></summary>
+
+- A Tailscale tailnet with **MagicDNS** and **HTTPS Certificates** enabled.
+- Unraid 7 with the **Tailscale plugin** installed: it provides the Docker hook
+  that gives the container its own Tailscale identity. Do not uninstall it, even
+  if Tailscale on the host is disabled.
+- On the host: **Allow Tailscale Funnel = No**. The Funnel belongs to the
+  container, not to the host.
+- **Local storage** for the databases — a pool or a disk, never a network
+  share. SQLite in WAL mode needs real file locking.
+- A GitHub account, and a password manager: five secrets come out of the next
+  two steps and none of them can be recovered.
+- A browser on the same LAN as the server. Rules are approved there, and there
+  is no other way to approve them.
+
+</details>
+
+<details>
+<summary><b>2 · GitHub OAuth application</b> — five minutes</summary>
+
+`github.com` → Settings → Developer settings → OAuth Apps → **New OAuth App**
+
+| Field | Value |
+|---|---|
+| Application name | anything, e.g. `codifier-mcp` |
+| Homepage URL | `https://<host>.<tailnet>.ts.net` |
+| Authorization callback URL | `https://<host>.<tailnet>.ts.net/auth/callback` |
+
+*Generate a new client secret*, then store **Client ID** and **Client Secret** in
+your password manager: the secret is shown once, and never expires.
+
+⚠ **A new application per service.** Do not reuse another container's: there is
+one callback per application, and the symptom of sharing it is a login that
+succeeds and lands on the wrong service.
+
+⚠ The callback must equal `BASE_URL` + `/auth/callback` **exactly**, scheme and
+trailing slash included. It is the number one first-run mistake.
+
+*Optional, and it costs nothing:* on the same page, **Application logo** takes a
+PNG of at least 200×200, and **Badge background color** is what you see around
+it. Set the badge dark — GitHub insets the logo in a round badge with a margin
+of its own, and this icon's outer border is a light grey that disappears on
+white, which makes the artwork read as smaller than it is.
+
+</details>
+
+<details>
+<summary><b>3 · The secrets, all of them before you open Unraid</b></summary>
+
+Generate these now and put them in the password manager. Half of an installation
+stalls here because a value has to be invented in the middle of filling a form.
+
+```sh
+openssl rand -hex 32        # JWT_SIGNING_KEY — 64 hex characters
+openssl rand -base64 18     # WEB_UI_PASSWORD — 12 characters minimum
+openssl rand -hex 12        # the project's REFERENCE code
+openssl rand -hex 12        # the project's ADMIN code
+```
+
+- **`JWT_SIGNING_KEY`** signs the tokens the service issues. It must stay stable
+  forever: change it and every issued token dies, and the connector has to be
+  reconnected. A different key per service, never reused.
+- **`WEB_UI_PASSWORD`** opens the page that promulgates rules. There is no
+  second account and no recovery.
+- **The two project codes** are 8 to 32 letters and digits. The **reference
+  code** opens every read of a project and lets a chat file a proposal; it goes
+  at the top of that project's chat instructions. The **admin code** creates
+  domains, consumers and groups, and — with a one-time code minted in the
+  browser — modifies what already exists. It goes to whoever administers the
+  project, and nowhere else.
+
+⚠ **The two codes of a project may not be equal**, and no code may appear twice
+in the registry: the service refuses the file naming the line.
+
+⚠ **Codes are not a security boundary.** They are opaque so projects cannot
+stumble into each other; no tool lists them and no error names one, and a wrong
+code answers exactly like a missing one. The real boundary is the OAuth gate in
+front.
+
+</details>
+
+<details>
+<summary><b>4 · The database directory</b></summary>
+
+```sh
+mkdir -p /mnt/<pool>/<share>/Database/codifier
+```
+
+That directory is mounted at `/db`, and everything the service owns lives inside
+it: `projects.txt`, one folder per project holding that project's `.db`, and
+`backup/`.
+
+⚠ **Local storage, never a network share.** Over SMB or NFS the locking SQLite
+needs is advisory at best, and the failure is silent.
+
+*If the parent is already a ZFS dataset, give this directory a dataset of its
+own: its snapshots then move independently of the rest of the share.*
+
+</details>
+
+<details>
+<summary><b>5 · The container</b></summary>
+
+**The image is published.** Every `v*` tag runs the suites and only then builds
+and pushes to `ghcr.io/alcor6502/codifier-mcp`; a tag that does not pass never
+becomes an image. The template already points there, so there is nothing to
+build.
+
+*Or build it yourself*, from a clone on the server:
+
+```sh
+docker build --no-cache -t codifier-mcp /path/to/the/clone
+```
+
+Then change `Repository` in the template, or Unraid pulls the published image
+over the one you just built and nothing tells you. Do not build on an Apple
+Silicon Mac: the image comes out arm64.
+
+**Install the template.** Download `codifier-mcp.xml` from this repository into
+`/boot/config/plugins/dockerMan/templates-user/`, refresh the Unraid UI, then
+Docker → **Add Container** → template `codifier-mcp`.
+
+⚠ Two similar files, and they are not interchangeable: `codifier-mcp.xml` is the
+clean one from the repository; `my-codifier-mcp.xml` is the one **Unraid
+rewrites** after an Apply, and it holds the secrets in clear, masked fields
+included. The first is publishable, the second is not.
+
+**Paths**
+
+| Name | Host → Container |
+|---|---|
+| Database | `/mnt/<pool>/<share>/Database/codifier/` → `/db` |
+| App Data | `/mnt/user/appdata/codifier-mcp/data` → `/data` |
+| Tailscale State | `/mnt/user/appdata/codifier-mcp/ts-state` → `/var/lib/tailscale` |
+
+**Port mapping**: the **Web UI port**, `9443` → `9443`, published on the
+server's own IP. The MCP port is **not** published here and must not be: the
+Funnel serves it.
+
+**Variables.** Every field carries its own description in the Unraid UI, and
+those descriptions are the real documentation of the deploy — this table is the
+summary.
+
+| Variable | Value |
+|---|---|
+| `BASE_URL` | `https://<host>.<tailnet>.ts.net` — **no trailing slash**, https |
+| `GITHUB_CLIENT_ID` · `GITHUB_CLIENT_SECRET` | from step 2 |
+| `ALLOWED_GITHUB_LOGIN` | your GitHub username |
+| `JWT_SIGNING_KEY` · `WEB_UI_PASSWORD` | from step 3 |
+| `PORT` | `3001` — the MCP port, inside the container |
+| `ALLOWED_CIDRS` | `160.79.104.0/21 # documented egress of the model provider` |
+| `PROVISIONAL_DAYS` | `90` — how long an approved rule lives before it must be renewed |
+| `BACKUP_DIR` | `/db/backup` |
+
+Under **Show more settings**: `DB_DIR` (`/db` — move the mount, not this),
+`WEB_PORT` (empty means 9443), `ADMIN_AUTH_CODE_DURATION` (minutes a one-time
+code stays good), `LOG_LEVEL` (`INFO` or `WARNING`, nothing else),
+`HTTP_MODE` (`stateless` on a new install; the code's fallback stays `stateful`
+so a container installed earlier keeps behaving as it did), `BIND_HOST`
+(`127.0.0.1`, and leave it — the administration page is not affected, it binds
+wide on purpose because Docker's bridge forwards a published port to the
+container's address, never to its loopback).
+
+⚠ **`WEB_PORT` may not be 443, 8443 or 10000**, and may not equal `PORT`.
+Startup is blocked on all four. The first three are the only ports the Funnel
+can publish, and the Funnel runs in this container.
+
+**Tailscale**: Enabled `true`, Hostname `<host>` — the same one inside
+`BASE_URL` — Serve `funnel`, **Serve Port equal to `PORT`**, State Dir
+`/var/lib/tailscale`.
+
+Then **Apply**, never Restart. Restart reboots the existing container with the
+old configuration; only Apply recreates it from the updated template.
+
+⚠ **Updating an existing container rather than creating one?** Unraid does not
+propagate a variable a template adds later, and does not remove one a template
+stops declaring. New fields arrive empty and dead ones stay in the form. Fill
+the new ones in by hand, and delete the dead ones — they do no harm, but they
+are knobs somebody will fill in with care for nothing.
+
+</details>
+
+<details>
+<summary><b>6 · First start: Tailscale, and the preflight</b></summary>
+
+Three things happen in order, and the container log is where you read all three.
+
+**One.** Tailscale prints a login link for the node: authorise it. Then, in the
+tailnet policy, grant Funnel to `autogroup:member` rather than to a named node —
+recreate the container and a policy that names a node stops matching.
+
+**Two.** In the admin console, under Machines, **disable key expiry** for this
+node. The preflight refuses to start while it is enabled, on purpose: expiry is
+a scheduled outage that works perfectly for six months and then stops.
+
+**Three.** The preflight runs. It prints one line per check, then its own count,
+then the service starts. That count is of its own checks — do not compare it
+with a number written down anywhere; what matters is that no line says FAIL.
+
+At this point the log says the registry serves **no project yet**, and that is
+correct: you have not written one. Step 7.
+
+The startup line is the one to keep:
+
+```
+codifier-mcp <version> — engine <version> — starting on 127.0.0.1:3001 —
+base_url … — allowed user: … — IP filter: 1 range … —
+token store: /data/fastmcp — db: /db (process uid 0) — web UI: http://0.0.0.0:9443
+```
+
+It carries the version actually running, the resolved configuration and the HTTP
+mode. It is the only place worth believing about any of them.
+
+⚠ **The log page in the browser will not show you that line.** That page is a
+ring in memory, and the startup line is printed before the ring exists. Read the
+container log.
+
+</details>
+
+<details>
+<summary><b>7 · Declare a project — <code>projects.txt</code></b></summary>
+
+The service serves nothing until you do this, and no tool can do it: creating a
+project is a gesture that belongs to the person who owns the machine.
+
+The first boot writes `/db/projects.txt`, root-only, with the instructions
+inside it. Add one line per project:
+
+```
+My Project | <reference code> | <admin code>
+```
+
+- **The name is a folder** next to the file, in that spelling, holding the
+  project's database; the file itself is named from the slug — `My Project` →
+  `my-project.db`. Renaming a project means editing the line **and** renaming
+  the folder.
+- **Blank lines and lines starting with `#`** are comments.
+- **The codes** are the two from step 3: 8 to 32 letters and digits, no code
+  twice in the file, and a project's two codes not equal to each other.
+- **The file is re-read when its mtime changes**, so adding a project needs no
+  restart. A file that will not parse stops everything, quoting the offending
+  line, rather than serving half a truth — and the mtime is stamped only on a
+  parse that succeeded, or a broken edit would be read once, fail, and leave the
+  service quietly serving the last good version for ever.
+- **0600, root only**, because the codes are in clear. The mode is re-imposed at
+  every re-read: an editor that writes a new file and renames it over the old
+  one brings its own mode with it.
+
+A line with no database creates one, empty and current, and says so in the log.
+A database with no line is not served.
+
+⚠ **`created empty database for …` is normal exactly once**, the day the project
+is born, and suspicious on any other day: it means the registry line and the
+folder on disk are two gestures and only one of them was made.
+
+**There is no migration.** A database of a different schema generation is
+refused at boot, naming the file and the two numbers, never silently upgraded.
+A v4 registry starts empty.
+
+</details>
+
+<details>
+<summary><b>8 · Connect, and the calls that prove it</b></summary>
+
+In the client: **Settings → Connectors → Add custom connector**, URL
+`https://<host>.<tailnet>.ts.net/mcp`. The GitHub login opens, you authorise,
+and the tools appear.
+
+⚠ **Then open a NEW conversation.** A chat that was open before the connector
+was added sees the old surface — see step 9.
+
+Try these, in order. The refusals matter more than the successes.
+
+```
+project_info("<reference code>")     → the project: zero domains, zero consumers
+project_info("My Project")           → must be REFUSED: a name is not a key
+project_info("Zzzzzzzz99")           → must be refused with the SAME message
+reference_guide()                    → the working manual
+reference_guide(project="<ref>", key="<admin>")    → the administration manual
+reference_guide(project="<ref>", key="wrong")      → must be REFUSED
+```
+
+If the second and third answer *differently*, stop and report it: a wrong code
+and a missing one must be indistinguishable, or the refusal is an oracle.
+
+Then the round trip that proves the machine, end to end:
+
+```
+project_amend(project="<ref>", entity="domain", name="PE", action="create",
+              fields={"description": "…"}, reason="…", key="<admin>")
+project_amend(project="<ref>", entity="consumer", name="architect",
+              action="create", fields={"kind": "chat"}, key="<admin>")
+rules_propose(project="<ref>", domain="PE", type="F", title="…", body="…",
+              reason="…", reach="all", proposed_by="architect")
+rules_list(project="<ref>", consumer="architect")   → count 0: a proposal is not a rule
+```
+
+Now go to `http://<server-ip>:9443/`, sign in, open the project, approve the
+batch — and `rules_list` answers with the rule, `reaches_you: everyone`. Mint a
+one-time code on the project's **codes** page, retire the rule with it, then try
+the *same* one-time code on another gesture: it must be refused. That is the
+proof that the second factor is a factor.
+
+Finally, paste the **reference code** at the top of that project's chat
+instructions. From then on only conversations started inside that project have
+it in context.
+
+</details>
+
+<details>
+<summary><b>9 · After any change to the tools</b></summary>
+
+There are **three cache layers**: the server, the connector and the chat
+session.
+
+After any change to the tool surface — names, parameters, descriptions —
+**reconnect the connector and test in a NEW conversation**. A session's catalogue
+is frozen at the moment the session was born, and a stale session does not fail
+loudly: the client does not validate arguments against the schema, so a call
+written for the new surface can travel through an old catalogue and work, which
+proves nothing at all.
+
+The honest test is to compare the tool description you have in hand with the one
+in the image at that tag, or to call something that did not exist before.
+
+Changes to internal behaviour — limits, formats, logic — do not alter the
+surface: recreating the container is enough.
+
+</details>
+
+<details>
+<summary><b>10 · Updating, and the way back</b></summary>
+
+A release is a `v*` tag: the workflow runs the suites first and publishes only
+then.
+
+The registry does not knock — Unraid finds out when asked. **Check for Updates**
+on the Docker page, then apply what it offers, and read the **startup line**
+afterwards: it carries the version, and that is how you know the new image is
+running rather than the old one restarting. If the surface moved, do step 9 too.
+
+**If the template changed**, download it again over
+`/boot/config/plugins/dockerMan/templates-user/`, refresh, and check the form for
+fields that arrived empty and fields that should no longer be there — Unraid
+does neither for you.
+
+**The way back** costs one field: the previous tag is still on the registry, so
+put it in `Repository` in place of `:latest` and Apply. Everything that matters
+lives outside the image — the databases, the tokens, the Tailscale identity.
+
+⚠ **The data has no way back across a schema generation.** There is no
+migration, by design: a database of another generation is refused at boot rather
+than upgraded, so a downgrade past one is a restore from backup, not a rollback.
+
+</details>
+
+---
+
+## Maintenance and failures
+
+<details>
+<summary><b>The safe — what cannot be regenerated</b></summary>
+
+| Item | Where it lives | If you lose it |
+|---|---|---|
+| `GITHUB_CLIENT_ID` + `SECRET` | the GitHub OAuth App | make a new one in five minutes, then update the template |
+| `JWT_SIGNING_KEY` | only in the template | issued tokens become unreadable: reconnect the connector. **But never change it without reason** — the effect is the same |
+| `WEB_UI_PASSWORD` | only in the template | no recovery and no second account: set a new one and Apply |
+| **`projects.txt`** | the database directory | the reference and admin codes of every project, in clear and nowhere else. Rewriting it means new codes, and re-pasting them into every chat instruction and skill file |
+| **The databases** | one per project, plus `backup/` | the only real loss |
+
+⚠ **`projects.txt` is not in the backups.** `VACUUM INTO` copies one project's
+database, so a copy carried off-site cannot open a project on its own — which is
+the intent. The registry is protected by the snapshot of the directory, and by
+nothing else.
+
+⚠ The template Unraid saves under `/boot/config/plugins/dockerMan/templates-user/`
+holds the secrets **in plaintext**, masked fields included: the masking is only
+in the UI. That backup is sensitive material; the shareable copy is the sanitised
+template in this repository.
+
+</details>
+
+<details>
+<summary><b>Traps already paid for</b></summary>
+
+Each of these cost at least one evening.
+
+- **Unraid does not propagate a new variable to containers that already exist.**
+  Add one to the template and an installed container never sees it: it falls
+  back to the code's default, or does not start if the variable is required. The
+  symptom is the worst kind — *the template is right and the service behaves like
+  the old version*. New variables are therefore born optional here, with a
+  working default in the code. The single exception is `WEB_UI_PASSWORD`, because
+  a default for it **is** the placeholder the preflight refuses. Unraid does not
+  remove a field either, so dead knobs stay in the form until you delete them.
+- **A port you did not publish looks like a service that never started.** The
+  administration page needs the port mapping *and* the variable — two halves of
+  one decision. Forget the mapping and the container is up, the log is clean, and
+  the page answers only inside the container.
+- **Restart ≠ Apply.** Restart reuses the old configuration and looks entirely
+  normal.
+- **The container log is wiped by every Apply** — that is, exactly when you
+  re-run the thing whose failure you were trying to read. Read the log *at* the
+  Apply, not after the next one.
+- **The browser's log page will not show you the startup line.** It is a ring in
+  memory, and the startup line and the preflight are printed before the ring
+  exists. Six weeks went by before anyone worked out why the line was never
+  there.
+- **In WAL a database is three files** — `.db`, `-wal`, `-shm`. Copying the first
+  one by hand produces a backup that looks taken and is corrupt. Use the page:
+  `VACUUM INTO` writes one quiescent file that opens without recovery.
+- **Docker's build cache lies.** It has been known to report `CACHED` for a layer
+  whose file had changed. Always `--no-cache` after touching sources, or you lose
+  an hour testing the old image, convinced you fixed something.
+- **A ghcr package is born private, even from a public repository.** `docker pull`
+  answers `denied`, which reads like a typo in the image name. It is two clicks
+  in the profile's package settings — two clicks, not two hours of reasoning.
+- **Funnel permission is tied to the node identity.** Recreate the container and
+  lose `ts-state`, and the node comes back as new with the Funnel needing
+  re-authorisation. If Tailscale asks you to re-authorise during an ordinary
+  update, that is not a step of the procedure: it is the symptom that the mount is
+  missing. Grant Funnel to `autogroup:member` rather than to a named node, and
+  never share `ts-state` between two containers.
+- **Node key expiry is a scheduled outage.** Disable it. Preflight checks it
+  precisely because it is silent: everything works for six months, then stops.
+- **The registry's mode does not survive an editor.** `projects.txt` is written
+  by a person, over a share, and an editor that writes a new file and renames it
+  over the old one brings its own mode with it. Hence the mode is re-imposed at
+  every re-read — and `entrypoint.sh` excludes that one file by name from its
+  permissions sweep, because without the exception every restart reopened to
+  everybody the file where the codes are in clear.
+
+</details>
+
+<details>
+<summary><b>The service will not start</b></summary>
+
+The preflight names the failing check, on stdout, whatever `LOG_LEVEL` says. The
+frequent ones:
+
+| Check | What to look at |
+|---|---|
+| `db` | the registry will not parse — the message quotes the line — or the mount is wrong. A database of another **schema generation** also lands here, naming the file and the two numbers: that is the refusal of migration, not a fault |
+| `schema` | a database has had objects removed and the automatic repair was not enough |
+| `ownership` | the mount is a network share, or permissions were changed by hand, or `projects.txt` is not 600 |
+| `approval` | `PROVISIONAL_DAYS` or `ADMIN_AUTH_CODE_DURATION` is not a positive whole number |
+| `web` | `WEB_UI_PASSWORD` missing, still `CHANGEME`, or under twelve characters; or `WEB_PORT` is 443, 8443, 10000, or equal to the MCP port |
+| `oauth` | a `CHANGEME` left in place, or `BASE_URL` that is not https |
+| `token_store` | `FASTMCP_HOME` is not under `/data`: tokens would not survive |
+| `funnel` | the Funnel is off, or `PORT` and Tailscale Serve Port differ |
+| `node_key` | the node key still has an expiry date |
+| `public_dns` | the hostname in `BASE_URL` does not resolve |
+| `manuals` | a manual is missing from the image, or one has no `# COMMANDS` section to cut cards at |
+
+The preflight is blocking and exits 2: the server is never reached. A check that
+crashes counts as failed.
+
+</details>
+
+<details>
+<summary><b>The connector will not connect</b></summary>
+
+Almost always `BASE_URL` does not match the callback registered on GitHub
+**exactly** — scheme included, trailing slash included.
+
+The other two causes look identical from the client, and the log tells them
+apart:
+
+- **the GitHub login is not the allowed one**, or the source IP is outside
+  `ALLOWED_CIDRS`. Since the gate covers the handshake, a stranger does not get a
+  session at all — so at the client a refused visitor and a broken deployment
+  produce the same message. The refusal line in the log is the only thing that
+  distinguishes them, and it disappears above `WARNING`;
+- **the service is up and the tools do not appear**: that is caching. Reconnect
+  the connector and open a fresh conversation.
+
+</details>
+
+<details>
+<summary><b>The administration page does not answer</b></summary>
+
+In this order:
+
+1. **The port mapping.** `9443` must be published on the server's IP. Without it
+   the page answers only inside the container, and everything else looks fine.
+2. **The address.** `http://<server-ip>:9443/` — plain HTTP, on the LAN. It is
+   not published by the Funnel and must not be.
+3. **The password.** There is no recovery: set a new `WEB_UI_PASSWORD` and Apply.
+4. **A session that ended.** Every restart of the service invalidates every
+   session, deliberately — the session secret is generated at boot and stored
+   nowhere. So does an hour of inactivity.
+
+</details>
+
+<details>
+<summary><b>Something got messed up in a project</b></summary>
+
+Nothing is deleted, so most of what looks like damage is readable:
+
+```
+rules_get(project, ids, consumer, history=True)   how the rule got here
+project_status(project, key)                      what the working half cannot see:
+                                                  dangling citations, stray audience
+                                                  rows, retired names, the queue
+```
+
+A rule that should not be in force is retired, not removed, and the retirement
+costs a reason and a one-time code on purpose.
+
+If the file itself is damaged, restore the last quiescent copy from `backup/` and
+check it before trusting it:
+
+```sh
+sqlite3 <file> "PRAGMA integrity_check"     # must say ok, with no recovery
+```
+
+Underneath everything sits the snapshot of the database directory, which is the
+net for when the backups are gone too — and the only thing that covers
+`projects.txt`.
+
+</details>
+
+<details>
+<summary><b>Backups</b></summary>
+
+The administration page takes one, per project, from that project's own page: a
+`VACUUM INTO` into `BACKUP_DIR`, named after the project's slug and the UTC
+minute — `my-project-20260813T061008Z.db`. It does not ask for the password
+again, because it changes nothing.
+
+To do it on a schedule instead, the shape is one loop over the project folders:
+
+```sh
+ROOT=/mnt/<pool>/<share>/Database/codifier
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+for db in "$ROOT"/*/*.db; do
+  name=$(basename "$db" .db)
+  sqlite3 "$db" "VACUUM INTO '$ROOT/backup/$name-$STAMP.db'"
+done
+# then prune: keep the last fifteen per project
+```
+
+⚠ **Never copy the three WAL files by hand instead.** And remember what the copy
+does *not* contain: `projects.txt`, which is what a restored database would need
+in order to be served at all.
+
+</details>
+
+---
+
 ## The administration page
 
 Approving a rule is not the same act as writing one, and from v2.1 they no
@@ -176,8 +889,8 @@ longer happen in the same place. A chat proposes; a person approves, in a
 browser, on the LAN.
 
 The page is served by the same process, on a second port — 9443 by default —
-because two processes on one SQLite database do not share the engine's lock.
-The home page lists the projects the registry serves, by NAME: the person has
+because two processes on one SQLite database do not share the engine's lock. The
+home page lists the projects the registry serves, by NAME: the person has
 already proved who they are with the password, and a URL may carry a name where
 a chat may only carry a code. Everything below it is per project.
 
@@ -213,50 +926,9 @@ generated at boot and stored nowhere.
 **What is not here any more, since v4.0.0: the deployment page.** It created
 projects, rekeyed them and printed their codes, and all three died with the
 declarative registry — a project is now a line in `projects.txt`, written from
-Unraid by the person who chooses its codes. What took its place is the codes
+the server by the person who chooses its codes. What took its place is the codes
 page: minting one-time codes is the one thing the design gives to this UI and to
 nothing else.
-
-**The MCP surface moved again in v4.0.0 — reconnect the connector and test in a
-new conversation.** It went from 32 tools to 16, and the names moved with it:
-what a chat needs is `reference_guide`, `project_info`, `rules_list`,
-`rules_get`, `rules_propose` and the five `tasks_*` calls, and everything an
-administrator does went into six — `project_amend`, `rules_amend`,
-`rules_retire`, `project_status`, `rules_export`, `tasks_overview`. A connector
-left on the old surface does not degrade: it lists tools that are not there.
-
-The whole surface, and a test holds this block against the code — a README that
-promises an argument the tool has not got is the copy that diverges first:
-
-    reference_guide(name='', project='', key='')
-    project_info(project)
-    rules_list(project, consumer, query='', pending=False)
-    rules_get(project, ids, consumer, history=False)
-    rules_propose(project, domain, type, title, body, reason, reach,
-                  proposed_by, groups=[], exceptions=[], supersedes='',
-                  source='', consumer_key='')
-    tasks_add(project, consumer, title, body, created_by, urgent=False,
-              idem_key='', consumer_key='')
-    tasks_list(project, consumer, query='', since='', until='',
-               authored=False)
-    tasks_get(project, ids)
-    tasks_close(project, id, by, outcome='', reason='', consumer_key='',
-                key='')
-    tasks_amend(project, id, by, title='', body='', consumer='',
-                consumer_key='', key='')
-    project_amend(project, entity, name, action, fields={}, reason='',
-                  auth_code='', key='')
-    rules_amend(project, id, reach, groups, exceptions, expected_version,
-                reason, auth_code, key)
-    rules_retire(project, id, reason, auth_code, key)
-    project_status(project, key)
-    rules_export(project, key, consumer='', expand=False)
-    tasks_overview(project, key)
-
-**From v4.1.0 the manual comes one command at a time.** Called bare,
-`reference_guide` serves a short model page plus the list of card names; called
-with a name it serves that one command explained in full, refusals included. The
-manual as a whole grew: what shrank is what you pay to ask one question.
 
 ## The task log
 
@@ -292,55 +964,251 @@ first, then oldest first — so when a ceiling bites the cut falls on the
 fresh work and never on what has been waiting. Truncation is always
 declared, with the real total.
 
-## Installing
+---
 
-Built for Unraid with the Tailscale plugin, but it is an ordinary container: a
-mount for the databases, one for state, and environment variables.
+## Usage guide
 
-1. **A GitHub OAuth application of its own.** Homepage `BASE_URL`, callback
-   `BASE_URL/auth/callback`. Do not recycle another service's, or the two will
-   fight over the callback.
-2. **`JWT_SIGNING_KEY`**: `openssl rand -hex 32`. Stable forever — change it and
-   every issued token dies.
-3. **`WEB_UI_PASSWORD`**, twelve characters or more. It opens the page that
-   promulgates rules, there is no second account and no recovery.
-4. **The database directory must be local storage**, never a network share:
-   SQLite in WAL needs real file locking.
+<details>
+<summary><b>The rules of the house</b></summary>
 
-The template in this repository **is** the configuration, and its field
-descriptions are the real documentation of the deploy. Point Unraid at it, fill
-the fields, Apply.
+**1. Read at the start, not when you get stuck.** `rules_list` is the first call
+of a session, and it carries the project's brief, your own, the rules in force
+for you and the tasks on your desk. A chat that reads its rules after it has
+already decided something is a chat that reads them for nothing.
 
-**Then declare a project.** The service serves nothing until you do. In the
-database directory the first boot writes `projects.txt`, root-only, with the
-instructions inside it; you add one line per project:
+**2. Nothing you learn survives the conversation unless you file it.** Found
+something that deserves a rule? `rules_propose`, and then forget it: it binds
+nobody until a person approves it, and the outcome comes back in
+`rules_list(pending=True)`.
 
-    Financial Portfolio | <reference code> | <admin code>
+**3. Reads are project-wide.** The reference code opens every read of the
+project — rules, tasks, structure. Within a project there are no secrets between
+consumers; the separation is between projects.
 
-Name, reference code, admin code. The two codes are placeholders there rather
-than plausible digits on purpose, and it is the same decision that keeps an
-example row out of the template inside `projects.txt`: a line with believable
-codes in it is a line somebody copies. Both codes are 8 to 32 letters and digits, you
-generate them (`openssl rand -hex 12`), and no code may appear twice in the file
-— the same code on two projects, or a reference code equal to its own admin
-code, is refused by name and line number. The name is a **folder** next to the
-file, in that spelling, holding the project's `.db`; renaming a project means
-editing the line *and* renaming the folder. A line with no database creates one,
-empty and current, and says so in the log; a database with no line is not
-served. The file is re-read whenever its mtime changes, so adding a project
-needs no restart, and a file that will not parse stops everything with the
-offending line quoted rather than serving half a truth.
+**4. The registry assigns the number.** You pass the domain and get the ID back.
 
-The reference code goes at the top of that project's chat instructions; the
-admin code goes to whoever administers it, and nowhere else.
+**5. Cite with the bare ID in round brackets** — `(VA-0002)` — in any field of
+prose, and never with a note of your own inside the brackets. A citation that
+does not resolve, or points at something not yet in force, is refused at the
+door: the call spends no number and no place in the queue.
 
-**Updating from 3.x is not a migration.** There is none, by design: a database
-of a different schema generation is refused at boot, naming the file and the two
-numbers, never silently upgraded. The v4 registry starts empty.
+**6. Widening is not an edit.** Narrowing a perimeter is `rules_amend`;
+widening one, or changing what a rule says, is a supersede that a person
+approves.
 
-Everything else is checked at boot. The preflight is blocking — a failed check
-exits 2 and the server is never reached, because a service that starts anyway
-and warns is a service whose warnings nobody reads.
+**7. A refusal is information.** Every one names the field, the value and the
+rule that was broken, and nothing is half-written: a refused call leaves the
+registry exactly as it was.
+
+</details>
+
+<details>
+<summary><b>Which tool for which job</b></summary>
+
+| You want to | Use | Gate |
+|---|---|---|
+| know what binds you, right now | `rules_list` | reference code |
+| read rules in full, with their reasons | `rules_get` | reference code |
+| see what has been filed and not yet decided | `rules_list(pending=True)` | reference code |
+| propose a rule, or a replacement for one | `rules_propose` | reference code |
+| know which domains, consumers and groups exist | `project_info` | reference code |
+| see what is waiting on your desk | `rules_list`, or `tasks_list` | reference code |
+| read a task in full | `tasks_get` | reference code |
+| put work on somebody's desk | `tasks_add` | reference code |
+| finish or drop a task | `tasks_close` | reference code |
+| fix or reassign an open task | `tasks_amend` | reference code |
+| create a domain, a consumer, a group | `project_amend` | admin code |
+| rename, retire, revive, change a brief or a group | `project_amend` | admin code **+ one-time code** |
+| narrow a rule's perimeter | `rules_amend` | admin code **+ one-time code** |
+| end a rule that has no heir | `rules_retire` | admin code **+ one-time code** |
+| see what the working half cannot — dangling citations, retired names, the queue | `project_status` | admin code |
+| pull the corpus out for a migration or a review | `rules_export` | admin code |
+| see every desk at once | `tasks_overview` | admin code |
+| read the manual, or one command's card | `reference_guide` | none, or both for the admin half |
+
+**Approving is not in this table**, and that is the design: it happens in the
+browser, and no tool reaches it.
+
+</details>
+
+<details>
+<summary><b>The tools</b></summary>
+
+Every tool takes `project` first — the project's **code**, never its name — and
+a test holds these signatures against the code: a README that promises an
+argument the tool has not got is the copy that diverges first. What each one
+does in full, with the refusals it raises quoted as the service words them, is
+in the manual the service itself serves: `reference_guide()` for the model and
+the list of card names, `reference_guide("<name>")` for one command.
+
+### The working half — the reference code
+
+    reference_guide(name='', project='', key='')
+
+The manual, in two grains. Bare, it serves the model page plus `cards`, the list
+of names you may ask for; with `name`, one card and nothing else. The name is
+forgiven surrounding space, capitals and anything from the first bracket on, so
+pasting a whole signature back asks for that card, and an unknown name is
+refused *with* the list. `project` and `key` together serve the administration
+manual instead — a different file this call never opens otherwise.
+
+    project_info(project)
+
+The technical structure of the project, and only what is ALIVE in it: domains
+with their gloss, consumers with kind and brief, groups with their live members.
+Retired names are not here at all — they are readable only from
+`project_status`. Do this first, and find your own consumer name spelled exactly:
+a misspelt role fails later in ways that look like something else.
+
+    rules_list(project, consumer, query='', pending=False)
+
+The session-start call, and the one that answers *what binds me right now*. The
+answer comes in one order: the project's brief and specs, then yours, then the
+legend of the domains present, then your rules in force — universal first, then
+groups from the widest, then what was aimed at you by name — and at the foot your
+open tasks in short form. `query` filters what you are shown; it does not narrow
+what binds you. `pending=True` shows the proposal queue instead, each with its
+reason, which is the only place a chat learns that a proposal of its own was
+denied.
+
+⚠ **A `skill` consumer does not receive the project's brief and specs.** A skill
+runs one job; that material is for whoever deliberates. It arrives **declared** —
+`profile: {withheld: "skill", …}` with the reason — and never dropped in silence,
+because a missing field reads like an empty project.
+
+    rules_get(project, ids, consumer, history=False)
+
+Rules in full. What binds you is the ID and the body; the rest is there so you
+can tell one rule from another and find your way back to the decision. The
+`reason` is the WHY and is **immutable** — a why that could be edited afterwards
+is a why that gets edited to fit. `history=True` adds the dated gestures, the
+hand, and the version number an administrator will be asked for before the rule's
+perimeter can move. The short form resolves on a read, so `VA-02` finds
+`VA-0002` and an old text does not have to be rewritten to be followed. Too many
+IDs at once is refused, not trimmed: a silent cut answers a question you did not
+ask.
+
+    rules_propose(project, domain, type, title, body, reason, reach,
+                  proposed_by, groups=[], exceptions=[], supersedes='',
+                  source='', consumer_key='')
+
+File a rule. It is born `proposed` and binds nobody until a person approves the
+batch it is in, on a page no chat can reach. You pass the **domain** and the
+registry hands back the ID. `supersedes` is how a decision is changed in one
+gesture: approving the heir retires the old rule inside the same transaction.
+File it and forget it — the outcome is in `rules_list(pending=True)`.
+
+    tasks_add(project, consumer, title, body, created_by, urgent=False,
+              idem_key='', consumer_key='')
+
+Put work on a desk — yours or anybody's. Opening one for another desk is the
+point of the log, and it is free. `created_by` is mandatory, `urgent` belongs to
+whoever created it, and `idem_key` is what makes a retry harmless.
+
+    tasks_list(project, consumer, query='', since='', until='',
+               authored=False)
+
+One desk, short form, ordered by the server: urgent first, then the oldest, so
+when a ceiling cuts it cuts the fresh work. Recently closed ones trail.
+`authored=True` turns the question round — what you have put on other people's
+desks.
+
+    tasks_get(project, ids)
+
+Tasks in full: title, body, owner, sender, urgency, state, and the outcome or
+reason if it is closed. ⚠ A citation read expanded here does not always paste
+back: if the rule it points at has since been retired, the door refuses it. The
+cure is to rewrite the citation, not to patch the pointer.
+
+    tasks_close(project, id, by, outcome='', reason='', consumer_key='',
+                key='')
+
+One gesture with two verdicts: `outcome` completes it, `reason` drops it,
+exactly one of the two and neither optional. Only the owner knows how it went,
+and a closed task with nothing written is a task nobody can learn from.
+
+    tasks_amend(project, id, by, title='', body='', consumer='',
+                consumer_key='', key='')
+
+Fix or reassign an OPEN task; anything left empty is left alone. Closed is
+closed, and this is where you meet that.
+
+### The administration half — the admin code
+
+Six tools, and the scale is flat: creating takes the admin code, **modifying
+anything that already exists takes the admin code and a one-time code** minted in
+the browser and burned inside the transaction of the gesture that succeeded.
+
+    project_amend(project, entity, name, action, fields={}, reason='',
+                  auth_code='', key='')
+
+The project itself and its structure — the one door for all of it. `entity` is
+`project | domain | consumer | group`, `action` is `create | amend | retire |
+revive`, `name` identifies the thing and `fields` carries what changes. One
+exception downward: `project.specs` and `consumer.specs` alone travel on the
+reference code, because they are operational data and not identity — presented
+next to a field that costs more, the call is refused WHOLE, naming that field.
+The cases nobody guesses: a domain's code is immutable; a consumer or group name
+is ONE WORD; a name that is amended **stops resolving under the old one**, and
+the verdict lists what to update outside the registry, which nothing updates for
+you; a retired name is still a name taken, so the way past `create` is `revive`;
+and an edit that would leave a rule in force reaching nobody is refused, naming
+the rules, because that is a retirement in disguise.
+
+    rules_amend(project, id, reach, groups, exceptions, expected_version,
+                reason, auth_code, key)
+
+The perimeter of a rule in force — **narrowed only**, and every argument is
+required: there is no partial call here. The new audience must be contained in
+the old one and never empty. Widening is refused with the names it would newly
+bind, because widening puts an obligation on somebody who did not have it, and
+that goes through the page. `expected_version` is what `rules_get(history=True)`
+last showed you: if it moved under you nothing is written, and you read it again
+rather than overwriting a decision you never saw.
+
+    rules_retire(project, id, reason, auth_code, key)
+
+End a rule that has no heir. Two factors, because the way back is a proposal and
+a human approval, and the ID never comes back. **With an heir, do not use this**:
+propose the replacement with `supersedes`. Retirement is a state — nothing is
+deleted, the rule stays readable through its history, and citations already
+written in prose start turning up in `project_status`.
+
+    project_status(project, key)
+
+The report, and the only reading that sees what the working half cannot. It
+reports; it does not correct. Counts, the expiring rules with their reasons, the
+pending queue, `dangling_citations` — pointers that went broken when their target
+was retired, which the door cannot catch because they were valid when written —
+`stray_audience_rows`, and ⚠ **the retired names**, which are readable here and
+nowhere else.
+
+    rules_export(project, key, consumer='', expand=False)
+
+The corpus in one call, for a migration or a review, carrying the `reason` of
+every rule — which is what makes an export a document somebody can decide from.
+`consumer` narrows it to one desk; `expand=True` renders citations with their
+current titles. ⚠ This is the tool that meets **your client's** result cap first:
+above it a result stops being data and becomes a file path, useful only if that
+file lands where your code runs.
+
+    tasks_overview(project, key)
+
+Every desk at once, read-only: who has what open, how old, what is marked stale.
+It answers *is anything waiting on anybody*, which no per-desk call can. Ceilings
+are declared in the answer, so a truncated overview never looks like a quiet
+project — and this is where a human's post is actually read.
+
+### The limits
+
+They are not repeated here. Every ceiling — how many IDs one read takes, how
+large a body may be, how many rules a list returns — is stated in that command's
+card and held against the constant by the suite. A third copy in this README
+would be the one nothing checks, and therefore the one that goes wrong.
+
+</details>
+
+---
 
 ## Security
 
@@ -363,6 +1231,10 @@ and warns is a service whose warnings nobody reads.
   project's page in the browser, shown once, burned inside the transaction of
   the gesture that succeeded. A refusal rolls back and does not consume it;
   alone it elevates nobody. The role does not elevate: the key elevates.
+- **What is catastrophic has no tool.** Approving, minting a one-time code and
+  creating a project are not on the MCP surface at all — the first two live
+  behind the UI's password, the third behind root on the server. A secret of
+  that level never travels in a conversation.
 - **Two manuals, in two files.** `reference_guide()` bare serves the consumer's
   half; the administration half needs the project code *and* the admin code.
   They are two files rather than one text cut at a marker, so "the admin manual
@@ -372,7 +1244,10 @@ and warns is a service whose warnings nobody reads.
   admin code in clear, which is the decision, and it is the one file here that
   is root-only, 0600. The mode is re-imposed at every re-read, not only at
   creation: it is edited from a share, and an editor that writes a new file and
-  renames it over the old one brings its own mode with it.
+  renames it over the old one brings its own mode with it. The line the service
+  prints at boot names the file and how many projects it serves — and no code:
+  that message went through the container log, which is what gets pasted into a
+  conversation when something is wrong.
 - **A malformed call does not print what it carried.** FastMCP validates
   arguments before any tool runs and logs what it rejected, with the arguments
   in the line — a record that obeys no LOG_LEVEL of ours and leaves no
@@ -380,8 +1255,8 @@ and warns is a service whose warnings nobody reads.
   arguments are the project's codes. From v2.1.1 the payload is redacted and the
   diagnosis is not: the tool, the parameter and the rule that was broken all
   survive.
-- **The process runs as root and the database is 0644.** This is the opposite of
-  the vault twin, deliberately: from the share you read and you do not touch,
+- **The process runs as root and the databases are 0644.** This is the opposite
+  of the vault twin, deliberately: from the share you read and you do not touch,
   because a write by hand would bypass the triggers and break history in
   silence.
 - **Project codes are not a security boundary.** They are opaque so projects
@@ -389,7 +1264,37 @@ and warns is a service whose warnings nobody reads.
   a wrong code answers exactly like a missing one. The real boundary is the
   OAuth gate in front.
 
-## Testing
+---
+
+## What it deliberately does not do
+
+**No approval tool.** Promulgating a rule is a person's act, and it happens in a
+browser behind a password no tool carries. That is the whole point of the split:
+redacting and promulgating stop being the same power.
+
+**No project list, and no oracle.** No tool enumerates projects, no error names
+one, and a wrong code answers exactly like a missing one. A chat either has the
+code in its instructions or it asks the person.
+
+**No delete, and no reuse.** Retiring is a state. An ID is never handed out
+twice, in any domain, ever.
+
+**No migration between schema generations.** A database this build does not
+recognise is refused at boot by name, never upgraded in place. The corpus comes
+back through the door, which is slower and leaves a record.
+
+**No dumps by default.** Every tool answers a question rather than emptying a
+table, because every byte coming back lands in a conversation's context, and
+context is the scarce resource. `rules_export` is the exception, and it says so.
+
+**No numbering-gap report, no per-rule notification, no levels of urgency.**
+Each of those would be a mechanism papering over a decision somebody should
+take.
+
+---
+
+<details>
+<summary><b>Testing, and changing this</b></summary>
 
 Five suites. No network, no FastMCP, no Docker.
 
@@ -397,21 +1302,77 @@ Five suites. No network, no FastMCP, no Docker.
 python3 test_schema.py      # the DDL: triggers, constraints, generation
 python3 test_registry.py    # projects.txt, the router, the refusals it raises
 python3 test_collaudo.py    # the engine, refusals included
-python3 test_surface.py     # the seam, the image, the template
+python3 test_surface.py     # the seam: the image, the template, the manuals
 python3 test_crash.py       # SIGKILL mid-transaction, as Docker does
 ```
 
 Each suite prints its own count, and no file repeats it. A number written down
 in two places is two numbers, and this project has already paid for that once.
 
-`test_surface.py` reads the source rather than running it: every call into the
-engine must exist with a compatible signature, every tool that writes must pass
-the gate it claims, no docstring may name a tool that does not exist, and every
-variable the template declares must have a reader in the code — that last one
-because four dead knobs survived three grains in a form a person fills in with
-care.
+`test_surface.py` reads the source rather than running it, from the AST rather
+than by searching the text — a substring search is satisfied by a line that has
+been commented out. Every call into the engine must exist with a compatible
+signature; every tool that writes must pass the gate it claims; no docstring or
+manual may name a tool that does not exist; every variable the template declares
+must have a reader in the code; every module the server imports must appear in a
+`COPY` line of the Dockerfile; the version badge and the tool-count badge in this
+README must match the constant and the AST; and every signature written in this
+README must match the code **in both directions** — every parameter named, and
+no parameter invented.
 
-## The icon, and where it is actually seen
+Two rules of the house, if you change anything here:
+
+- **A control never seen to fail is not a control.** Inject the defect, watch
+  the red, and check that it *names* the culprit — which tool, which value,
+  which line. Several checks in that suite were written, passed, and were then
+  found to be measuring nothing.
+- **A variable added later is born optional**, with a working default in the
+  code, because Unraid does not propagate new variables to containers that
+  already exist.
+
+If you fork this, four traps are in the code rather than in the deployment, and
+all four are the FastMCP ones any self-hosted server of this shape will meet:
+
+- **Sync tools run in a thread from a pool** (`anyio.to_thread.run_sync`), so a
+  SQLite connection opened at import dies on the first call. The cure is
+  `check_same_thread=False` **plus** a re-entrant lock held for the whole of
+  every public method — half the cure is worse than none, because without the
+  lock two multi-statement transactions interleave and one `COMMIT` closes
+  another's, in silence.
+- **A deliberate refusal must not look like a crash.** FastMCP logs its own
+  error type without a traceback and everything else with one, so a refusal you
+  raise arrives as a fault and the log fills with damage that is not damage. It
+  is fixed with a `ToolError` carrying a log level, raised from a decorator
+  wrapping the tool — **not** from a middleware: `call_tool` applies middleware
+  outside and logs inside.
+- **`workflow_dispatch` publishes `:latest` without ever comparing the version
+  constant to the tag.** Gate the `latest` tag on `refs/tags/v`, or every
+  installation pulls an image nothing checked.
+- **The Dockerfile lists its `COPY` lines by hand.** A missing module kills the
+  container at boot, after a tag; a missing `.md` kills nothing and serves an
+  empty manual, which is worse. And `COPY *.py` puts the test files in the
+  image.
+
+</details>
+
+---
+
+## Package contents
+
+| File | |
+|---|---|
+| `rules.py` | the engine: the registry, the projects, the DDL and the version |
+| `server.py` | the MCP tools; parameters in the schema, prose in the manuals |
+| `web.py` | the administration page: sessions, the lot and its digest, the codes |
+| `preflight.py` | the blocking startup checks, and the IP-filter parser |
+| `reference-guide.md` · `reference-guide-admin.md` | the two manuals, cut into cards and served from the image |
+| `entrypoint.sh` | permissions, preflight, start |
+| `Dockerfile` · `requirements.txt` | the image, and the engine pinned to a tag |
+| `codifier-mcp.xml` | Unraid template, every field documented — it **is** the configuration |
+| `codifier-icon.png` | the icon, used in **two** places — see below |
+| `test_*.py` | the five suites, no network needed |
+
+### The icon, and where it is actually seen
 
 `codifier-icon.png` is pointed at by its raw GitHub URL from two files: the
 Unraid template, which puts it on the container, and `server.py`, which passes
@@ -436,8 +1397,10 @@ the list follows with no change here.
 
 [archivist-mcp](https://github.com/alcor6502/archivist-mcp) — a document vault
 with per-dataset git versioning. Same architecture, same OAuth gate, same
-blocking preflight. That one keeps files; this one keeps rules.
+blocking preflight, and both adopt
+[mcp-common-engine](https://github.com/alcor6502/mcp-common-engine), which each
+pins to a tag. That one keeps files; this one keeps rules.
 
 ## Licence
 
-MIT.
+MIT — see [LICENSE](LICENSE).

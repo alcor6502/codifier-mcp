@@ -712,7 +712,7 @@ for _manual, _text in MANUALS.items():
 #
 # TWO SHAPES, since 4.1.0, and the check has to see both or it goes half blind.
 # An INDENTED block is a signature quoted in prose — the abbreviated
-# `rules_list(project, consumer)` at SESSION START, and the block in the READMEs.
+# `rules_list(project, consumer)` at SESSION START, and the ones in the README.
 # A `## name(...)` HEADING is a card, and that is now where the full signatures
 # live. Reading only the first shape would have left every card unchecked while
 # staying green, which is the failure mode this check exists to prevent.
@@ -1641,10 +1641,17 @@ for _label in SERVED_FILES:
     ok(not (_verbs - TOOL_NAMES), f"{_label} names no verb that is not a tool",
        sorted(_verbs - TOOL_NAMES))
 
-# THE READMEs DECLARE THE SURFACE, with the exact signatures. A README is what a
+# THE README DECLARES THE SURFACE, with the exact signatures. A README is what a
 # stranger reads before installing anything, and it is the copy that diverges
 # first — it is not in the image, so nothing else here would ever catch it.
-for _readme in ("README.md", "README.it.md"):
+#
+# ONE README. `README.it.md` was a hand translation, and the twin
+# had already measured what that costs: seven divergences in one sweep, all
+# seven on the translated side. Two files of prose cannot be kept honest by a
+# test — this check pins the signatures in them and nothing else — and a
+# translation that is wrong is worse than one that is missing, because it gets
+# believed.
+for _readme in ("README.md",):
     _src = source_or_none(os.path.join(HERE, _readme)) or ""
     _seen: dict = {}
     for _n, _ps in signatures_in(_src):
@@ -1664,6 +1671,36 @@ for _readme in ("README.md", "README.it.md"):
                        for p in ps if p not in CODE_PARAMS[n])
     ok(not _invented, f"{_readme} promises no parameter the code has not got",
        _invented)
+
+    # AND THE COLLAPSIBLE SECTIONS ARE BALANCED. Almost everything in that file
+    # that is not prose lives inside a <details>, and an unclosed one is NOT a
+    # syntax error for GitHub: it swallows the rest of the page into that
+    # section, so the README renders SHORT instead of broken. Nobody reports a
+    # page that looks finished. Counted line by line rather than with a total,
+    # because </details><details> in the wrong order balances perfectly.
+    _depth, _worst, _orphan = 0, 0, []
+    for _i, _ln in enumerate(_src.splitlines(), 1):
+        _s = _ln.strip()
+        if _s.startswith("<details"):
+            _depth += 1
+            _worst = max(_worst, _depth)
+        elif _s.startswith("</details>"):
+            _depth -= 1
+            if _depth < 0:
+                _orphan.append(f"line {_i}: </details> with nothing open")
+                _depth = 0
+        elif _s.startswith("<summary") and _depth == 0:
+            _orphan.append(f"line {_i}: <summary> outside any <details>")
+    ok(_depth == 0, f"{_readme}: every <details> is closed",
+       f"{_depth} left open — the page will render short, not broken")
+    ok(not _orphan, f"{_readme}: no stray tag", "; ".join(_orphan))
+    # A <summary> is what makes a section openable. One <details> without it
+    # renders as a block that cannot be opened at all, and its content is gone
+    # from the page without a gap where it was.
+    _d = len(re.findall(r"^\s*<details", _src, re.MULTILINE))
+    _u = len(re.findall(r"^\s*<summary", _src, re.MULTILINE))
+    ok(_d == _u, f"{_readme}: every <details> carries a <summary>",
+       f"{_d} details vs {_u} summaries")
 
 # =====================================================================
 # 3 · no docstring points at a tool that is not there
@@ -2087,14 +2124,14 @@ ok("fastmcp" not in ENGINE_IMPORTS and "mcp" not in ENGINE_IMPORTS,
 print("\n== the version is written in one place and copied nowhere ==")
 
 # VERSION lives in rules.py and the CI compares it with the tag. The badges in
-# the two READMEs are hand copies of it, and nothing tied them to anything:
+# the badge in the README is a hand copy of it, and nothing tied it to anything:
 # setting VERSION to 9.9.9 left the whole suite green. The number that appears
 # in the startup line is now what the Log Level field points at as the proof
 # that an update took, so a README claiming a different one is a second answer
 # to a question that must have one.
 from rules import VERSION as _V                                 # noqa: E402
 
-for _readme, _label in (("README.md", "version"), ("README.it.md", "versione")):
+for _readme, _label in (("README.md", "version"),):
     _txt = source(os.path.join(HERE, _readme))
     _badges = re.findall(rf"badge/{_label}-([0-9]+\.[0-9]+\.[0-9]+)-", _txt)
     ok(_badges == [_V], f"{_readme}: the version badge says {_V}", _badges)
