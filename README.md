@@ -36,7 +36,7 @@ job, and because it is a reading job it gets done badly.
 | Changing one rule that lives in three memories | three edits, and you forget the third | one edit |
 | Reusing a retired rule's number | nothing stops you | the database refuses |
 | "Why is this rule here?" | ask whoever wrote it | the reason is mandatory, and kept |
-| A rule that stopped being needed | stays forever | expires unless renewed |
+| A rule that stopped being needed | stays forever | its term runs out and it drops out on its own |
 | Two rules that say the same thing | somebody notices, eventually | the queue is read whole before anything is approved |
 | Someone edits the file by hand | invisible | recorded by a trigger |
 
@@ -82,18 +82,44 @@ no audience, no approval, no expiry. Rules bind; tasks wait.
 
 ### How a rule gets in
 
-    proposed ──(approved batch)──> active + provisional ──(promotion)──> permanent
-        │                              │
-        │                              └──> retired
-        └──> denied  (with a reason, and the row STAYS)
+    proposed ──approved, by a batch──> in force ──promoted──> in force
+        │                              provisional            permanent
+        │                                 │    │                  │
+        └──denied──> denied               │    └──> retired <─────┘
+                     the row STAYS,       │
+                     with its reason  the date passes
+                                          │
+                                          └────> out of force
+
+Two axes, not one, and the difference is where the confusion lives.
+**`status`** is `proposed | active | retired | denied` — what was decided about
+the rule. **`permanence`** is `provisional | permanent` — whether the decision
+has a date on it. Approval writes both: `active` **and** `provisional`, with an
+expiry stamped on the row.
+
+There are therefore three ways out of the list, and only two of them are
+gestures:
+
+- **retired** — `rules_retire`, or the approval of a supersede, which retires
+  the rule it replaces inside the same transaction. It costs a reason, it is
+  recorded, and the ID never comes back;
+- **promoted** — the other direction: the date is removed and the rule stops
+  having to be renewed. It stays until it is retired or superseded;
+- **the term running out** — and this one writes *nothing*. No gesture, no
+  change of status: the row still says `active`, and the rule has simply left
+  every list. It is not gone and it is not retired — renew it from the page and
+  it is in force again under the same ID. Which is also why a citation towards
+  a lapsed rule is refused with those words: nobody decided that, a clock did.
 
 Two mechanisms, and both exist because of the same diagnosis: a project went
 from 63 rules to 172, not because anyone wrote without permission, but because
 **adding costs a call and removing costs a decision nobody takes.**
 
-**Expiry inverts that.** An approved rule is provisional and leaves the lists on
-its own unless somebody decides to keep it. Staying costs a decision, going is
-free.
+**Expiry inverts that.** An approved rule is born provisional and leaves the
+lists on its own unless somebody decides to keep it — renewed for another term,
+or promoted to permanent, which ends the question for good. Staying costs a
+decision, going is free. It is not a purge: a lapsed rule is still there, under
+the same ID, and renewing it from the page puts it back in force.
 
 **Approval is by batch, against its digest.** Proposals accumulate, and you see
 them together, which is the only moment three near-duplicates are visible as
