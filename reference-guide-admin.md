@@ -66,9 +66,13 @@ The project's STRUCTURE — the one door for all of it.
   **`action`**: `create` | `amend` | `retire` | `revive`.
   **`name`** identifies the thing; **`fields`** carries what changes.
 - **`by`** is YOUR consumer name, spelled as `project_info` spells it, and it is
-  REQUIRED. It is the hand the history records. A call without it is refused
-  before anything else is looked at: a register that cannot say whose gesture a
-  row was answers the wrong question six months later.
+  REQUIRED. It is the hand the history records: a register that cannot say whose
+  gesture a row was answers the wrong question six months later.
+  ⚠ It is required **in the schema**, so a call that OMITS it does not reach
+  this service at all — your client refuses it first, with a message of its own
+  that names the missing argument and nothing else. A call that passes it EMPTY
+  is schema-valid and gets here, and then the refusal is ours and says the
+  sentence above. Two doors, two different mistakes.
 - ⚠ **PEOPLE ARE NOT HERE AT ALL.** A consumer of kind `human` is created,
   renamed, retired and revived on the **administration page**, and so is their
   address and the mark that says whose desk hears about the proposals. Every
