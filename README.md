@@ -1261,11 +1261,10 @@ written in prose start turning up in `project_status`.
     project_status(project, key)
 
 The report, and the only reading that sees what the working half cannot. It
-reports; it does not correct. Counts, the expiring rules with their reasons, the
-pending queue, `dangling_citations` — pointers that went broken when their target
-was retired, which the door cannot catch because they were valid when written —
-`stray_audience_rows`, and ⚠ **the retired names**, which are readable here and
-nowhere else.
+reports; it does not correct. Counts, the pending queue, `dangling_citations` —
+pointers that went broken when their target was retired, which the door cannot
+catch because they were valid when written — `stray_audience_rows`, and ⚠ **the
+retired names**, which are readable here and nowhere else.
 
     rules_export(project, key, consumer='', expand=False)
 

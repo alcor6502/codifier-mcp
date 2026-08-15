@@ -2945,6 +2945,54 @@ ok(GUIDE_SRC.count("legend of the domains present") == 1,
    "the manual pins the legend, exactly once",
    GUIDE_SRC.count("legend of the domains present"))
 
+# THE MAIL MODULE ASKS THE ENGINE, IT DOES NOT REACH INTO IT. `Project` is
+# wrapped by `_serialised`, and the whole safety of `check_same_thread=False`
+# is that every public method takes the lock before touching the connection. A
+# `prj.cx.execute(...)` from outside is a read on a shared connection while
+# another thread may be half way through a multi-statement transaction — rare,
+# unreproducible, and blamed on sqlite when it finally bites.
+#
+# It was written that way first, and no case went red: the probes pass, the
+# suites pass, and the defect only exists under concurrency. So the guarantee is
+# stated as SHAPE — nothing in this module names `.cx` — which is a thing an
+# AST can be sure about.
+_MAIL_TREE = parse(os.path.join(HERE, "mail.py"))
+_CX = [ast.unparse(n) for n in ast.walk(_MAIL_TREE)
+       if isinstance(n, ast.Attribute) and n.attr == "cx"]
+ok(not _CX,
+   "mail.py reaches the engine through its methods and never through `prj.cx`: "
+   "the lock that makes one connection safe lives inside those methods", _CX)
+_MAIL_ASKS = sorted({n.func.attr for n in ast.walk(_MAIL_TREE)
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                     and isinstance(n.func.value, ast.Name)
+                     and n.func.value.id == "prj"})
+ok(_MAIL_ASKS == ["approver", "postbox"],
+   f"and the doors it uses are exactly these: {_MAIL_ASKS}", _MAIL_ASKS)
+
+# AND THE OTHER DIRECTION, on the DOCUMENTS this image serves. The check above
+# and the one on `project_status`'s docstring are both about what must BE
+# there; neither sees what should have LEFT, and two survivors proved it — the
+# admin card and the README both went on offering "the expiring rules with
+# their reasons" while nothing computes them. The words are looked for in the
+# served manuals and in the README together, because a reader meets whichever
+# of the three they open first.
+_GONE_WITH_THE_EXPIRY = ("expiring", "provisional", "permanence", "renew the",
+                         "promote the", "expires_at")
+for _fname, _src3 in (("reference-guide.md", GUIDE_SRC),
+                      ("reference-guide-admin.md",
+                       MANUALS.get("reference-guide-admin.md") or ""),
+                      ("README.md",
+                       source_or_none(os.path.join(HERE, "README.md")) or "")):
+    _left = [w for w in _GONE_WITH_THE_EXPIRY if w in _src3.lower()]
+    # The README is allowed to SAY the words, once, in the paragraph that
+    # explains what v5.0.0 took away and why — a document that only describes
+    # the present teaches nobody why the present is like that. What it may not
+    # do is go on describing them as things the service does.
+    if _fname == "README.md":
+        _left = [w for w in _left if _src3.lower().count(w) > 1]
+    ok(not _left,
+       f"{_fname} no longer offers what left with the expiry", _left)
+
 print("\n== a verdict's note is spoken surface, and goes stale like a docstring ==")
 
 # `rules_batch` shipped 3.0.0 telling every caller to "pass this digest to

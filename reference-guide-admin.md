@@ -209,7 +209,9 @@ the way back is a proposal and a human approval, and the ID never comes back.
 The report, and the only reading that sees what the working half cannot. It
 reports; it does not correct. One factor.
 
-- Computed counts, the expiring rules **with their reasons**, the pending queue.
+- Computed counts and the pending queue. Nothing about a lifecycle, because
+  there is not one to report: a rule in force stays in force until somebody
+  ends it.
 - **`dangling_citations`** — prose citations pointing at retired or missing
   rules. It covers the prose of every rule and the title and body of every OPEN
   task. The door refuses a pointer that is born broken; this catches the one

@@ -4087,6 +4087,29 @@ class Project:
                               "AND retired_at IS NULL").fetchone()
         return None if row is None else {"name": row["name"], "email": row["email"]}
 
+    def postbox(self, consumer: str) -> dict | None:
+        """WHERE TO POST TO for one consumer, or None if nowhere.
+
+        It exists so that the mail module has a DOOR instead of a connection.
+        Written first as `prj.cx.execute(...)` inside `mail.py`, which was
+        wrong for a reason that would never have shown up in a test: this class
+        is wrapped by `_serialised`, and the whole safety of
+        `check_same_thread=False` is that every public method takes the lock. A
+        raw read from outside is a read on a shared connection while another
+        thread may be half way through a multi-statement transaction — rare,
+        unreproducible, and exactly the kind of thing that gets blamed on
+        sqlite.
+
+        None for a chat or a skill, and None for a human without an address:
+        the two silences are the same silence to the caller, because the caller
+        does nothing different about them."""
+        row = self.cx.execute(
+            "SELECT name, kind, email FROM consumer WHERE lower(name)=?",
+            (_fold(consumer),)).fetchone()
+        if row is None or row["kind"] != "human" or not row["email"]:
+            return None
+        return {"name": row["name"], "email": row["email"]}
+
     @staticmethod
     def _rename_note(old: str, new: str) -> str:
         """A rename is a gesture in TWO TIMES, and the second one is not the

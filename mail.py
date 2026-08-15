@@ -202,9 +202,17 @@ def from_env(log=None) -> Mailer:
 
 
 # =====================================================================
-# The two things that are posted. They take the ENGINE and read from it,
-# rather than being handed an address by a tool's verdict: an address that
-# travelled through a tool's answer would be an address in a chat's context.
+# The two things that are posted. They take the ENGINE and ask it, rather than
+# being handed an address by a tool's verdict: an address that travelled
+# through a tool's answer would be an address in a chat's context.
+#
+# ⚠ AND THEY ASK IT THROUGH ITS METHODS — `postbox`, `approver` — never through
+# `prj.cx`. The first version of this file read the connection directly, which
+# was wrong for a reason no test would have shown: `Project` is wrapped by
+# `_serialised`, and the whole safety of `check_same_thread=False` is that
+# every public method takes the lock first. A raw read from here is a read on a
+# shared connection while another thread may be half way through a
+# multi-statement transaction.
 # =====================================================================
 
 def task_opened(mailer: Mailer, prj, tid: str, owner: str, sender: str,
@@ -214,9 +222,8 @@ def task_opened(mailer: Mailer, prj, tid: str, owner: str, sender: str,
     knock on the door, and the register is where the work is read."""
     if not mailer.configured:
         return False
-    row = prj.cx.execute("SELECT name, kind, email FROM consumer WHERE lower(name)=?",
-                         (owner.lower(),)).fetchone()
-    if row is None or row["kind"] != "human" or not row["email"]:
+    row = prj.postbox(owner)
+    if row is None:
         return False
     mark = "URGENT · " if urgent else ""
     return mailer.send(
