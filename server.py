@@ -672,25 +672,44 @@ def tasks_amend(project: str, id: str, by: str, title: str = "", body: str = "",
 
 @tool
 def project_amend(project: str, entity: str, name: str, action: str,
-                  fields: dict | None = None, reason: str = "",
+                  by: str, fields: dict | None = None, reason: str = "",
                   auth_code: str = "", key: str = "") -> dict:
-    """Amend the project itself or its STRUCTURE — profile, domains, consumers,
-    groups. Rules and tasks are the project's OBJECTS and have tools of their
-    own; the prefix says which level a call works on.
+    """Amend the project's STRUCTURE — domains, consumers, groups. Rules and
+    tasks are the project's OBJECTS and have tools of their own; the prefix
+    says which level a call works on.
 
-    `entity`: project | domain | consumer | group. `action`: create | amend |
-    retire | revive. `fields` carries only what changes.
+    `entity`: domain | consumer | group. `action`: create | amend | retire |
+    revive. `fields` carries only what changes. `by` is YOUR consumer name,
+    spelled as `project_info` spells it: it is the hand the history records,
+    and it is required.
+
+    THE PROJECT ITSELF IS NOT HERE. Its `brief`, its `specs` and its
+    `queue_cap` are changed by a person on the administration page, behind its
+    password — not by this tool and not by the admin code either. The brief is
+    the project's identity and the specs are the facts every reading is done
+    against: what is FUNDATIVE has no tool, the way what is catastrophic has
+    none. Suggest the wording to whoever administers the project.
+
+    A CONSUMER'S `specs` ARE THAT CONSUMER'S. `specs` in the call under a
+    different name is refused, and the refusal carries the road: open a task
+    for that consumer with `tasks_add`, and you will see from the log whether
+    it was done and why if it was not. The rule has no exception — not for the
+    admin code, not with a one-time code, whatever else rides in `fields`.
+    ⚠ And the boundary is worth knowing: `by` is DECLARED, not proven. It stops
+    the mistake and the confusion, not the lie — inside a login restricted to
+    one person there are no strangers in the project, and that is the real
+    perimeter.
 
     THE LADDER IS FLAT: `create` passes on the admin code — a created thing is
     attached to nothing, and the only door that ties a rule to an audience is
     `rules_propose`, which goes past a person. Every `amend`, `retire` and
-    `revive` — renames, briefs, group membership, `queue_cap` — asks for a
-    one-time `auth_code` AS WELL, minted on the administration page: it lives
-    minutes and it is burned in the same transaction as the SUCCEEDED gesture,
-    so a refusal rolls it back and a typo costs nothing. Spent or expired it is
-    nothing, and alone it elevates nobody. ONE exception downward, declared:
-    `specs` alone — the project's or a consumer's — travels on the reference
-    code, because that is operational data and not identity.
+    `revive` — renames, briefs, group membership — asks for a one-time
+    `auth_code` AS WELL, minted on the administration page: it lives minutes
+    and it is burned in the same transaction as the SUCCEEDED gesture, so a
+    refusal rolls it back and a typo costs nothing. Spent or expired it is
+    nothing, and alone it elevates nobody. ONE exception downward, declared: a
+    consumer's `specs` alone travel on the reference code, because that is
+    operational data and not identity.
 
     A MIXED `fields` presented with the lower credential is refused WHOLE,
     naming the field that needs the higher port. The authorised subset is never
@@ -719,8 +738,11 @@ def project_amend(project: str, entity: str, name: str, action: str,
             # hand the ordinary refusals speak for themselves.
             Project.refuse_mixed(entity, action, fields)
         prj = _admin(project, key)
+    # `by` AND NOT A FIXED 'admin': the actor is what the history writes, and
+    # this door is reachable on the reference code alone, so a constant here
+    # recorded the administrator for gestures no administrator made.
     return prj.amend_project(entity, name, action, fields, reason=reason,
-                             actor=ADMIN_ACTOR, auth_code=auth_code)
+                             actor=by, auth_code=auth_code)
 
 
 @tool

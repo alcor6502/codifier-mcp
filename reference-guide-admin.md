@@ -50,28 +50,58 @@ down for a typo does not cost you a trip back to the page.
 ## WHAT IS NOT HERE
 
 **The web UI**, which no chat can reach: approve or deny the batch against the
-digest, mint one-time auth codes, per-project backup,
+digest, write the project's own profile, mint one-time auth codes,
+per-project backup,
 consultation, log. Approval is the act these tools deliberately do not have.
 
 # COMMANDS
 
 One card each. `reference_guide("<name>", project, key)` returns just one.
 
-## project_amend(project, entity, name, action, fields={}, reason='', auth_code='', key='')
+## project_amend(project, entity, name, action, by, fields={}, reason='', auth_code='', key='')
 
-The project itself and its structure — the one door for all of it.
+The project's STRUCTURE — the one door for all of it.
 
-- **`entity`**: `project` | `domain` | `consumer` | `group`.
+- **`entity`**: `domain` | `consumer` | `group`.
   **`action`**: `create` | `amend` | `retire` | `revive`.
   **`name`** identifies the thing; **`fields`** carries what changes.
+- **`by`** is YOUR consumer name, spelled as `project_info` spells it, and it is
+  REQUIRED. It is the hand the history records. A call without it is refused
+  before anything else is looked at: a register that cannot say whose gesture a
+  row was answers the wrong question six months later.
+- **THE PROJECT ITSELF IS NOT HERE.** Its `brief`, its `specs` and its
+  `queue_cap` are written by a person on the administration page, behind that
+  page's password — not by this command and not by the admin code either. The
+  brief is the project's identity and the specs are the facts every reading is
+  done against: what is FUNDATIVE has no tool, the way what is catastrophic has
+  none. Suggest the wording to whoever administers the project; the change is
+  theirs. `entity='project'` is refused saying exactly this.
+- **A CONSUMER'S `specs` ARE THAT CONSUMER'S.** `specs` in the call under a
+  different name is refused, and the rule has NO exception — not with the admin
+  code, not with a one-time code, whatever else rides along in `fields`. The
+  refusal carries the road:
+
+      the specs of advisory are changed by advisory. If you need them changed,
+      open a task: tasks_add(project, consumer='advisory', title=…, body=…,
+      created_by='tax'). When you see it closed you will know whether it was
+      done, and with what reason if it was not.
+
+  That is the point of answering with a task rather than with a permission: a
+  permission denies and leaves nothing behind, a task leaves on the record who
+  wanted what and how it ended.
+
+  ⚠ **`by` is DECLARED, not proven.** It stops the mistake and the confusion,
+  never the lie: a chat that writes somebody else's name goes through. That is
+  accepted rather than overlooked — inside a login restricted to a single user
+  there are no strangers in the project, and that is the real perimeter. Do not
+  build anything on this that needs more than that.
 - The ladder is the FLAT one, and this command has no case list of its own:
   `create` takes the admin code; every `amend`, `retire` and `revive` — briefs,
-  names, group membership, `queue_cap` — takes the admin code AND a one-time
-  `auth_code`.
-- **One exception downward:** `project.specs` and `consumer.specs` ALONE pass on
-  the reference code, because they are operational data and not identity.
-  Presented next to a field that needs a higher gate, the call is refused WHOLE,
-  naming the field that costs more:
+  names, group membership — takes the admin code AND a one-time `auth_code`.
+- **One exception downward:** a consumer's `specs` ALONE pass on the reference
+  code, because they are operational data and not identity. Presented next to a
+  field that needs a higher gate, the call is refused WHOLE, naming the field
+  that costs more:
 
       brief: this field is not operational data, and it does not travel on the
       reference code — specs would. The call is refused WHOLE: the part you

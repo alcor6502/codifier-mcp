@@ -646,9 +646,11 @@ Then the round trip that proves the machine, end to end:
 
 ```
 project_amend(project="<ref>", entity="domain", name="PE", action="create",
-              fields={"description": "…"}, reason="…", key="<admin>")
+              by="architect", fields={"description": "…"}, reason="…",
+              key="<admin>")
 project_amend(project="<ref>", entity="consumer", name="architect",
-              action="create", fields={"kind": "chat"}, key="<admin>")
+              action="create", by="architect", fields={"kind": "chat"},
+              key="<admin>")
 rules_propose(project="<ref>", domain="PE", type="F", title="…", body="…",
               reason="…", reach="all", proposed_by="architect")
 rules_list(project="<ref>", consumer="architect")   → count 0: a proposal is not a rule
@@ -1045,6 +1047,8 @@ registry exactly as it was.
 | fix or reassign an open task | `tasks_amend` | reference code |
 | create a domain, a consumer, a group | `project_amend` | admin code |
 | rename, retire, revive, change a brief or a group | `project_amend` | admin code **+ one-time code** |
+| change your OWN specs, as a consumer | `project_amend` | reference code |
+| change the PROJECT's brief, specs or queue ceiling | *no tool* | the administration page |
 | narrow a rule's perimeter | `rules_amend` | admin code **+ one-time code** |
 | end a rule that has no heir | `rules_retire` | admin code **+ one-time code** |
 | see what the working half cannot — dangling citations, retired names, the queue | `project_status` | admin code |
@@ -1165,15 +1169,25 @@ Six tools, and the scale is flat: creating takes the admin code, **modifying
 anything that already exists takes the admin code and a one-time code** minted in
 the browser and burned inside the transaction of the gesture that succeeded.
 
-    project_amend(project, entity, name, action, fields={}, reason='',
+    project_amend(project, entity, name, action, by, fields={}, reason='',
                   auth_code='', key='')
 
-The project itself and its structure — the one door for all of it. `entity` is
-`project | domain | consumer | group`, `action` is `create | amend | retire |
-revive`, `name` identifies the thing and `fields` carries what changes. One
-exception downward: `project.specs` and `consumer.specs` alone travel on the
-reference code, because they are operational data and not identity — presented
-next to a field that costs more, the call is refused WHOLE, naming that field.
+The project's STRUCTURE — the one door for all of it. `entity` is `domain |
+consumer | group`, `action` is `create | amend | retire | revive`, `name`
+identifies the thing, `fields` carries what changes, and `by` is your consumer
+name — required, because it is the hand the history records.
+
+The project ITSELF is not here. Its brief, its specs and its queue ceiling are
+written by a person on the administration page: what is fundative has no tool,
+the way what is catastrophic has none. And a consumer's `specs` are that
+consumer's — `specs` under another name is refused, with no exception for the
+admin code, and the refusal says to open a task instead. `by` is declared and
+not proven: it stops the mistake, never the lie, and inside a login restricted
+to one person that is the perimeter that matters.
+
+One exception downward: a consumer's `specs` alone travel on the reference
+code, because they are operational data and not identity — presented next to a
+field that costs more, the call is refused WHOLE, naming that field.
 The cases nobody guesses: a domain's code is immutable; a consumer or group name
 is ONE WORD; a name that is amended **stops resolving under the old one**, and
 the verdict lists what to update outside the registry, which nothing updates for

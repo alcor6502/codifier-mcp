@@ -3479,16 +3479,37 @@ class Project:
     # credentials, with the entity and the action, because sending somebody to
     # the maintenance page to mint a one-time code for a gesture that does not
     # exist is a trip that ends in the same refusal.
-    NO_TOOL = {("project", "create"), ("project", "retire"), ("project", "revive")}
-    NO_TOOL_WHY = ("the project is not created, retired or revived from here: it is a "
-                   "line in projects.txt and a folder on disk, and both are Unraid's. "
-                   "What is catastrophic has no tool.")
+    # It is a MAPPING and not a set since 5.0.0, because the four combinations
+    # no longer share one reason: three are catastrophic and one is fundative,
+    # and a refusal that gave the wrong one of those two would send the reader
+    # to the wrong place. `project` stays in ENTITIES precisely so these
+    # sentences can be said — dropping it would answer "not an entity", which
+    # is true and useless.
+    NO_TOOL = {
+        ("project", "create"): "the project is not created from here: it is a line in "
+                               "projects.txt and a folder on disk, and both are Unraid's. "
+                               "What is catastrophic has no tool.",
+        ("project", "retire"): "the project is not retired from here: it is a line in "
+                               "projects.txt and a folder on disk, and both are Unraid's. "
+                               "What is catastrophic has no tool.",
+        ("project", "revive"): "the project is not revived from here: it is a line in "
+                               "projects.txt and a folder on disk, and both are Unraid's. "
+                               "What is catastrophic has no tool.",
+        ("project", "amend"): "the project's own brief, specs and queue_cap are not "
+                              "amended from here, and not by the admin code either: they "
+                              "are changed by a person on the administration page, behind "
+                              "its password. The brief is the project's identity and the "
+                              "specs are the facts everything else is read against — what "
+                              "is FUNDATIVE has no tool, the way what is catastrophic has "
+                              "none. Suggest the wording to whoever administers the "
+                              "project; the change is theirs to make. Your OWN specs, as "
+                              "a consumer, you change yourself: entity='consumer'.",
+    }
 
     # The fields each entity accepts, per action. Written once and read by both
     # the door and the ladder below: a field the door accepts and the ladder
     # has never heard of would be a field with no gate.
     FIELDS = {
-        "project": {"amend": ("brief", "specs", "queue_cap")},
         "domain": {"create": ("code", "description", "reason"),
                    "amend": ("description",)},
         "consumer": {"create": ("name", "kind", "brief", "specs", "secret"),
@@ -3498,10 +3519,16 @@ class Project:
     }
 
     # The ONE exception downward, and it is declared rather than deduced:
-    # operational data moves on the reference code. `brief` is identity and
-    # does not — a chat holding only the reference code must not be able to
-    # rewrite its own mandate.
-    SPECS_ONLY = {("project", "specs"), ("consumer", "specs")}
+    # a consumer's operational data moves on the reference code. `brief` is
+    # identity and does not — a chat holding only the reference code must not
+    # be able to rewrite its own mandate.
+    #
+    # It held TWO pairs until 5.0.0, and the second one was the project's own
+    # specs. That entity left this tool altogether: a rule with one exception
+    # is checkable, with two it starts to rot, and the pair that went was the
+    # one where "whose specs are these?" had no answer — `project_amend` did
+    # not carry the caller's name, so there was no such thing as "one's own".
+    SPECS_ONLY = {("consumer", "specs")}
 
     @classmethod
     def port_for(cls, entity: str, action: str, fields=None) -> str:
@@ -3536,6 +3563,43 @@ class Project:
         return "auth"
 
     @classmethod
+    def refuse_not_yours(cls, entity: str, action: str, name: str, by: str) -> None:
+        """A consumer's `specs` travel under that consumer's OWN name, and this
+        is the whole of the rule: one sentence, no exceptions, not even for the
+        administrator. `specs` in the call and a different name on it is
+        refused — with or without the admin code, with or without a one-time
+        code, whatever else rides along in `fields`.
+
+        WITHOUT EXCEPTIONS ON PURPOSE. The permissive version — the rule holds
+        on the low door and the admin may write anybody's — is two rules, and
+        the day somebody asks which one applies the answer is "it depends what
+        else was in the call". An administrator who needs a consumer's specs
+        changed asks that consumer, in the same way anyone else does.
+
+        THE REFUSAL CARRIES THE ROAD, and that is not politeness: a refusal
+        that says only `no` makes a chat try something worse. It says to open a
+        task, which a permission system cannot do — a permission denies and
+        leaves nothing behind, a task leaves on the record who wanted what and
+        how it ended.
+
+        ⚠ AND THE BOUNDARY IS WRITTEN DOWN, here and in the manual. A declared
+        name stops the mistake and the confusion; it does NOT stop the lie. A
+        chat that writes `advisory` where its own name belongs goes through.
+        That is accepted: inside OAuth with a single login admitted there are
+        no strangers in the project, and that is the real perimeter. What must
+        never happen is somebody building a trust on this that it cannot carry,
+        which is why the sentence is in the card of the command."""
+        if entity != "consumer" or action != "amend":
+            return
+        if _fold(by) == _fold(name or ""):
+            return
+        raise RulesError(
+            f"the specs of {name} are changed by {name}. If you need them changed, open "
+            f"a task: tasks_add(project, consumer={name!r}, title=…, body=…, "
+            f"created_by={by!r}). When you see it closed you will know whether it was "
+            "done, and with what reason if it was not. Nothing was written.")
+
+    @classmethod
     def refuse_mixed(cls, entity: str, action: str, fields=None) -> None:
         """The MIXED call, refused WHOLE and naming the field that costs more.
 
@@ -3564,9 +3628,10 @@ class Project:
     def amend_project(self, entity: str, name: str, action: str, fields=None,
                       reason: str = "", actor: str = "",
                       auth_code: str = "") -> dict:
-        """The project itself and its STRUCTURE — profile, domains, consumers,
-        groups. Rules and tasks are the project's OBJECTS and have tools of
-        their own; the prefix says which level a call works on.
+        """The project's STRUCTURE — domains, consumers, groups. Rules and tasks
+        are the project's OBJECTS and have tools of their own; the prefix says
+        which level a call works on. The project ITSELF is not amended here any
+        more, and `NO_TOOL` says where it went.
 
         Every refusal in here repeats a guarantee that lives in the schema,
         because the schema's message is about a table and this one can be about
@@ -3583,7 +3648,29 @@ class Project:
         if action not in self.ACTIONS:
             raise RulesError(f"action {action!r}: one of {', '.join(self.ACTIONS)}.")
         if (entity, action) in self.NO_TOOL:
-            raise RulesError(self.NO_TOOL_WHY)
+            raise RulesError(self.NO_TOOL[(entity, action)])
+        # A GESTURE WITH NO HAND is refused, and it is refused HERE — after
+        # NO_TOOL, because asking somebody to sign a gesture that does not
+        # exist is the trip that ends in the same refusal, and before
+        # everything else, because every check under it can then assume a name.
+        #
+        # The history has a column for the hand. Until 5.0.0 the surface passed
+        # a fixed 'admin' into it, so every write through this door was recorded
+        # as the administrator's whoever made it — and this door is reachable on
+        # the reference code alone, which is what made that a lie rather than a
+        # simplification.
+        if not (actor or "").strip():
+            raise RulesError(
+                "`by` is required: it is the name this gesture is recorded under, and a "
+                "history that cannot say whose hand it was is a history that answers the "
+                "wrong question six months later. Use your consumer name, spelled as "
+                "project_info spells it.")
+        # WHOSE SPECS, asked next — among the checks about the SHAPE of the
+        # call and before the credentials, because it compares two arguments
+        # and reads nothing. A refusal on it must not cost a one-time code, and
+        # it must not need one either.
+        if "specs" in fields:
+            self.refuse_not_yours(entity, action, name, actor)
         # The order of these two matters: on a retirement EVERY field is
         # unknown, and "not a field" would send the caller looking for the
         # right spelling of something that has no business being there.
@@ -3628,42 +3715,59 @@ class Project:
         handler = getattr(self, f"_amend_{entity}")
         return handler(name, action, fields, (reason or "").strip(), actor, gesture)
 
-    # ---------- the profile ----------
+    # ---------- the profile: written from the page, and nowhere else ----------
 
-    def _amend_project(self, name, action, fields, reason, actor,
-                     gesture) -> dict:
-        # The impossible combinations are refused by `amend_project`, from
-        # NO_TOOL, before the credentials are asked for. This is the last line
-        # and it says the same thing from the same constant: a message written
-        # twice is a message that goes out of step once.
-        if action != "amend":
-            raise RulesError(self.NO_TOOL_WHY)
+    def set_profile(self, brief=None, specs=None, queue_cap="",
+                    actor: str = "web ui") -> dict:
+        """The project's own brief, specs and queue_cap, written by a PERSON.
+
+        There is no tool for this, and that is the decision: the brief is the
+        project's identity and the specs are the facts every reading is done
+        against, so they move where there is a password and a human — the same
+        shape as `decide`, `mint_auth_code` and `backup`. It stays an engine
+        method so the suites can exercise it without a server; what changed is
+        who exposes it.
+
+        `None` on brief or specs means LEAVE IT, and the empty string means
+        CLEAR IT — which are two different gestures and would be one if the
+        argument defaulted to "". `queue_cap` takes the same shape: `""` is
+        leave it, `None` is unlimited, `0` closes the queue.
+
+        The citation door runs on brief and specs like it does on every other
+        prose in the register: the page is a writer like the others, and a
+        pointer written there goes stale the same way."""
         row = self._profile_row()
-        brief = fields.get("brief", row["brief"] if row else None)
-        specs = fields.get("specs", row["specs"] if row else None)
-        cap = fields.get("queue_cap", row["queue_cap"] if row else None)
-        if "queue_cap" in fields and cap is not None:
-            cap = int(cap)
-            if cap < 0:
+        cur_brief = row["brief"] if row else None
+        cur_specs = row["specs"] if row else None
+        cur_cap = row["queue_cap"] if row else None
+        new_brief = cur_brief if brief is None else self._prose("brief", brief) or None
+        new_specs = cur_specs if specs is None else self._prose("specs", specs) or None
+        if queue_cap == "":
+            new_cap = cur_cap
+        elif queue_cap is None:
+            new_cap = None
+        else:
+            new_cap = int(queue_cap)
+            if new_cap < 0:
                 raise RulesError("queue_cap: null is unlimited, 0 closes the queue, N is "
                                  "N. A negative ceiling is none of the three.")
-        if "brief" in fields:
-            brief = self._prose("brief", brief)
-        if "specs" in fields:
-            specs = self._prose("specs", specs)
-        with gesture():
+        changed = sorted(
+            k for k, a, b in (("brief", cur_brief, new_brief),
+                              ("specs", cur_specs, new_specs),
+                              ("queue_cap", cur_cap, new_cap)) if a != b)
+        with self._transaction():
             if row is None:
                 self.cx.execute(
                     "INSERT INTO project_profile (profile_id, brief, specs, queue_cap, "
                     "updated_at, actor) VALUES (1,?,?,?,?,?)",
-                    (brief, specs, cap, _now(), actor))
+                    (new_brief, new_specs, new_cap, _now(), actor))
             else:
                 self.cx.execute(
                     "UPDATE project_profile SET brief=?, specs=?, queue_cap=?, "
                     "updated_at=?, actor=? WHERE profile_id=1",
-                    (brief, specs, cap, _now(), actor))
-        return {"entity": "project", "action": "amended",
-                "changed": sorted(fields), "profile": self.profile()}
+                    (new_brief, new_specs, new_cap, _now(), actor))
+        return {"entity": "project", "action": "amended", "changed": changed,
+                "profile": self.profile()}
 
     # ---------- domains ----------
 

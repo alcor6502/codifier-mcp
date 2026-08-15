@@ -39,8 +39,9 @@ managers, which key an entry on a user and fill a password-only form wrong, in
 silence.
 
 WHERE THE MASTER IS RETYPED, AND WHERE IT IS NOT. Every gesture that WRITES
-asks for it again — deciding the lot, minting a one-time code — because a
-session alone is a browser left open on the iPad. The backup
+asks for it again — deciding the lot, minting a one-time code, editing the
+project's profile — because a session alone is a browser left open on the
+iPad. The backup
 does not, and the log page does not: a `VACUUM INTO` changes nothing and drops
 a file on the server's disk, and the log is a ring in memory. A master retyped
 where it defends nothing does not add a guard, it teaches the hand to type it
@@ -484,6 +485,7 @@ def build(*, registry, log, master: str, refusal, fault,
     def _project_nav(name: str) -> str:
         n = _esc(name)
         return (f"<a href='/p/{n}/batch'>lot</a><a href='/p/{n}/rules'>rules</a>"
+                f"<a href='/p/{n}/profile'>profile</a>"
                 f"<a href='/p/{n}/codes'>codes</a>"
                 f"<a href='/p/{n}/status'>state</a><a href='/'>projects</a>"
                 "<form class='inline' method='post' action='/logout'>"
@@ -1079,6 +1081,111 @@ def build(*, registry, log, master: str, refusal, fault,
             return "".join(out), f"{name} — {rid}"
         return _read_page(request, render)
 
+    # ---------- the profile: what is FUNDATIVE has no tool ----------
+    #
+    # The project's brief, its specs and its queue_cap arrive here in 5.0.0,
+    # and they arrive from `project_amend`, which stopped carrying them. Not
+    # because that tool was insecure — it asked for the admin code — but
+    # because these three are what everything else is read against: the brief
+    # is the project's identity and the specs are the facts of the day. A chat
+    # may SUGGEST the wording; the change is a person's, behind this password.
+    #
+    # It is the same shape as the lot and the minting, and deliberately not a
+    # new one: session, master retyped for the action, refusals as sentences.
+
+    def _profile_html(name: str, prj, message: str = "", ok_msg: str = "") -> str:
+        prof = prj.profile()
+        cap = prof["queue_cap"]
+        head = (f"<p class='bad'>{_esc(message)}</p>" if message else "") + \
+               (f"<p class='ok'>{_esc(ok_msg)}</p>" if ok_msg else "")
+        return (head
+                + f"<form method='post' action='/p/{_esc(name)}/profile'>"
+                  "<label for='brief'>Brief — the project's identity: whose it "
+                  "is, how it works, what it is for. It leads every "
+                  "<code>rules_list</code>, so it is read at the top of every "
+                  "chat of this project.</label>"
+                  f"<textarea id='brief' name='brief' rows='10'>"
+                  f"{_esc(prof['brief'] or '')}</textarea>"
+                  "<label for='specs'>Specs — the living facts. True today and "
+                  "false tomorrow without anybody having decided anything, "
+                  "which is why they are a second field and not more of the "
+                  "brief.</label>"
+                  f"<textarea id='specs' name='specs' rows='10'>"
+                  f"{_esc(prof['specs'] or '')}</textarea>"
+                  "<label for='cap'>Queue ceiling — blank is unlimited, 0 "
+                  "closes the queue to new proposals, N is N. It is also the "
+                  "ceiling on one turn of the lot page: at the twelfth "
+                  "signature in a row a person signs without reading.</label>"
+                  f"<input id='cap' name='queue_cap' value="
+                  f"'{_esc('' if cap is None else cap)}'>"
+                  "<label for='pmaster'>Master — once for this action</label>"
+                  "<input id='pmaster' type='password' name='master' "
+                  "autocomplete='current-password' required>"
+                  "<p><button type='submit'>Write the profile</button></p>"
+                  "</form>"
+                  "<p class='note'>Citations are checked here like everywhere "
+                  "else: an ID in round brackets has to resolve to a rule in "
+                  "force, or nothing is written. There is no tool for this "
+                  "page, and that is the decision — what is fundative has "
+                  "none, the way what is catastrophic has none.</p>"
+                + (f"<p class='note'>Last written {_esc(prof['updated_at'])}.</p>"
+                   if prof["updated_at"] else
+                   "<p class='note'>Never written: this project has no profile "
+                   "yet, which is a legitimate state and not a fault.</p>"))
+
+    async def profile_page(request):
+        def render(name, prj):
+            return _profile_html(name, prj), f"{name} — profile"
+        return _read_page(request, render)
+
+    async def profile_action(request):
+        """The write half. `queue_cap` blank means UNLIMITED here and not
+        `leave it`, because this form always carries all three fields: what the
+        page shows is what gets written, or a form would silently keep a value
+        the person had just cleared."""
+        if not _session_ok(request):
+            return _guest(request)
+        name = request.path_params["project"]
+        prj = _open(name)
+        if prj is None:
+            return _no_project(name)
+        form = await request.form()
+        if not secrets.compare_digest((form.get("master") or "").strip(), master):
+            log.warning("refused web profile: wrong master, from %s", _client(request))
+            return HTMLResponse(
+                _page(f"{name} — profile",
+                      _profile_html(name, prj,
+                                    message="Wrong master. Nothing was written."),
+                      nav=_project_nav(name)), status_code=401)
+        raw = (form.get("queue_cap") or "").strip()
+        if raw and not raw.isdigit():
+            return HTMLResponse(
+                _page(f"{name} — profile",
+                      _profile_html(name, prj, message=(
+                          f"{raw!r} is not a whole number: blank is unlimited, "
+                          f"0 closes the queue, N is N. Nothing was written.")),
+                      nav=_project_nav(name)), status_code=400)
+        try:
+            v = prj.set_profile(brief=form.get("brief") or "",
+                                specs=form.get("specs") or "",
+                                queue_cap=int(raw) if raw else None)
+        except fault:
+            raise
+        except refusal as e:
+            log.info("refused web profile: %s", e)
+            return HTMLResponse(
+                _page(f"{name} — profile",
+                      _profile_html(name, prj, message=str(e)),
+                      nav=_project_nav(name)), status_code=400)
+        said = ", ".join(v["changed"]) if v["changed"] else "nothing"
+        log.info("profile written on %s: %s", name, said)
+        return HTMLResponse(_page(
+            f"{name} — profile",
+            _profile_html(name, prj, ok_msg=f"Written: {said}. Every chat of "
+                                            f"this project reads it from the "
+                                            f"next rules_list."),
+            nav=_project_nav(name)))
+
     async def status_page(request):
         def render(name, prj):
             st = prj.status()
@@ -1138,6 +1245,8 @@ def build(*, registry, log, master: str, refusal, fault,
         Route("/p/{project}/batch", batch_action, methods=["POST"]),
         Route("/p/{project}/codes", codes_page, methods=["GET"]),
         Route("/p/{project}/codes", codes_mint, methods=["POST"]),
+        Route("/p/{project}/profile", profile_page, methods=["GET"]),
+        Route("/p/{project}/profile", profile_action, methods=["POST"]),
         Route("/p/{project}/rules", rules_page, methods=["GET"]),
         Route("/p/{project}/rule/{rule}", rule_page, methods=["GET"]),
         Route("/p/{project}/status", status_page, methods=["GET"]),

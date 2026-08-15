@@ -3349,7 +3349,7 @@ for _fn in ast.walk(ENGINE_TREE):
                 and isinstance(_n.func.value, ast.Name) and _n.func.value.id == "self"):
             _PROFILE_CALLERS.setdefault(_fn.name, 0)
             _PROFILE_CALLERS[_fn.name] += 1
-ok(set(_PROFILE_CALLERS) == {"list_rules", "_amend_project", "export"},
+ok(set(_PROFILE_CALLERS) == {"list_rules", "set_profile", "export"},
    "the project's profile is handed out by three methods and no more — and only "
    "list_rules is reachable with the reference code alone",
    sorted(_PROFILE_CALLERS))
@@ -3857,14 +3857,12 @@ ok(any(n.func.attr == "projects" for n in ROUTER_WEB),
 # `batch()` and `status()` already return. Same guarantee, different route, so
 # the check moves rather than dies: every mention of the cap in this file is a
 # subscript of an engine payload, and none of them is a definition.
-_CAP_NODES = [n for n in ast.walk(WEB_TREE)
-              if isinstance(n, ast.Constant) and n.value == "queue_cap"]
 _CAP_KEYS = [n for n in ast.walk(WEB_TREE) if isinstance(n, ast.Subscript)
              and isinstance(n.slice, ast.Constant) and n.slice.value == "queue_cap"]
-ok(bool(_CAP_KEYS) and len(_CAP_KEYS) == len(_CAP_NODES),
-   f"the ceiling is named only as a key of an engine payload "
-   f"({len(_CAP_KEYS)} readings)",
-   [ast.unparse(n) for n in _CAP_NODES])
+ok(bool(_CAP_KEYS),
+   f"the ceiling is read off an engine payload ({len(_CAP_KEYS)} readings) — "
+   f"without this line the check below is green on a file that never reads it",
+   len(_CAP_KEYS))
 # AND THE HALF THE LINE ABOVE DOES NOT REACH, which is the half that matters:
 # `min(current["queue_cap"] or 99, 12)` is still a subscript and still passes
 # the count. What must not happen is ARITHMETIC on the value — the page taking
@@ -3905,12 +3903,14 @@ _POSTS = sorted(r for r in _ROUTES if "POST" in r[1])
 ok([(r[0], r[2]) for r in _POSTS] == [("/login", "login"), ("/logout", "logout"),
                                       ("/p/{project}/backup", "project_backup"),
                                       ("/p/{project}/batch", "batch_action"),
-                                      ("/p/{project}/codes", "codes_mint")],
-   "and exactly five of them take POST: the door, the exit, and the three "
-   "gestures — the lot, minting a one-time code, and the backup, which asks "
-   "for no master because it handles no secret. Renewal left with the expiry "
-   "in 5.0.0; creating a project and rekeying it are not here either, because "
-   "a project is a line in a file",
+                                      ("/p/{project}/codes", "codes_mint"),
+                                      ("/p/{project}/profile", "profile_action")],
+   "and exactly six of them take POST: the door, the exit, and the four "
+   "gestures — the lot, minting a one-time code, writing the project's own "
+   "profile, and the backup, which asks for no master because it handles no "
+   "secret. Renewal left with the expiry in 5.0.0 and the profile arrived in "
+   "its place; creating a project and rekeying it are not here either, "
+   "because a project is a line in a file",
    [(r[0], r[2]) for r in _POSTS])
 # Every writing route is UNDER a project, and that is the shape of "a project
 # is a database": a gesture that named no project would be a gesture on all of
@@ -4020,7 +4020,7 @@ for _name, _fn in _BUILD_FUNCS.items():
 # a handler leaves: the renewals action left in 5.0.0 and the floor would have
 # stayed at three. The equality fails on either mistake, and it fails saying
 # which name moved.
-ok(sorted(_GUARDED) == ["batch_action", "codes_mint"],
+ok(sorted(_GUARDED) == ["batch_action", "codes_mint", "profile_action"],
    f"the writing handlers are exactly these, guarded: {sorted(_GUARDED)}",
    sorted(_GUARDED))
 

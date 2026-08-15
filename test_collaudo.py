@@ -80,8 +80,12 @@ def project(**profile):
     p.amend_project("group", "automatismi", "create",
                     {"members": ["advisory", "news"]}, actor="architect")
     if profile:
-        p.amend_project("project", "", "amend", profile, actor="architect",
-                        auth_code=p.mint_auth_code()["auth_code"])
+        # NOT through `amend_project` any more: the project's own profile left
+        # that tool in 5.0.0 and is written by a person on the administration
+        # page. `set_profile` is the method behind that page — the same shape
+        # as `decide` and `mint_auth_code`, which is what lets a suite drive it
+        # without a server.
+        p.set_profile(**profile)
     return p
 
 
@@ -197,13 +201,16 @@ equals("a rename is a modification like any other",
        rules.Project.port_for("consumer", "amend", {"name": "x"}), "auth")
 equals("group membership is a modification",
        rules.Project.port_for("group", "amend", {"members": ["a"]}), "auth")
-equals("queue_cap is a modification",
-       rules.Project.port_for("project", "amend", {"queue_cap": 5}), "auth")
 equals("retiring is a modification", rules.Project.port_for("domain", "x", {}), "auth")
 equals("specs alone is the one exception downward",
        rules.Project.port_for("consumer", "amend", {"specs": "x"}), "project")
-equals("and it holds for the project's own specs",
-       rules.Project.port_for("project", "amend", {"specs": "x"}), "project")
+# AND IT IS ONE EXCEPTION, asserted as the whole set and not as one member.
+# It held two pairs until 5.0.0 — the second was the project's own specs, and
+# it went when that entity left the tool. A rule with one exception is
+# checkable; with two it starts to rot, and this is where a third would be
+# caught the day somebody adds it without arguing for it.
+equals("and there is exactly ONE exception, which is what makes it a rule",
+       rules.Project.SPECS_ONLY, {("consumer", "specs")})
 equals("MIXED answers with the HIGHEST port it contains",
        rules.Project.port_for("consumer", "amend", {"specs": "x", "brief": "y"}), "auth")
 equals("a brief is never the low door",
@@ -301,74 +308,138 @@ allowed("CREATING still takes no one-time code: a created thing is attached to n
 # handler opens, so a handler that went back to opening a plain transaction
 # would let every modification of ITS entity through with no second factor and
 # nothing else in this suite would notice. Four handlers, four cases.
-for _entity, _fields in (("project", {"brief": "a new mandate"}),
-                         ("domain", {"description": "a new gloss"}),
+for _entity, _fields in (("domain", {"description": "a new gloss"}),
                          ("consumer", {"brief": "a new mandate"}),
                          ("group", {"members": ["architect"]})):
     refused(f"{_entity}: amended with no one-time code",
             (lambda e=_entity, f=_fields: p.amend_project(
-                e, {"project": "", "domain": "VA", "consumer": "architect",
+                e, {"domain": "VA", "consumer": "architect",
                     "group": "deliberativi"}[e], "amend", f, actor="architect")),
             "one-time auth_code")
     refused(f"{_entity}: retired with no one-time code",
             (lambda e=_entity: p.amend_project(
-                e, {"project": "", "domain": "RL", "consumer": "advisory",
+                e, {"domain": "RL", "consumer": "advisory",
                     "group": "automatismi"}[e], "retire", {}, reason="done",
                 actor="architect")),
-            "one-time auth_code" if e_needs(_entity) else "catastrophic has no tool")
+            "one-time auth_code")
 
 # =====================================================================
 print("\n— THE ANAGRAFICA —")
 p = project()
 refused("a consumer with no kind", lambda: p.amend_project(
-    "consumer", "tax", "create", {}), "kind")
+    "consumer", "tax", "create", {}, actor="architect"), "kind")
 refused("a kind that is not one of the three", lambda: p.amend_project(
-    "consumer", "tax", "create", {"kind": "robot"}), "one of chat, skill, human")
+    "consumer", "tax", "create", {"kind": "robot"}, actor="architect"), "one of chat, skill, human")
 refused("a consumer that already exists", lambda: p.amend_project(
-    "consumer", "ARCHITECT", "create", {"kind": "chat"}), "already has a consumer")
+    "consumer", "ARCHITECT", "create", {"kind": "chat"}, actor="architect"), "already has a consumer")
 refused("a domain code that is not two letters", lambda: p.amend_project(
-    "domain", "VALUE", "create", {"reason": "x"}), "two uppercase letters")
+    "domain", "VALUE", "create", {"reason": "x"}, actor="architect"), "two uppercase letters")
 refused("TK claimed as a domain of rules", lambda: p.amend_project(
-    "domain", "TK", "create", {"reason": "x"}), "RESERVED")
+    "domain", "TK", "create", {"reason": "x"}, actor="architect"), "RESERVED")
 refused("a domain with no reason", lambda: p.amend_project(
-    "domain", "QQ", "create", {}), "reason to exist")
+    "domain", "QQ", "create", {}, actor="architect"), "reason to exist")
 refused("a field that belongs to another entity", lambda: p.amend_project(
-    "consumer", "advisory", "amend", {"description": "x"}), "not a field of consumer")
+    "consumer", "advisory", "amend", {"description": "x"}, actor="architect"), "not a field of consumer")
 refused("the domain code, amended", lambda: p.amend_project(
-    "domain", "VA", "amend", {"code": "VB"}), "not a field of domain")
+    "domain", "VA", "amend", {"code": "VB"}, actor="architect"), "not a field of domain")
 refused("an amendment with nothing in it", lambda: p.amend_project(
-    "consumer", "advisory", "amend", {}), "nothing to amend")
+    "consumer", "advisory", "amend", {}, actor="architect"), "nothing to amend")
 refused("a retirement with a change smuggled in", lambda: p.amend_project(
-    "consumer", "news", "retire", {"brief": "x"}, reason="done"), "takes no fields")
+    "consumer", "news", "retire", {"brief": "x"}, reason="done", actor="architect"), "takes no fields")
 refused("retiring without a reason", lambda: p.amend_project(
-    "consumer", "news", "retire", {}), "costs a reason")
+    "consumer", "news", "retire", {}, actor="architect"), "costs a reason")
 refused("a group with no members", lambda: p.amend_project(
-    "group", "vuoti", "create", {"members": []}), "at least one consumer")
+    "group", "vuoti", "create", {"members": []}, actor="architect"), "at least one consumer")
 refused("a group emptied instead of retired", lambda: p.amend_project(
     "group", "automatismi", "amend", {"members": []},
-    auth_code=code(p)), "retire it")
+    auth_code=code(p), actor="architect"), "retire it")
 refused("reviving something that is not retired", lambda: p.amend_project(
-    "consumer", "advisory", "revive", {}, auth_code=code(p)), "nothing to revive")
-refused("the project created from a tool", lambda: p.amend_project(
-    "project", "", "create", {}), "catastrophic has no tool")
-refused("a negative queue cap", lambda: p.amend_project(
-    "project", "", "amend", {"queue_cap": -1},
-    auth_code=code(p)), "none of the three")
+    "consumer", "advisory", "revive", {}, auth_code=code(p), actor="architect"), "nothing to revive")
+refused("a negative queue cap, on the page that writes it now",
+        lambda: p.set_profile(queue_cap=-1), "none of the three")
+# AND THE FOUR THAT LEFT THIS TOOL, by name. `project` stays an ENTITY so the
+# refusal can say where its three fields went — answering "not an entity"
+# would be true and useless — and each of the four actions has its own
+# sentence, because three of them are catastrophic and one is fundative.
+for _act, _word in (("create", "catastrophic has no tool"),
+                    ("retire", "catastrophic has no tool"),
+                    ("revive", "catastrophic has no tool"),
+                    ("amend", "FUNDATIVE has no tool")):
+    refused(f"the project {_act}d from a tool", (lambda a=_act: p.amend_project(
+        "project", "", a, {"brief": "x"} if a == "amend" else {},
+        actor="architect", reason="done", auth_code=code(p))), _word)
+yields("and the amend refusal sends a consumer to its OWN specs instead of "
+       "leaving it with a no",
+       lambda: "entity='consumer'" in _refusal(lambda: p.amend_project(
+           "project", "", "amend", {"specs": "x"}, actor="architect")), True)
+
+# WHOSE SPECS. The defect this replaces was measured on the engine before it
+# was believed: `tax` changed `advisory`'s specs with the reference code alone
+# and the row came back holding "written by tax". `project_amend` did not carry
+# the caller's name, so there was no such thing as "one's own" — the exception
+# had been designed on the WHAT (operational data, not identity) and never on
+# the WHO.
+p2 = project()
+p2.amend_project("consumer", "tax", "create", {"kind": "chat"}, actor="architect")
+refused("somebody else's specs, on the reference code",
+        lambda: p2.amend_project("consumer", "advisory", "amend",
+                                 {"specs": "cash 50k, written by tax"},
+                                 actor="tax"), "changed by advisory")
+yields("and NOTHING was written by the refusal",
+       lambda: p2.cx.execute("SELECT specs FROM consumer WHERE name='advisory'"
+                             ).fetchone()["specs"], None)
+yields("the refusal carries the ROAD, with the call already spelled out: a "
+       "refusal that says only `no` makes a chat try something worse",
+       lambda: all(w in _refusal(lambda: p2.amend_project(
+           "consumer", "advisory", "amend", {"specs": "x"}, actor="tax"))
+           for w in ("tasks_add", "consumer='advisory'", "created_by='tax'")), True)
+# NO EXCEPTION, and this is the case that says so. The permissive version —
+# the rule holds on the low door and the admin writes anybody's — is two rules,
+# and the day somebody asks which applies the answer is "it depends what else
+# was in the call".
+refused("and the admin code with a one-time code does NOT open it either",
+        lambda: p2.amend_project("consumer", "advisory", "amend",
+                                 {"specs": "x", "brief": "y"}, actor="tax",
+                                 auth_code=code(p2)), "changed by advisory")
+allowed("while a consumer changes its OWN, on the reference code",
+        lambda: p2.amend_project("consumer", "advisory", "amend",
+                                 {"specs": "cash 50k"}, actor="advisory"))
+yields("and the spelling of the name is not the identity: casefolded, like "
+       "everywhere else in this registry",
+       lambda: bool(p2.amend_project("consumer", "advisory", "amend",
+                                     {"specs": "cash 60k"}, actor="ADVISORY")), True)
+# AND THE HAND IS RECORDED. Until 5.0.0 the surface passed a fixed 'admin' into
+# `actor`, so every write through this door read as the administrator's — on a
+# door reachable with the reference code alone, which is what made it a lie.
+yields("the history says whose hand it was, and it is not 'admin'",
+       lambda: p2.cx.execute(
+           "SELECT v.actor FROM consumer_version v JOIN consumer c "
+           "ON c.consumer_id=v.consumer_id WHERE c.name='advisory' "
+           "ORDER BY v.version DESC").fetchone()["actor"], "ADVISORY")
+refused("a gesture with no hand at all", lambda: p2.amend_project(
+    "consumer", "advisory", "amend", {"specs": "x"}), "`by` is required")
+refused("and it is asked of every gesture on this door, not just of specs",
+        lambda: p2.amend_project("domain", "PE", "create", {"reason": "x"}),
+        "`by` is required")
+yields("but NOT before the gesture is shown to exist: being sent to sign "
+       "something that has no tool is a trip that ends in the same refusal",
+       lambda: "catastrophic" in _refusal(
+           lambda: p2.amend_project("project", "", "create", {})), True)
 
 # A NAME IS ONE WORD, and the space is the mistake worth naming: it is the
 # character the eye does not find. Both entities, because a group is quoted the
 # way a consumer is — a rule that held for one and not the other would be a
 # rule with an exception, which is a rule nobody can check.
 refused("a consumer name with a space in it", lambda: p.amend_project(
-    "consumer", "fidelity advisory", "create", {"kind": "chat"}), "ONE WORD")
+    "consumer", "fidelity advisory", "create", {"kind": "chat"}, actor="architect"), "ONE WORD")
 refused("and the refusal names the space, not just the pattern",
         lambda: p.amend_project("consumer", "fidelity advisory", "create",
-                                {"kind": "chat"}), "has a space in it")
+                                {"kind": "chat"}, actor="architect"), "has a space in it")
 refused("a GROUP name with a space in it", lambda: p.amend_project(
-    "group", "i deliberativi", "create", {"members": ["architect"]}), "ONE WORD")
+    "group", "i deliberativi", "create", {"members": ["architect"]}, actor="architect"), "ONE WORD")
 refused("and a rename cannot smuggle one back in", lambda: p.amend_project(
     "consumer", "advisory", "amend", {"name": "fidelity advisory"},
-    auth_code=code(p)), "ONE WORD")
+    auth_code=code(p), actor="architect"), "ONE WORD")
 allowed("a dash is not a space", lambda: p.amend_project(
     "consumer", "fidelity-advisory", "create", {"kind": "chat"}, actor="architect"))
 allowed("and neither is an underscore", lambda: p.amend_project(
@@ -708,7 +779,7 @@ refused("and it points at the door that gesture really goes through",
                              "architect", auth_code=code(p)),
         "rules_retire")
 refused("the content is not touched from here", lambda: p.amend_project(
-    "rule", "x", "amend", {}), "entity 'rule'")
+    "rule", "x", "amend", {}, actor="architect"), "entity 'rule'")
 refused("a rule that is not in force has no perimeter to narrow", lambda: (
     p.propose("VA", "R", "still queued", "b", "why", "all", "architect"),
     p.amend_rule("VA-0003", "targeted", ["automatismi"], [], 1, "why", "architect",
@@ -907,7 +978,7 @@ yields("a retired domain is gone from the legend too",
 # And the price of all that: the retired have to be readable SOMEWHERE, or the
 # refusal below points at something invisible.
 refused("the retired name is still TAKEN", lambda: p.amend_project(
-    "consumer", "news", "create", {"kind": "skill"}), "already has a consumer")
+    "consumer", "news", "create", {"kind": "skill"}, actor="architect"), "already has a consumer")
 allowed("and the admin report is where it is read", lambda: p.status())
 yields("the retired consumer, with its date and its reason",
        lambda: [(c["name"], c["reason"])
