@@ -82,44 +82,42 @@ no audience, no approval, no expiry. Rules bind; tasks wait.
 
 ### How a rule gets in
 
-    proposed ──approved, by a batch──> in force ──promoted──> in force
-        │                              provisional            permanent
-        │                                 │    │                  │
-        └──denied──> denied               │    └──> retired <─────┘
-                     the row STAYS,       │
-                     with its reason  the date passes
-                                          │
-                                          └────> out of force
+    proposed ──approved, by a batch──> in force ──retired──> retired
+        │                                  ▲                    ▲
+        │                                  │                    │
+        └──denied──> denied            it stays,       superseded by an heir,
+                     the row STAYS,    for as long     inside the same decision
+                     with its reason   as nobody
+                                       ends it
 
-Two axes, not one, and the difference is where the confusion lives.
-**`status`** is `proposed | active | retired | denied` — what was decided about
-the rule. **`permanence`** is `provisional | permanent` — whether the decision
-has a date on it. Approval writes both: `active` **and** `provisional`, with an
-expiry stamped on the row.
+ONE axis, and it is `status`: `proposed | active | retired | denied`. A rule
+that has been approved is in force, and it stays in force until somebody ENDS
+it — by retiring it, or by approving an heir that supersedes it. There are two
+ways out of the list and both of them are gestures somebody made, with a reason
+attached.
 
-There are therefore three ways out of the list, and only two of them are
-gestures:
+⚠ **This used to be two axes**, and until v5.0.0 an approved rule was born
+*provisional* with an expiry stamped on it: past that date it left every list
+while the row still said `active`, and no gesture and no event were written. The
+mechanism was built against a diagnosis that named the wrong culprit. A project
+did go from 63 rules to 172 — but not for want of a clock. It grew because
+there was **no gate**: rules were written without anybody approving them, on the
+argument that otherwise the sky would fall. The gate exists now and it is the
+human approval on the page, so the clock was guarding a hole that had been
+filled somewhere else.
 
-- **retired** — `rules_retire`, or the approval of a supersede, which retires
-  the rule it replaces inside the same transaction. It costs a reason, it is
-  recorded, and the ID never comes back;
-- **promoted** — the other direction: the date is removed and the rule stops
-  having to be renewed. It stays until it is retired or superseded;
-- **the term running out** — and this one writes *nothing*. No gesture, no
-  change of status: the row still says `active`, and the rule has simply left
-  every list. It is not gone and it is not retired — renew it from the page and
-  it is in force again under the same ID. Which is also why a citation towards
-  a lapsed rule is refused with those words: nobody decided that, a clock did.
+And it broke the wrong way round. For a register of rules the acceptable
+failure is the rule too many, which annoys you until you remove it — never the
+rule that disappears while nobody is looking. The register had in fact already
+decided this exact question, the other way, about tasks: *a task that vanished
+on a timer is work nobody decided to drop*. Two objects in one database under
+two opposite philosophies, and this is the one that gave way.
 
-Two mechanisms, and both exist because of the same diagnosis: a project went
-from 63 rules to 172, not because anyone wrote without permission, but because
-**adding costs a call and removing costs a decision nobody takes.**
-
-**Expiry inverts that.** An approved rule is born provisional and leaves the
-lists on its own unless somebody decides to keep it — renewed for another term,
-or promoted to permanent, which ends the question for good. Staying costs a
-decision, going is free. It is not a purge: a lapsed rule is still there, under
-the same ID, and renewing it from the page puts it back in force.
+**Nothing replaced it**, and that too is a decision rather than an omission. The
+obvious substitute — a report of rules in force for more than N months — would
+have flagged the FOUNDATIONAL rules first, the ones that are born with the
+project and die with it, which is guaranteed noise on exactly what must never be
+touched.
 
 **Approval is by batch, against its digest.** Proposals accumulate, and you see
 them together, which is the only moment three near-duplicates are visible as
@@ -508,12 +506,13 @@ summary.
 | `JWT_SIGNING_KEY` · `WEB_UI_PASSWORD` | from step 3 |
 | `PORT` | `3001` — the MCP port, inside the container |
 | `ALLOWED_CIDRS` | `160.79.104.0/21 # documented egress of the model provider` |
-| `PROVISIONAL_DAYS` | `90` — how long an approved rule lives before it must be renewed |
 | `BACKUP_DIR` | `/db/backup` |
 
 Under **Show more settings**: `DB_DIR` (`/db` — move the mount, not this),
 `WEB_PORT` (empty means 9443), `ADMIN_AUTH_CODE_DURATION` (minutes a one-time
-code stays good), `LOG_LEVEL` (`INFO` or `WARNING`, nothing else),
+code stays good), the six `SMTP_*` fields (leave them empty and nothing is ever
+posted, and nothing complains about it — see *Notifications* below),
+`LOG_LEVEL` (`INFO` or `WARNING`, nothing else),
 `HTTP_MODE` (`stateless` on a new install; the code's fallback stays `stateful`
 so a container installed earlier keeps behaving as it did), `BIND_HOST`
 (`127.0.0.1`, and leave it — the administration page is not affected, it binds
@@ -805,7 +804,8 @@ frequent ones:
 | `db` | the registry will not parse — the message quotes the line — or the mount is wrong. A database of another **schema generation** also lands here, naming the file and the two numbers: that is the refusal of migration, not a fault |
 | `schema` | a database has had objects removed and the automatic repair was not enough |
 | `ownership` | the mount is a network share, or permissions were changed by hand, or `projects.txt` is not 600 |
-| `approval` | `PROVISIONAL_DAYS` or `ADMIN_AUTH_CODE_DURATION` is not a positive whole number |
+| `approval` | `ADMIN_AUTH_CODE_DURATION` is not a positive whole number |
+| `mail` | `SMTP_PORT` is not a port number, `SMTP_SECURITY` is not one of the three, or `SMTP_HOST` is set with no `SMTP_FROM` beside it. It never opens a socket: a preflight that did would put the boot at the mercy of somebody else's network |
 | `web` | `WEB_UI_PASSWORD` missing, still `CHANGEME`, or under twelve characters; or `WEB_PORT` is 443, 8443, 10000, or equal to the MCP port |
 | `oauth` | a `CHANGEME` left in place, or `BASE_URL` that is not https |
 | `token_store` | `FASTMCP_HOME` is not under `/data`: tokens would not survive |
@@ -938,13 +938,23 @@ it now is — the same digest contract the MCP tool used to carry.
 
 Beside it, readings that write nothing: the rules in force for a chosen
 consumer, exactly as that consumer's chat reads them, brief first; a rule's
-detail with its history and the diff between two versions; the renewals and the
-expiring queue; and the state of the project. And one page that writes without
-touching a rule: **codes**, where a one-time authorisation code is minted.
+detail with its history and the diff between two versions; and the state of the
+project. And two pages that write without touching a rule: **codes**, where a
+one-time authorisation code is minted, and **profile**.
+
+**The profile page is where the project talks about itself** — its `brief`, its
+`specs` and its `queue_cap` — and since v5.0.0 that is the only place they can
+be written from. No tool reaches them, not even with the admin code. The brief
+is the project's identity and the specs are the facts every reading is done
+against: what is FUNDATIVE has no tool, the way what is catastrophic has none. A
+chat may suggest the wording; the change is a person's. The same page marks the
+project's **approver** — the one human its proposals are posted to — and that
+flag grants nothing at all: what opens this UI is the password, and this only
+says where an email goes.
 
 The password is asked for again on every gesture that WRITES — deciding the lot,
-renewing, promoting, minting a code — because a session alone is a browser left
-open on the iPad. It is *not* asked again for the backup or the log: a
+minting a code, writing the profile, marking the approver — because a session
+alone is a browser left open on the iPad. It is *not* asked again for the backup or the log: a
 `VACUUM INTO` changes nothing and the log is a ring in memory, and a password
 retyped where it defends nothing only teaches the hand to type it without
 looking. One password, from the template, and one hour of inactivity. A restart
@@ -957,6 +967,40 @@ declarative registry — a project is now a line in `projects.txt`, written from
 the server by the person who chooses its codes. What took its place is the codes
 page: minting one-time codes is the one thing the design gives to this UI and to
 nothing else.
+
+## Notifications
+
+Two things are posted, and no more: a **task opened on a person's desk**, and a
+**proposal entering the queue**. Each at the moment it happens, to the address
+on that person's row — a human is the only kind of consumer that may carry one,
+and the schema refuses it on a chat or a skill. Proposals go to the project's
+**approver**, the one human marked for it on the profile page.
+
+**There is no on/off switch, anywhere.** The two ways to be quiet are both
+ABSENCES: no `SMTP_HOST` on the container, so nothing is ever sent; no address
+on a consumer, so that person is not written to. Two ways to turn something off
+is one too many — the day the post stops arriving, somebody has to work out
+which of them did it.
+
+**No digest.** A roll-up would have to know what is scheduled and when the
+night's runs have finished, and a container knows neither, so this one composes
+none and has no scheduler. `tasks_overview` is already the payload one is made
+of, and making it is a skill's job.
+
+**At most ten a day, per project.** Per project and not per container, because a
+runaway in one must not silence another. The tenth message carries the notice
+that the sender is paused until tomorrow, so the pause is visible in the post
+and not only in the log. It lives in memory, so a restart forgets it — which is
+right: the loop this guards against lives inside a session. The ceiling is not
+there against twenty messages, which would be information; it is there against a
+skill looping on `tasks_add` and burning a month's allowance in an afternoon.
+⚠ The arithmetic is written down in `mail.py` so it can be redone: two projects
+is about 600 a month, comfortably inside a free thousand; four does not fit.
+
+**A message that cannot be sent never fails a gesture.** The post leaves after
+the write has committed, from a module of its own, and a failure is a line at
+WARNING. A notification that can make a write fail is worse than no
+notification.
 
 ## The task log
 
@@ -972,9 +1016,9 @@ be declared as a domain of rules — the registry refuses — because the code
 has to mean one thing.
 
 **Anybody may open a task for anybody**, which is how an audit hands each
-correction to the role that owns it. `created_by` is mandatory. ⚠ Opening a task
-for a **human** notifies nobody: humans call no tools, and their post is seen by
-whoever reads the overview or the UI. **Closing costs a sentence**: `tasks_close`
+correction to the role that owns it. `created_by` is mandatory. Opening one for
+a **human who carries an address** emails them — see *Notifications* below.
+**Closing costs a sentence**: `tasks_close`
 takes an `outcome` that completes it or a `reason` that drops it, exactly one of
 the two, and the refusal is in the schema as well as at the door. **Closed is
 closed** — an open task is amended freely, its owner included, and a closed one
