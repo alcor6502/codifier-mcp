@@ -1138,29 +1138,43 @@ def build(*, registry, log, master: str, refusal, fault,
                                  "Proposals entering the queue notify no one, "
                                  "and are seen by opening the lot page.</p>")
 
+        # A HEADER ROW, and the "nobody" option OUT of the table. The first
+        # version had neither: the hint about clearing an address sat in the
+        # email column of a fake row whose name was an em dash, so it read as a
+        # label belonging to a person called "—", and the third column had no
+        # title at all — a bare radio next to the word "proposals", which says
+        # what it is only to somebody who already knows.
+        #
+        # Alfredo, looking at it: "non è chiarissimo". A page nobody can read
+        # at a glance is a page where the wrong box gets filled in a hurry, and
+        # this one writes addresses.
         rows = "".join(
             f"<tr><td>{_esc(c['name'])}</td>"
             f"<td><input name='email:{_esc(c['name'])}' "
             f"value='{_esc(prj.postbox(c['name'])['email'] if c.get('posted_to') else '')}' "
-            f"placeholder='no address — nothing is posted'></td>"
-            f"<td><label><input type='radio' name='who' "
+            f"placeholder='no address — nothing is posted to them'></td>"
+            f"<td><input type='radio' name='who' "
             f"value='{_esc(c['name'])}'"
             + (" checked" if now and now["name"] == c["name"] else "")
-            + "> proposals</label></td></tr>" for c in people)
+            + "></td></tr>" for c in people)
 
         post = (f"<h2>The post</h2>"
                 f"<form method='post' action='{act}'>"
                 f"<input type='hidden' name='action' value='post'>"
-                f"<table><tbody>{rows}"
-                f"<tr><td class='note'>—</td><td class='note'>"
-                f"an empty box CLEARS the address</td>"
-                f"<td><label><input type='radio' name='who' value=''"
+                f"<table><thead><tr><th>Person</th><th>Their email address</th>"
+                f"<th>Gets the proposals</th></tr></thead>"
+                f"<tbody>{rows}</tbody></table>"
+                f"<p><label><input type='radio' name='who' value=''"
                 + ("" if now else " checked")
-                + "> nobody</label></td></tr></tbody></table>"
-                f"<p class='note'>Both columns are written in ONE gesture, "
-                f"because they are one question. The mark GRANTS NOTHING — "
-                f"what opens this page is the password — it says which desk "
-                f"hears that a proposal is waiting.</p>"
+                + "> <b>Nobody</b> gets the proposals — they wait in the queue "
+                  "in silence, and are seen by opening the lot page.</label></p>"
+                f"<p class='note'>Addresses and the mark are written in ONE "
+                f"gesture, because they are one question: who gets an email, "
+                f"and where. An address box left EMPTY clears that person's "
+                f"address — what this page shows is what gets written. The mark "
+                f"GRANTS NOTHING: what opens this page is the password, and "
+                f"this only says which desk hears that a proposal is "
+                f"waiting.</p>"
                 f"<label for='pmaster'>Master — once for this action</label>"
                 f"<input id='pmaster' type='password' name='master' "
                 f"autocomplete='current-password' required>"
