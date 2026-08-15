@@ -306,16 +306,20 @@ So when the cap cuts, it cuts the fresh work. Recently closed ones trail.
   that vanished on a timer is work nobody decided to drop. Since 5.0.0 rules
   answer the same way, for the same sentence.
 - **A task opened for a `human` who carries an address is EMAILED to them**,
-  since 5.0.0 — the ID and the title in the subject line, who sent it and where
-  to read it in the message, never the task's text. A
+  since 5.0.0 — the ID and the title in the subject line, and in the message
+  the project, `Sender:` with who opened it, **the task's own text** and a
+  footnote saying where it is answered. ⚠ The text arrives VERBATIM: markdown
+  is not rendered, so asterisks and hashes are read as characters. Over 4000
+  characters it is cut at the end, visibly. A
   human without an address is not written to, and neither is anybody if the
   container has no mail configured: there is no on/off switch, and both ways to
   be quiet are absences. The verdict carries `posted`, true or false, because a
   notification nobody can confirm is a notification nobody trusts. An `idem_key`
   that absorbs a repeat posts nothing: nothing happened.
 - **A proposal entering the queue is emailed to the project's approver**, if
-  there is one and if they carry an address. `rules_propose` says `posted` the
-  same way. Nothing else is ever sent, and nothing composes a digest: a roll-up
+  there is one and if they carry an address, and it carries the **rule's text**:
+  whoever has to approve a thing should be able to read it without opening a
+  page first. `rules_propose` says `posted` the same way. Nothing else is ever sent, and nothing composes a digest: a roll-up
   has to know what is scheduled and when the night's runs are finished, and a
   container knows neither.
 - Bodies are not here. `tasks_get` carries those.

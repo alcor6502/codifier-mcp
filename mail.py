@@ -54,35 +54,15 @@ from email.message import EmailMessage
 
 DAILY_CAP = 10
 
-# The icon, EMBEDDED and not linked. A `<img src="https://…">` weighs nothing
-# and is blocked by default in most clients — Apple Mail's Protect Mail
-# Activity among them — so the ordinary case would be a broken placeholder,
-# which is worse than no logo at all.
+# NO ICON, and it is not an omission. The message carried one embedded, and two
+# rounds of shrinking it taught the same thing twice: Apple Mail was not obeying
+# the `width` attribute, so the number in the code and the number on the screen
+# were never the same number. Then Alfredo made a contact card for the sender,
+# and the client started drawing the picture itself — in the message list too,
+# where nothing here could ever have put it.
 #
-# ITS OWN 64px FILE, and both halves of that were measured rather than guessed.
-# The 256 the surface serves costs 24 KB a message; the same art at 64, PNG-8
-# with a 128-colour palette, costs 1.9 KB — the same picture at a twelfth of
-# the weight, and lossless.
-#
-# ⚠ NOT a JPEG, which was asked for and is the wrong format here twice over.
-# 27% of this image is fully transparent — the rounded corners — and JPEG has
-# no alpha, so it would arrive as a white square, which in dark mode is exactly
-# the thing you notice. And it buys 500 bytes: q75 measured 1.4 KB against
-# PNG-8's 1.9. Half a kilobyte is not worth a logo that breaks on half the
-# screens it lands on.
-#
-# 64 in the file and 32 on the page: the doubled source is what keeps it crisp
-# on a retina screen, and 32 next to 14px bold is the size Alfredo asked for —
-# "a favicon, a bit bigger".
-#
-# ⚠ It must be in the image: it is in the Dockerfile's COPY line for this
-# reason and no other. The 256 stays in the repository because the MCP surface
-# and the Unraid template serve it from a raw GitHub URL, and it is NOT in the
-# container — nothing there reads it.
-ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                    "codifier-icon-64.png")
-ICON_CID = "codifier-icon"
-
+# So the right size for a logo we cannot control turned out to be none: the
+# address book wins, every message is 2 KB lighter, and the file left the image.
 # `starttls` is the default because it is what port 587 speaks, and 587 is what
 # a submission service hands you. The other two are named rather than deduced
 # from the port: deducing it would be a rule with a case list, and the day
@@ -99,6 +79,30 @@ SUBJECT_TITLE = 70
 def _short(text: str) -> str:
     t = " ".join((text or "").split())
     return t if len(t) <= SUBJECT_TITLE else t[:SUBJECT_TITLE - 1].rstrip() + "…"
+
+
+# How much of a task's or a proposal's text travels. A ceiling and not a
+# summary: what is cut is cut at the end, visibly, and the register has the
+# whole of it. It exists because a body is written by a chat, and a chat can
+# write four thousand words as easily as forty — a mailbox is not the place to
+# discover that.
+BODY_CAP = 4000
+
+
+def _paragraphs(text: str) -> list:
+    """A block of prose into paragraphs, blank line by blank line, capped.
+
+    ⚠ THE TEXT TRAVELS VERBATIM. Markdown written in a task body arrives as the
+    characters that were typed — asterisks, hashes and backticks included —
+    because the register stores prose and not markup, and a mail that
+    reformatted it would be showing something nobody wrote. It is said in the
+    manual so it is a known cost and not a surprise."""
+    t = (text or "").strip()
+    if not t:
+        return []
+    if len(t) > BODY_CAP:
+        t = t[:BODY_CAP].rstrip() + "…"
+    return [p.strip() for p in t.split("\n\n") if p.strip()]
 
 
 class Mailer:
@@ -163,9 +167,10 @@ class Mailer:
 
     # ---------- the one way out ----------
 
-    def _compose(self, project: str, subject: str, lines) -> EmailMessage:
+    def _compose(self, project: str, subject: str, sender: str, lines,
+                 note: str = "") -> EmailMessage:
         """ONE source for both halves. The plain text and the HTML are built
-        from the SAME `lines`, so they cannot drift — which is the failure a
+        from the SAME arguments, so they cannot drift — which is the failure a
         multipart message invites: two versions of a sentence, and the one
         nobody reads goes stale first.
 
@@ -194,62 +199,48 @@ class Mailer:
         #
         # 7-bit clean means the message no longer depends on what the server
         # says it can take.
-        msg.set_content("\n\n".join(lines) + "\n", cte="quoted-printable")
+        msg.set_content(
+            "\n".join([project, f"Sender: {sender}"]) + "\n\n"
+            + "\n\n".join(list(lines) + ([note] if note else [])) + "\n",
+            cte="quoted-printable")
 
-        # THE BODY IS A CAPTION, not the news: the news is the subject. Smaller
-        # than the name above it and italic, so the eye reads the header as the
-        # message and these two lines as the note under it — which is what they
-        # are, since neither ever changes except for a name.
+        # THE PROSE IS PROSE, at the size prose is read at. It carries the
+        # task's own text now, so making it small and slanted was making the
+        # only part worth reading the hardest part to read.
+        #
+        # A single newline inside a paragraph is kept as a break: a chat writes
+        # lists that way, and collapsing them would be rewriting what it said.
         paragraphs = "".join(
-            f'<p style="margin:0 0 .7rem;font-size:.9rem;font-style:italic;'
-            f'color:#4b5563">{_html.escape(t)}</p>' for t in lines)
+            f'<p style="margin:0 0 .9rem">'
+            f'{_html.escape(t).replace(chr(10), "<br>")}</p>' for t in lines)
+        # AND THE POINTER IS THE ONLY SMALL THING. It is the one line that is
+        # identical in every message ever sent, which is exactly what makes it
+        # a footnote: 9px, because at the body's size it competed with the body.
+        if note:
+            paragraphs += (
+                f'<p style="margin:1.3rem 0 0;font-size:9px;font-style:italic;'
+                f'color:#6b7280">{_html.escape(note)}</p>')
         body_html = (
             '<div style="font-family:-apple-system,BlinkMacSystemFont,'
             "'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.55;"
             'color:#374151;max-width:33rem">'
-            # THE HEADER IS THE ICON AND THE PROJECT, and nothing else. It
-            # carried a small uppercase "codifier" over the name until Alfredo
-            # said the obvious: the icon IS codifier, and saying it twice
-            # leaves less room for the one word that changes between messages
-            # — Palestra or Financial Portfolio, which is what tells you which
-            # register just spoke.
-            #
-            # AND IT IS THE BIGGEST THING IN THE MESSAGE, now that the title
-            # has gone up into the subject: the project name takes the size the
-            # title used to have, and the icon halves to 16px so it sits beside
-            # that line instead of towering over it. The picture is a mark, not
-            # a picture.
-            #
-            # If the image never loads the line does not fall apart — the name
-            # is text and was always going to be there, which is why `alt` is
-            # empty rather than a word that would compete with it.
-            '<table role="presentation" cellpadding="0" cellspacing="0" '
-            'border="0" style="margin:0 0 1rem"><tr>'
-            f'<td style="padding-right:.5rem;vertical-align:middle">'
-            f'<img src="cid:{ICON_CID}" width="16" height="16" alt="" '
-            'style="display:block;border-radius:4px"></td>'
-            '<td style="vertical-align:middle">'
-            f'<div style="font-size:1.18rem;font-weight:600;color:#111827">'
-            f'{_html.escape(project)}</div>'
-            '</td></tr></table>'
+            # THE HEADER IS THE PROJECT AND WHO SPOKE, in that order and in two
+            # sizes. The project is the one word that changes between messages
+            # and tells you which register just spoke; the sender is the one
+            # thing the subject cannot carry, so it goes directly under the
+            # name, at a size between that name and the prose — a label, not a
+            # sentence, which is why it is `Sender:` in bold and then a name.
+            f'<div style="font-size:1.18rem;font-weight:600;color:#111827;'
+            f'margin:0 0 .2rem">{_html.escape(project)}</div>'
+            f'<div style="font-size:17px;color:#374151;margin:0 0 1.15rem">'
+            f'<span style="font-weight:700">Sender:</span> '
+            f'{_html.escape(sender)}</div>'
             f'{paragraphs}</div>')
         msg.add_alternative(body_html, subtype="html", cte="quoted-printable")
-
-        # THE ICON, and its absence is not a reason to lose a message. It is
-        # attached to the HTML part, not to the message: `multipart/related`
-        # is what tells a client that the image belongs to that markup rather
-        # than being something to download.
-        try:
-            with open(ICON, "rb") as fh:
-                msg.get_payload()[1].add_related(
-                    fh.read(), maintype="image", subtype="png", cid=f"<{ICON_CID}>")
-        except OSError as e:                                      # noqa: BLE001
-            if self.log:
-                self.log.warning("mail: no icon at %s (%s) — sent without it",
-                                 ICON, e)
         return msg
 
-    def send(self, project: str, to: str, subject: str, lines) -> bool:
+    def send(self, project: str, to: str, subject: str, sender: str, lines,
+             note: str = "") -> bool:
         """True if it went. NEVER raises: a notification that can make a write
         fail is worse than no notification, and every caller of this is a
         caller whose transaction has already committed.
@@ -279,7 +270,7 @@ class Mailer:
                 f"until tomorrow. The work itself is unaffected — tasks are opened "
                 f"and proposals are queued as usual — but you will not hear about "
                 f"them by mail. If this arrived out of nowhere, something is looping.")
-        msg = self._compose(project, subject, lines)
+        msg = self._compose(project, subject, sender, lines, note)
         msg["To"] = to
         try:
             self._deliver(msg)
@@ -344,10 +335,18 @@ def from_env(log=None) -> Mailer:
 # =====================================================================
 
 def task_opened(mailer: Mailer, prj, tid: str, owner: str, sender: str,
-                title: str, urgent: bool = False) -> bool:
-    """A task landed on a human's desk. The body carries the ID, who sent it
-    and where to read it — not the task's text: what is being sent is a
-    knock on the door, and the register is where the work is read."""
+                title: str, body: str = "", urgent: bool = False) -> bool:
+    """A task landed on a human's desk, WITH ITS TEXT.
+
+    ⚠ It used to be a knock on the door and nothing more — the ID, who sent it,
+    where to read it — on the argument that the register is where the work is
+    read. That argument was written by somebody who was not reading these on a
+    tablet: a person who has to open a register to find out whether a thing
+    matters will open it late, and the notification will have cost them a
+    gesture to learn nothing. A task's text is a paragraph, not a document.
+
+    The register is still the truth, and the mail is still not a place one
+    answers from: the footnote says so, and it never changes."""
     if not mailer.configured:
         return False
     row = prj.postbox(owner)
@@ -375,12 +374,12 @@ def task_opened(mailer: Mailer, prj, tid: str, owner: str, sender: str,
     return mailer.send(
         prj.name, row["email"],
         f"{mark}{tid} — {_short(title)}",
-        [f"{sender} opened it for you in {prj.name}.",
-         "Read it with tasks_get, or on the project's page."])
+        sender, _paragraphs(body),
+        "Read it with tasks_get, or on the project's page.")
 
 
 def proposal_queued(mailer: Mailer, prj, rid: str, title: str,
-                    proposed_by: str) -> bool:
+                    proposed_by: str, body: str = "") -> bool:
     """A rule is waiting for a person. Posted to the approver, if there is one
     and if they have an address — and silently not posted otherwise, which is
     the same shape as everything else here."""
@@ -396,7 +395,7 @@ def proposal_queued(mailer: Mailer, prj, rid: str, title: str,
     return mailer.send(
         prj.name, who["email"],
         f"Proposed Rule {rid} — {_short(title)}",
-        [f"Proposed by {proposed_by} in {prj.name}.",
-         "It binds nobody until you approve it on the project's lot page, where "
-         "the whole queue is decided in one turn against its digest: what is not "
-         "ticked is denied, and a denial costs a sentence."])
+        proposed_by, _paragraphs(body),
+        "It binds nobody until you approve it on the project's lot page, where "
+        "the whole queue is decided in one turn against its digest: what is not "
+        "ticked is denied, and a denial costs a sentence.")

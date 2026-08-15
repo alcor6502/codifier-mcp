@@ -585,7 +585,7 @@ def rules_propose(project: str, domain: str, type: str, title: str, body: str,
     # AFTER the write. Same reason as the task log's: the proposal is in the
     # queue whatever the network is doing.
     out["posted"] = mail.proposal_queued(mailer, prj, out["id"], title,
-                                         proposed_by)
+                                         proposed_by, body)
     return out
 
 
@@ -629,7 +629,7 @@ def tasks_add(project: str, consumer: str, title: str, body: str,
     # is the absorbed repeat — nothing happened, so nobody is told.
     if "already_open" not in out:
         out["posted"] = mail.task_opened(mailer, prj, out["id"], out["owner"],
-                                         created_by, title, urgent=urgent)
+                                         created_by, title, body, urgent=urgent)
     return out
 
 

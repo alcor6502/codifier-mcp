@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-5.0.2-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-5.0.3-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -979,17 +979,33 @@ on that person's row — a human is the only kind of consumer that may carry one
 and the schema refuses it on a chat or a skill. Proposals go to the project's
 **approver**, the one human marked for it on the profile page.
 
-**A message is a subject and a caption, and says everything once.** The subject
-is the whole headline — `TK-0003 — Aprimi su iPad`, or `Proposed Rule VA-0007 —
-<title>` — because that is the line an inbox list shows, and a reply, and a
-search. It is not printed again inside: under the icon there is the **project's
-name**, which is the one word that changes between messages and tells you which
-register just spoke, and under that two italic lines saying who sent it and
-where to read it. Nothing else, and no disclaimer. `TK-` already says *task*,
-which is why the word is not in a task's subject; `VA-` does not say *proposed*,
-which is why a proposal's spells it out. ⚠ The title is CUT at 70 characters
-there and carried nowhere else — this message is a knock on the door, and the
-register is where the work is read.
+**The subject is the whole headline, and says it once.** `TK-0003 — Aprimi su
+iPad`, or `Proposed Rule VA-0007 — <title>`, because that is the line an inbox
+list shows, and a reply, and a search. It is not printed again inside. `TK-`
+already says *task*, which is why the word is not in a task's subject; `VA-`
+does not say *proposed*, which is why a proposal's spells it out. ⚠ The title
+is CUT at 70 characters there.
+
+**And the message is four things:** the **project's name**, the one word that
+changes between messages and tells you which register just spoke; **`Sender:`**
+and who spoke, in the size between that name and the prose, because it is the
+one thing the subject cannot carry; **the task's own text**, at the size prose
+is read at; and a **footnote at 9px** saying where it is answered. Nothing
+else, no disclaimer, and no picture — the sender's card in the address book
+draws that better than anything sent from here, and in the message list too.
+
+⚠ **The text travels, and that reverses a rule this file carried for an
+afternoon.** The message was a knock on the door — the ID, who sent it, where
+to read it — on the argument that the register is where the work is read. The
+argument was written by somebody who was not reading these on a tablet: a
+person who has to open a register to find out whether a thing matters will open
+it late, and the notification will have cost them a gesture to learn nothing. A
+task's text is a paragraph, not a document. It is capped at **4000
+characters**, cut at the end and visibly — a ceiling, not a summary.
+
+⚠ **Markdown arrives verbatim.** Asterisks and hashes typed into a body are the
+characters that arrive: the register stores prose, not markup, and a mail that
+reformatted it would be showing something nobody wrote.
 
 The message sets **no background colour**, on purpose: Apple Mail in dark mode
 inverts a message that sets none, and a card painted white stays a white card
@@ -1495,7 +1511,7 @@ all four are the FastMCP ones any self-hosted server of this shape will meet:
 | `entrypoint.sh` | permissions, preflight, start |
 | `Dockerfile` · `requirements.txt` | the image, and the engine pinned to a tag |
 | `codifier-mcp.xml` | Unraid template, every field documented — it **is** the configuration |
-| `codifier-icon.png` · `codifier-icon-64.png` | the icon, in two sizes, used in **three** places — see below |
+| `codifier-icon.png` · `codifier-icon-64.png` | the icon, in two sizes, used in **two** places — see below. Neither is in the image |
 | `test_*.py` | the five suites, no network needed |
 
 ### The icon, and where it is actually seen
@@ -1509,16 +1525,14 @@ Passing `icons` buys **the OAuth consent page** — the page seen when the
 connector is added or reconnected — where FastMCP renders it in place of its
 own logo.
 
-The third place is **the post**, and it is the reason there are two files.
-`mail.py` EMBEDS `codifier-icon-64.png` in every message rather than linking it:
-a `<img src="https://…">` weighs nothing and is blocked by default in most
-clients — Apple Mail's *Protect Mail Activity* among them — so the ordinary
-case would be a broken placeholder, which is worse than no logo at all. The 64px
-PNG-8 is about 2 KB against the 256's 24 KB, for a picture drawn at 16 pixels;
-it is the only icon inside the image, and it is in the `Dockerfile`'s `COPY`
-line for this reason and no other. The 256 stays in the repository and out of
-the image — the two places above serve it from a raw GitHub URL, and nothing in
-the container reads it.
+**The post was briefly a third place, and is not one any more.** `mail.py`
+embedded `codifier-icon-64.png` in every message for one afternoon. Two rounds
+of shrinking it showed that Apple Mail was never obeying the `width` attribute
+— the number in the code and the number on the screen were never the same
+number — and then a **card in the address book** made the client draw the
+sender's picture itself, in the message list as well, where nothing here could
+ever have put it. So the right size for a logo we do not control turned out to
+be none. The 64px file stays in the repository, out of the image and unused.
 
 It does **not** buy the icon in Claude's connector list. That surface ignores
 `serverInfo.icons`, which the MCP spec has carried since revision `2025-11-25`
