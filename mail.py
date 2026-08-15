@@ -44,6 +44,7 @@ library, and they do STARTTLS, SMTPS and authentication.
 """
 from __future__ import annotations
 
+import html as _html
 import os
 import smtplib
 import ssl
@@ -53,11 +54,35 @@ from email.message import EmailMessage
 
 DAILY_CAP = 10
 
+# The icon, EMBEDDED and not linked. A `<img src="https://…">` weighs nothing
+# and is blocked by default in most clients — Apple Mail's Protect Mail
+# Activity among them — so the ordinary case would be a broken placeholder,
+# which is worse than no logo at all. Embedding costs about 24 KB a message,
+# which against ten messages a day is nothing.
+#
+# ⚠ It must be in the image: it is in the Dockerfile's COPY line for this
+# reason and no other — the MCP surface serves it from a raw GitHub URL and
+# never needed the file itself.
+ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                    "codifier-icon.png")
+ICON_CID = "codifier-icon"
+
 # `starttls` is the default because it is what port 587 speaks, and 587 is what
 # a submission service hands you. The other two are named rather than deduced
 # from the port: deducing it would be a rule with a case list, and the day
 # somebody runs SMTPS on 587 the deduction is wrong in silence.
 SECURITY = ("starttls", "ssl", "none")
+
+# How long a title may be in a SUBJECT. Not a limit on the title — the register
+# has its own, and this is only the line an inbox shows in a list. Cut with a
+# real ellipsis so a cut is visibly a cut and not a title that happens to end
+# oddly.
+SUBJECT_TITLE = 70
+
+
+def _short(text: str) -> str:
+    t = " ".join((text or "").split())
+    return t if len(t) <= SUBJECT_TITLE else t[:SUBJECT_TITLE - 1].rstrip() + "…"
 
 
 class Mailer:
@@ -122,10 +147,78 @@ class Mailer:
 
     # ---------- the one way out ----------
 
-    def send(self, project: str, to: str, subject: str, body: str) -> bool:
+    def _compose(self, project: str, subject: str, headline: str,
+                 lines) -> EmailMessage:
+        """ONE source for both halves. The plain text and the HTML are built
+        from the SAME `lines`, so they cannot drift — which is the failure a
+        multipart message invites: two versions of a sentence, and the one
+        nobody reads goes stale first.
+
+        Layout deliberately sober, and with no background colour: Apple Mail in
+        dark mode inverts a message that does not set one, and a card painted
+        white stays a white card with unreadable text on it."""
+        msg = EmailMessage()
+        msg["From"] = self.sender
+        msg["Subject"] = subject
+        # `To` is NOT set here: the recipient belongs to the send, not to the
+        # shape of the message, and this method is about the shape.
+        # QUOTED-PRINTABLE, and not the 8bit `set_content` picks by itself.
+        # Found by a probe against a server that does not advertise 8BITMIME:
+        # smtplib downgrades, and an em dash comes out the other end as the six
+        # literal characters `\u2014`. SMTP2GO does advertise it, so the message
+        # that arrives today is right — which is exactly why this would have
+        # waited for the one relay that does not, on a Sunday.
+        #
+        # 7-bit clean means the message no longer depends on what the server
+        # says it can take.
+        msg.set_content(headline + "\n\n" + "\n\n".join(lines) + "\n",
+                        cte="quoted-printable")
+
+        paragraphs = "".join(
+            f'<p style="margin:0 0 .85rem">{_html.escape(t)}</p>' for t in lines)
+        body_html = (
+            '<div style="font-family:-apple-system,BlinkMacSystemFont,'
+            "'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.55;"
+            'color:#374151;max-width:33rem">'
+            '<table role="presentation" cellpadding="0" cellspacing="0" '
+            'border="0" style="margin:0 0 1.5rem"><tr>'
+            f'<td style="padding-right:.75rem;vertical-align:middle">'
+            f'<img src="cid:{ICON_CID}" width="42" height="42" alt="" '
+            'style="display:block;border-radius:9px"></td>'
+            '<td style="vertical-align:middle">'
+            '<div style="font-size:.72rem;letter-spacing:.11em;'
+            'text-transform:uppercase;color:#9ca3af">codifier</div>'
+            f'<div style="font-size:1rem;color:#111827">'
+            f'{_html.escape(project)}</div>'
+            '</td></tr></table>'
+            f'<p style="margin:0 0 1.1rem;font-size:1.18rem;font-weight:600;'
+            f'color:#111827">{_html.escape(headline)}</p>'
+            f'{paragraphs}</div>')
+        msg.add_alternative(body_html, subtype="html", cte="quoted-printable")
+
+        # THE ICON, and its absence is not a reason to lose a message. It is
+        # attached to the HTML part, not to the message: `multipart/related`
+        # is what tells a client that the image belongs to that markup rather
+        # than being something to download.
+        try:
+            with open(ICON, "rb") as fh:
+                msg.get_payload()[1].add_related(
+                    fh.read(), maintype="image", subtype="png", cid=f"<{ICON_CID}>")
+        except OSError as e:                                      # noqa: BLE001
+            if self.log:
+                self.log.warning("mail: no icon at %s (%s) — sent without it",
+                                 ICON, e)
+        return msg
+
+    def send(self, project: str, to: str, subject: str, headline: str,
+             lines) -> bool:
         """True if it went. NEVER raises: a notification that can make a write
         fail is worse than no notification, and every caller of this is a
         caller whose transaction has already committed.
+
+        `lines` is a LIST of paragraphs rather than one blob, because the plain
+        text and the HTML are made from it and a blob would have to be split by
+        guessing where the paragraphs were.
 
         The brake is counted BEFORE the socket is opened, and the tenth mail
         of a project's day carries the notice that the sender is paused — so
@@ -140,19 +233,16 @@ class Mailer:
                     "Something is looping — the cap exists so a runaway cannot burn a "
                     "month's allowance in an afternoon", project, DAILY_CAP)
             return False
+        lines = list(lines)
         if last:
-            body += (
-                f"\n\n---\nThis is the {DAILY_CAP}th message about {project} today, "
-                f"which is the daily ceiling: nothing else will be posted about this "
-                f"project until tomorrow. The work itself is unaffected — tasks are "
-                f"opened and proposals are queued as usual — but you will not hear "
-                f"about them by mail. If this arrived out of nowhere, something is "
-                f"looping.\n")
-        msg = EmailMessage()
-        msg["From"] = self.sender
+            lines.append(
+                f"This is the {DAILY_CAP}th message about {project} today, which is "
+                f"the daily ceiling: nothing else will be posted about this project "
+                f"until tomorrow. The work itself is unaffected — tasks are opened "
+                f"and proposals are queued as usual — but you will not hear about "
+                f"them by mail. If this arrived out of nowhere, something is looping.")
+        msg = self._compose(project, subject, headline, lines)
         msg["To"] = to
-        msg["Subject"] = subject
-        msg.set_content(body)
         try:
             self._deliver(msg)
         except Exception as e:                                    # noqa: BLE001
@@ -216,7 +306,7 @@ def from_env(log=None) -> Mailer:
 # =====================================================================
 
 def task_opened(mailer: Mailer, prj, tid: str, owner: str, sender: str,
-                urgent: bool = False) -> bool:
+                title: str, urgent: bool = False) -> bool:
     """A task landed on a human's desk. The body carries the ID, who sent it
     and where to read it — not the task's text: what is being sent is a
     knock on the door, and the register is where the work is read."""
@@ -226,14 +316,21 @@ def task_opened(mailer: Mailer, prj, tid: str, owner: str, sender: str,
     if row is None:
         return False
     mark = "URGENT · " if urgent else ""
+    # THE SUBJECT IS THE TASK ITSELF, short: it is what an inbox list shows, and
+    # "TK-0001 is on your desk" spent that line telling the reader the one thing
+    # they could work out from the sender. The ID and the project are in the
+    # message, where there is room for them.
+    #
+    # NO DISCLAIMER either. It explained that the address on the row is why the
+    # message arrived — true, and known to the one person who can change it,
+    # since they typed it on the page themselves. A footer nobody needs is a
+    # footer that teaches the eye to stop before the end.
     return mailer.send(
         prj.name, row["email"],
-        f"{mark}{prj.name}: {tid} is on your desk",
-        f"{sender} opened {tid} for you in {prj.name}.\n\n"
-        f"Read it with tasks_get, or on the project's page.\n\n"
-        f"You are getting this because your name in this register carries an "
-        f"address. Take the address off and the post stops; the task is opened "
-        f"either way.\n")
+        f"{mark}Task: {_short(title)}",
+        f"{tid} — {title}",
+        [f"{sender} opened it for you in {prj.name}.",
+         "Read it with tasks_get, or on the project's page."])
 
 
 def proposal_queued(mailer: Mailer, prj, rid: str, title: str,
@@ -248,10 +345,9 @@ def proposal_queued(mailer: Mailer, prj, rid: str, title: str,
         return False
     return mailer.send(
         prj.name, who["email"],
-        f"{prj.name}: a proposal is waiting — {rid}",
-        f"{proposed_by} proposed {rid} — {title}.\n\n"
-        f"It binds nobody until you approve it on the project's lot page, where "
-        f"the whole queue is decided in one turn against its digest: what is not "
-        f"ticked is denied, and a denial costs a sentence.\n\n"
-        f"You are getting this because you are marked as this project's approver "
-        f"and your name carries an address.\n")
+        f"Proposed Rule: {_short(title)}",
+        f"{rid} — {title}",
+        [f"Proposed by {proposed_by} in {prj.name}.",
+         "It binds nobody until you approve it on the project's lot page, where "
+         "the whole queue is decided in one turn against its digest: what is not "
+         "ticked is denied, and a denial costs a sentence."])
