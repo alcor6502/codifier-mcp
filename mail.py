@@ -180,16 +180,26 @@ class Mailer:
             '<div style="font-family:-apple-system,BlinkMacSystemFont,'
             "'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.55;"
             'color:#374151;max-width:33rem">'
+            # THE HEADER IS THE ICON AND THE PROJECT, and nothing else. It
+            # carried a small uppercase "codifier" over the name until Alfredo
+            # said the obvious: the icon IS codifier, and saying it twice
+            # leaves less room for the one word that changes between messages
+            # — Palestra or Financial Portfolio, which is what tells you which
+            # register just spoke.
+            #
+            # 14px bold against a 42px icon: a LABEL, deliberately smaller than
+            # the headline below it. And if the image never loads, the line
+            # does not fall apart — the name is text and was always going to
+            # be there, which is why `alt` is empty rather than a word that
+            # would compete with it.
             '<table role="presentation" cellpadding="0" cellspacing="0" '
             'border="0" style="margin:0 0 1.5rem"><tr>'
-            f'<td style="padding-right:.75rem;vertical-align:middle">'
+            f'<td style="padding-right:.65rem;vertical-align:middle">'
             f'<img src="cid:{ICON_CID}" width="42" height="42" alt="" '
             'style="display:block;border-radius:9px"></td>'
             '<td style="vertical-align:middle">'
-            '<div style="font-size:.72rem;letter-spacing:.11em;'
-            'text-transform:uppercase;color:#9ca3af">codifier</div>'
-            f'<div style="font-size:1rem;color:#111827">'
-            f'{_html.escape(project)}</div>'
+            f'<div style="font-size:14px;font-weight:700;color:#111827;'
+            f'letter-spacing:.01em">{_html.escape(project)}</div>'
             '</td></tr></table>'
             f'<p style="margin:0 0 1.1rem;font-size:1.18rem;font-weight:600;'
             f'color:#111827">{_html.escape(headline)}</p>'
