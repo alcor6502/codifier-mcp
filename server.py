@@ -718,6 +718,13 @@ def project_amend(project: str, entity: str, name: str, action: str,
     spelled as `project_info` spells it: it is the hand the history records,
     and it is required.
 
+    PEOPLE ARE NOT HERE. A consumer of kind `human` is created, renamed,
+    retired and revived on the administration page, and so are their address
+    and the mark that says whose desk hears about the proposals. A chat and a
+    skill are machinery and this tool manages them; a person is not a row a
+    chat invents. What you can do from here is put work on their desk with
+    `tasks_add`.
+
     THE PROJECT ITSELF IS NOT HERE. Its `brief`, its `specs` and its
     `queue_cap` are changed by a person on the administration page, behind its
     password — not by this tool and not by the admin code either. The brief is

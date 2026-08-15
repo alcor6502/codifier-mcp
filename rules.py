@@ -3566,13 +3566,25 @@ class Project:
     FIELDS = {
         "domain": {"create": ("code", "description", "reason"),
                    "amend": ("description",)},
-        # `approver` is NOT here, and that is the decision: the flag that
-        # says where a project's proposals are posted is marked from the
-        # administration page, by the person who holds its password. Alfredo:
-        # "I know I am the super user because I have the password of the web
-        # UI." A tool for it would be a tool for deciding who gets told.
-        "consumer": {"create": ("name", "kind", "brief", "specs", "secret", "email"),
-                     "amend": ("name", "brief", "specs", "secret", "email")},
+        # NEITHER `email` NOR `approver` is here, and it is one decision
+        # rather than two. Where a person's post goes, and which person is told
+        # about the proposals, are both settled on the administration page by
+        # whoever holds its password. Alfredo: "I know I am the super user
+        # because I have the password of the web UI."
+        #
+        # `email` was a field of this command for one commit, and the seam
+        # showed itself immediately: the page listed a human with "no address,
+        # so nothing is posted" beside them and offered no way to fix it —
+        # the repair was a walk back to a chat with the admin code. The other
+        # way out was a second door on the page, and two doors writing one
+        # datum is the shape that goes out of step. So it is one door, and it
+        # is the one where the problem is visible.
+        #
+        # The cost is declared: creating a person is now two gestures, the
+        # consumer here and the address there. Worth it, because an address is
+        # only ever typed by the person who owns it.
+        "consumer": {"create": ("name", "kind", "brief", "specs", "secret"),
+                     "amend": ("name", "brief", "specs", "secret")},
         "group": {"create": ("name", "members"),
                   "amend": ("name", "members")},
     }
@@ -3684,13 +3696,42 @@ class Project:
             "gesture that half happened is a gesture nobody can read six months later. "
             "Bring the admin code in `key`, and the one-time `auth_code` with it.")
 
+    # WHY A PEOPLE HAVE NO TOOL, declared next to the ladder and not
+    # discovered inside a handler. A `chat` and a `skill` are machinery, and
+    # machinery is managed by machinery: they are created, renamed and retired
+    # by whoever is wiring the project up. A `human` is a person — not a datum
+    # a chat gets to invent, rename or retire — and a person is looked after by
+    # a person, on the page, behind its password.
+    #
+    # It is the same sentence as "what is fundative has no tool", said about
+    # the anagrafica instead of about the profile, and it arrived the way the
+    # good ones do: the address was taken off the tool first, and Alfredo named
+    # the principle underneath it — "i consumer human si gestiscono tutti sulla
+    # UI, perché sono human".
+    NO_TOOL_FOR_PEOPLE = (
+        "a consumer of kind `human` is not created, renamed, retired or revived from "
+        "here: people are looked after by a person, on the administration page, behind "
+        "its password. A chat and a skill are machinery and this tool manages them; a "
+        "person is not a row a chat invents. Their address and the mark that says whose "
+        "desk hears about the proposals live on that page too, and for the same reason. "
+        "What you CAN do from here is put work on their desk: tasks_add.")
+
     def amend_project(self, entity: str, name: str, action: str, fields=None,
                       reason: str = "", actor: str = "",
-                      auth_code: str = "") -> dict:
+                      auth_code: str = "", on_the_page: bool = False) -> dict:
         """The project's STRUCTURE — domains, consumers, groups. Rules and tasks
         are the project's OBJECTS and have tools of their own; the prefix says
         which level a call works on. The project ITSELF is not amended here any
-        more, and `NO_TOOL` says where it went.
+        more, and `NO_TOOL` says where it went — and neither are its PEOPLE, for
+        which `NO_TOOL_FOR_PEOPLE` says the same.
+
+        `on_the_page` is how the administration UI comes through this door
+        instead of round it. It is a second entrance and not a second road: the
+        page calls this method, with every guard it carries, and the flag only
+        lifts the refusal that exists to keep chats away from people. A page
+        with a copy of these rules would be a page with one of them out of
+        step — which is exactly what the ladder in `port_for` was written to
+        prevent one level up.
 
         Every refusal in here repeats a guarantee that lives in the schema,
         because the schema's message is about a table and this one can be about
@@ -3708,6 +3749,23 @@ class Project:
             raise RulesError(f"action {action!r}: one of {', '.join(self.ACTIONS)}.")
         if (entity, action) in self.NO_TOOL:
             raise RulesError(self.NO_TOOL[(entity, action)])
+        # THE PEOPLE, refused before the credentials like the rest of the
+        # shape. On `create` the kind is in `fields`; on the other three the
+        # kind is on the row, so the row is read — which is a state read, and
+        # it is done HERE rather than in the handler for one reason: the answer
+        # does not depend on any credential, and sending somebody to mint a
+        # one-time code for a gesture that has no tool is a trip that ends in
+        # the same refusal.
+        if entity == "consumer" and not on_the_page:
+            if action == "create":
+                if (fields.get("kind") or "").strip().lower() == "human":
+                    raise RulesError(self.NO_TOOL_FOR_PEOPLE)
+            else:
+                existing = self.cx.execute(
+                    "SELECT kind FROM consumer WHERE lower(name)=?",
+                    (_fold(name or ""),)).fetchone()
+                if existing is not None and existing["kind"] == "human":
+                    raise RulesError(self.NO_TOOL_FOR_PEOPLE)
         # A GESTURE WITH NO HAND is refused, and it is refused HERE — after
         # NO_TOOL, because asking somebody to sign a gesture that does not
         # exist is the trip that ends in the same refusal, and before
@@ -3753,7 +3811,16 @@ class Project:
         # handlers open the transaction that writes, so that is where the
         # one-time code has to burn. `create` needs none — a created thing is
         # attached to nothing — and `specs` alone needs neither.
-        needs_auth = self.port_for(entity, action, fields) == "auth"
+        # ON THE PAGE THE SECOND FACTOR IS THE PASSWORD, retyped for this
+        # action, so no one-time code is asked for and none is burned. That is
+        # not the flag being generous: the one-time code exists so that a CHAT
+        # holding the admin code cannot modify something on its own, and on the
+        # page there is no chat — there is a person who has just typed a
+        # password that no tool carries. Minting a code in one tab to paste it
+        # into the next would be ceremony, and ceremony is what teaches a hand
+        # to type a secret without looking.
+        needs_auth = (not on_the_page
+                      and self.port_for(entity, action, fields) == "auth")
         # AND THE SECOND FACTOR IS CHECKED HERE, before the handler is reached,
         # because the handlers are where the state lives: `_amend_consumer`
         # answers "this project has no consumer by that name" and would answer
@@ -3905,25 +3972,25 @@ class Project:
                     f"kind {kind!r}: one of {', '.join(KINDS)}. A human calls no tool but "
                     "owns tasks; it is not guessed from the name, because a wrong guess "
                     "would be written in silence.")
-            mail = self._valid_email(fields.get("email"), kind)
             self._no_mandate_on_a_human(kind, fields)
             with gesture():
                 self.cx.execute(
-                    "INSERT INTO consumer (name, kind, brief, specs, secret, email, "
-                    "created_at, actor) VALUES (?,?,?,?,?,?,?,?)",
+                    "INSERT INTO consumer (name, kind, brief, specs, secret, "
+                    "created_at, actor) VALUES (?,?,?,?,?,?,?)",
                     (who, kind, self._prose("brief", fields.get("brief") or "") or None,
                      self._prose("specs", fields.get("specs") or "") or None,
-                     (fields.get("secret") or "").strip() or None, mail, _now(), actor))
+                     (fields.get("secret") or "").strip() or None, _now(), actor))
             out = {"entity": "consumer", "action": "created", "name": who, "kind": kind}
             if kind == "human":
+                # Only reachable from the page: the tool refuses a human before
+                # it gets here. The sentence is written for the person reading
+                # the page, and it names the one thing still missing.
                 out["note"] = (
-                    "a human receives tasks and no rules: rules_list on this name is "
-                    "REFUSED, not answered empty. "
-                    + (f"Post opened on this desk goes to {mail}." if mail else
-                       "No email, so nothing is posted anywhere — which is a legitimate "
-                       "choice and not an omission.")
-                    + " Whether this is the person the PROPOSALS go to is marked on the "
-                      "administration page, never from here.")
+                    "a person receives tasks and no rules: rules_list on this name is "
+                    "REFUSED, not answered empty, and they have no brief and no specs "
+                    "because they already know who they are. THEY HAVE NO ADDRESS YET "
+                    "and nothing is posted to them: type one below, and mark there too "
+                    "whether this is the person the proposals are announced to.")
             return out
 
         row = self._consumer_row(name, live=False)
@@ -3943,15 +4010,15 @@ class Project:
             secret = row["secret"]
             if "secret" in fields:
                 secret = (fields["secret"] or "").strip() or None
-            mail = row["email"]
-            if "email" in fields:
-                mail = self._valid_email(fields["email"], row["kind"])
             self._no_mandate_on_a_human(row["kind"], fields)
             with gesture():
+                # `email` is NOT in this UPDATE, and that is the whole of the
+                # decision: a column this statement does not name is a column
+                # this door cannot move.
                 self.cx.execute(
-                    "UPDATE consumer SET name=?, brief=?, specs=?, secret=?, email=?, "
+                    "UPDATE consumer SET name=?, brief=?, specs=?, secret=?, "
                     "actor=? WHERE consumer_id=?",
-                    (new_name, brief, specs, secret, mail, actor, row["consumer_id"]))
+                    (new_name, brief, specs, secret, actor, row["consumer_id"]))
             out = {"entity": "consumer", "action": "amended", "name": new_name,
                    "changed": sorted(fields)}
             if new_name != row["name"]:
@@ -3999,8 +4066,9 @@ class Project:
                         "deleted."}
 
     @staticmethod
-    def _valid_email(raw, kind: str):
-        """An address, or None — and only on a human.
+    def _valid_email(raw):
+        """An address, or None. SHAPE only — whose it may be is asked by the
+        one caller, which is the door that knows.
 
         Deliberately NOT a pattern that tries to be RFC 5322: the addresses
         that go in here are typed once, by the person who owns them, and a
@@ -4014,12 +4082,6 @@ class Project:
         mail = str(raw).strip()
         if not mail:
             return None
-        if kind != "human":
-            raise RulesError(
-                f"only a consumer of kind `human` carries an email, and this one is a "
-                f"{kind}. A chat and a skill are reached by being called, not by post: "
-                "an address on one is a field nobody would ever read, and the schema "
-                "refuses it too.")
         local, sep, domain = mail.partition("@")
         if not sep or not local or "." not in domain or any(c.isspace() for c in mail):
             raise RulesError(
@@ -4037,7 +4099,13 @@ class Project:
         The schema refuses it too — this is the message that can name the
         field. Two writable fields that nobody ever reads are the same disease
         as an address on a chat, and the cure is the same: forbid, do not
-        merely leave unused."""
+        merely leave unused.
+
+        ⚠ Reachable only through the page since people left the tools, and kept
+        rather than deleted: the page does not OFFER those fields, so nothing
+        would go red if this went — which is the definition of a guarantee that
+        has quietly stopped being one. The schema holds it either way, and
+        test_schema proves that half by hand with sqlite3."""
         if kind != "human":
             return
         stray = sorted(f for f in ("brief", "specs") if (fields or {}).get(f))
@@ -4048,37 +4116,74 @@ class Project:
                 "they are and what they have to do — a field nobody reads is a field "
                 "somebody will maintain for nothing.")
 
-    def set_approver(self, name: str, actor: str = "web ui") -> dict:
-        """Mark WHO receives this project's proposals, or clear it.
+    def set_postbox(self, addresses=None, approver: str = "",
+                    actor: str = "web ui") -> dict:
+        """WHERE THIS PROJECT'S POST GOES: every person's address, and which one
+        of them the proposals are announced to. ONE gesture, because they are
+        one subject and a page that asked for the password twice to settle one
+        question would teach the hand to type it without looking.
 
-        From the administration page and from nowhere else: it is not in
-        `FIELDS`, so no tool reaches it. The flag GRANTS NOTHING — the page is
-        opened by the password, which is one per container — it is an address
-        and not a privilege, which is why it is called `approver` and not
-        `superuser`.
+        From the administration page and from nowhere else. No tool reaches
+        either half: an address is typed by the person who owns it, and which
+        desk hears about the proposals is decided by whoever holds this
+        password. The flag GRANTS NOTHING — the page is opened by the password,
+        which is one per container — which is why it is called `approver` and
+        not `superuser`.
 
-        An empty `name` clears it, and then the proposals notify nobody.
-        Coherent with the rest: everything here switches off by absence."""
-        with self._transaction():
-            self.cx.execute("UPDATE consumer SET approver=0, actor=? WHERE approver=1",
-                            (actor,))
-            if not (name or "").strip():
-                return {"approver": None,
-                        "note": "nobody is marked: a proposal entering the queue notifies "
-                                "no one. Nothing else changes — the queue is on the lot "
-                                "page as it always was."}
-            row = self._consumer_row(name)
+        `addresses` is the WHOLE picture, name by name, exactly as the form
+        showed it: a name left out is a name untouched, and a name present with
+        an empty value has its address CLEARED. `approver` empty clears the
+        mark, and then a proposal reaches no desk. Everything here switches off
+        by absence, like the rest of the post.
+
+        ONE TRANSACTION for the lot: a page that wrote three addresses and then
+        refused the fourth would leave a state nobody chose."""
+        wanted = {str(k): (v or "") for k, v in (addresses or {}).items()}
+        rows, changed = {}, []
+        for who in wanted:
+            row = self._consumer_row(who)
             if row["kind"] != "human":
                 raise RulesError(
-                    f"{row['name']} is a {row['kind']}: only a human is marked. The flag "
-                    "says where a proposal is POSTED, and a chat is not reached by post.")
-            self.cx.execute("UPDATE consumer SET approver=1, actor=? WHERE consumer_id=?",
-                            (actor, row["consumer_id"]))
-        return {"approver": row["name"], "email": row["email"],
-                "note": (f"proposals entering the queue are posted to {row['email']}."
-                         if row["email"] else
-                         f"{row['name']} has no email, so nothing is posted. Give them "
-                         "one, or accept that the queue is only seen by opening it.")}
+                    f"{row['name']} is a {row['kind']} and carries no address: a chat and "
+                    "a skill are reached by being called, not by post. Nothing was "
+                    "written — the schema refuses it too.")
+            rows[who] = row
+        marked = None
+        if (approver or "").strip():
+            marked = self._consumer_row(approver)
+            if marked["kind"] != "human":
+                raise RulesError(
+                    f"{marked['name']} is a {marked['kind']}: only a person is marked. "
+                    "The flag says where a proposal is POSTED, and a chat is not reached "
+                    "by post.")
+        with self._transaction():
+            for who, row in rows.items():
+                mail = self._valid_email(wanted[who])
+                if mail == row["email"]:
+                    continue
+                self.cx.execute("UPDATE consumer SET email=?, actor=? WHERE consumer_id=?",
+                                (mail, actor, row["consumer_id"]))
+                changed.append(f"{row['name']} → {mail or 'no address'}")
+            # The flag is cleared and re-set inside the same transaction, so
+            # there is no instant with two of them and none with a gap: the
+            # unique index would refuse the first anyway, which is why it is an
+            # index and not a count.
+            self.cx.execute("UPDATE consumer SET approver=0, actor=? WHERE approver=1",
+                            (actor,))
+            if marked is not None:
+                self.cx.execute(
+                    "UPDATE consumer SET approver=1, actor=? WHERE consumer_id=?",
+                    (actor, marked["consumer_id"]))
+        now = self.approver()
+        return {"changed": changed, "approver": None if now is None else now["name"],
+                "note": ("nobody is marked: a proposal entering the queue notifies no "
+                         "one, and is seen by opening the lot page."
+                         if now is None else
+                         f"proposals entering the queue are posted to {now['email']}."
+                         if now["email"] else
+                         f"{now['name']} is marked and has no address, so nothing is "
+                         "posted. Type one above, or accept that the queue is only seen "
+                         "by opening it.")}
 
     def approver(self) -> dict | None:
         """The marked human, or None. One row, read where it is needed — the

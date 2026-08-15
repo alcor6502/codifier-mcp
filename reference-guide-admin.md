@@ -69,26 +69,32 @@ The project's STRUCTURE — the one door for all of it.
   REQUIRED. It is the hand the history records. A call without it is refused
   before anything else is looked at: a register that cannot say whose gesture a
   row was answers the wrong question six months later.
-- **A `human` is a different shape, and the schema holds it, not the code.**
-  Only a human may carry an **`email`**, and a human has **no `brief` and no
-  `specs`**: a person already knows who they are and what they have to do, and
+- ⚠ **PEOPLE ARE NOT HERE AT ALL.** A consumer of kind `human` is created,
+  renamed, retired and revived on the **administration page**, and so is their
+  address and the mark that says whose desk hears about the proposals. Every
+  one of those four actions is refused here, on the way in and on the way out,
+  and the refusal says where they live.
+
+  The reason is not security, it is what the two things ARE. A `chat` and a
+  `skill` are machinery, and machinery is managed by machinery: this command
+  wires the project up. A person is not a row a chat invents, renames or
+  retires — they are looked after by a person, behind a password no tool
+  carries. It is the same sentence as *what is fundative has no tool*, said
+  about the anagrafica instead of about the profile.
+
+  What you CAN do with a person from here is the thing that matters: put work
+  on their desk, with `tasks_add`.
+- **A person's row is a different shape, and the schema holds it, not the
+  code.** Only a human may carry an `email`, and a human has **no `brief` and
+  no `specs`**: they already know who they are and what they have to do, and
   two writable fields nobody ever reads are the same disease as an address on a
-  chat. Both refusals come from the database as well as from here, because root
-  opening the file with `sqlite3` is a documented road and a guarantee that
-  lives only in Python is one that road walks past.
-  The address check is LOOSE on purpose — one `@`, a domain with a dot, no
-  spaces — because refusing a legal address is a worse failure than letting a
-  typo through, and a typo announces itself as post that never arrives.
+  chat. Both refusals come from the database as well as from the engine,
+  because root opening the file with `sqlite3` is a documented road and a
+  guarantee that lives only in Python is one that road walks past.
 - **`rules_list` on a human is REFUSED**, not answered empty: no rule binds a
   person through this registry, and an empty list would read as a project with
   nothing in it. Their desk is real — `tasks_list` and `tasks_overview` answer
   for it, and the overview is where their address is read.
-- **`approver` is not a field of this command**, and that is the decision, not
-  an omission. It marks the ONE human a project's proposals are posted to, and
-  it is marked on the administration page by whoever holds its password. It
-  GRANTS NOTHING — hence the name: the page is opened by the password, this is
-  an address. At most one per project, and that is a unique index in the
-  database rather than a count in code.
 - **THE PROJECT ITSELF IS NOT HERE.** Its `brief`, its `specs` and its
   `queue_cap` are written by a person on the administration page, behind that
   page's password — not by this command and not by the admin code either. The

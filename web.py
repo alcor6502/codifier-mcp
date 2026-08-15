@@ -40,8 +40,8 @@ silence.
 
 WHERE THE MASTER IS RETYPED, AND WHERE IT IS NOT. Every gesture that WRITES
 asks for it again — deciding the lot, minting a one-time code, editing the
-project's profile, marking who its proposals are posted to — because a session
-alone is a browser left open on the iPad. The backup
+project's profile, adding or retiring a PERSON, writing where their post goes —
+because a session alone is a browser left open on the iPad. The backup
 does not, and the log page does not: a `VACUUM INTO` changes nothing and drops
 a file on the server's disk, and the log is a ring in memory. A master retyped
 where it defends nothing does not add a guard, it teaches the hand to type it
@@ -486,6 +486,7 @@ def build(*, registry, log, master: str, refusal, fault,
         n = _esc(name)
         return (f"<a href='/p/{n}/batch'>lot</a><a href='/p/{n}/rules'>rules</a>"
                 f"<a href='/p/{n}/profile'>profile</a>"
+                f"<a href='/p/{n}/people'>people</a>"
                 f"<a href='/p/{n}/codes'>codes</a>"
                 f"<a href='/p/{n}/status'>state</a><a href='/'>projects</a>"
                 "<form class='inline' method='post' action='/logout'>"
@@ -1093,60 +1094,162 @@ def build(*, registry, log, master: str, refusal, fault,
     # It is the same shape as the lot and the minting, and deliberately not a
     # new one: session, master retyped for the action, refusals as sentences.
 
-    def _approver_html(name: str, prj) -> str:
-        """WHO GETS THE POST when a proposal enters the queue, marked from
-        here and from nowhere else.
+    # ---------- the people: because they are people ----------
+    #
+    # A chat and a skill are machinery and a tool manages them. A person is
+    # not, and the whole of their row lives here: created, given an address,
+    # marked as the one who hears about the proposals, retired. Alfredo,
+    # naming it: "i consumer human si gestiscono tutti sulla UI, perché sono
+    # human."
+    #
+    # It calls `prj.amend_project(..., on_the_page=True)` — the SAME method the
+    # tool calls, with the flag that lifts the refusal keeping chats away from
+    # people. Not a second road: every guard in there (a name is one word, a
+    # retired name is still taken, a retirement that would empty a rule) holds
+    # unduplicated. A page with its own copy of those rules would be a page
+    # with one of them out of step.
 
-        It is not a field of any tool, and that is the decision: a flag that
-        says where a project's proposals are announced is marked by the person
-        holding this page's password. Alfredo: "I know I am the super user
-        because I have the password of the web UI."
-
-        And it GRANTS NOTHING — hence `approver` and not `superuser`. Access to
-        this page is the password, which is one per container; this says where
-        an email goes. Choosing nobody is a legitimate answer and the menu
-        offers it: then a proposal notifies no one, which is the same shape as
-        every other switch here — off by absence.
-        """
-        humans = [c for c in prj.project_info()["consumers"] if c["kind"] == "human"]
+    def _people_html(name: str, prj, message: str = "", ok_msg: str = "") -> str:
+        people = [c for c in prj.project_info()["consumers"] if c["kind"] == "human"]
         now = prj.approver()
-        if not humans:
-            return ("<h2>Proposals go to</h2><p class='note'>This project has no "
-                    "consumer of kind <code>human</code>, so there is nobody to "
-                    "post to. Create one with an address, and mark it here.</p>")
-        opts = "".join(
-            f"<option value='{_esc(c['name'])}'"
-            + (" selected" if now and now["name"] == c["name"] else "")
-            + f">{_esc(c['name'])}"
-            + ("" if c.get("posted_to") else " — no address, so nothing is posted")
-            + "</option>" for c in humans)
-        return (f"<h2>Proposals go to</h2>"
-                f"<form method='post' action='/p/{_esc(name)}/approver'>"
-                f"<label for='who'>One person, or nobody. This grants nothing "
-                f"— what opens this page is the password — it only says where "
-                f"an email is sent when a proposal enters the queue.</label>"
-                f"<select id='who' name='who'>"
-                f"<option value=''{'' if now else ' selected'}>— nobody: "
-                f"proposals are queued in silence —</option>{opts}</select>"
-                f"<label for='amaster'>Master — once for this action</label>"
-                f"<input id='amaster' type='password' name='master' "
-                f"autocomplete='current-password' required>"
-                f"<p><button type='submit'>Mark</button></p></form>"
-                + (f"<p class='note'>Now: <b>{_esc(now['name'])}</b>"
-                   + (f" · {_esc(now['email'])}</p>" if now["email"] else
-                      " · no address, so nothing is posted</p>")
-                   if now else
-                   "<p class='note'>Nobody is marked: a proposal entering the "
-                   "queue notifies no one, and is seen by opening the lot "
-                   "page.</p>"))
+        head = (f"<p class='bad'>{_esc(message)}</p>" if message else "") + \
+               (f"<p class='ok'>{_esc(ok_msg)}</p>" if ok_msg else "")
+        act = f"/p/{_esc(name)}/people"
 
-    def _profile_html(name: str, prj, message: str = "", ok_msg: str = "",
-                      approver_msg: str = "") -> str:
+        add = (f"<h2>Add a person</h2>"
+               f"<form method='post' action='{act}'>"
+               f"<input type='hidden' name='action' value='add'>"
+               f"<label for='pname'>Their name — ONE WORD, no spaces. It is "
+               f"quoted by hand in chat instructions and in scheduled prompts, "
+               f"and a space is the character nobody sees when it is "
+               f"wrong.</label>"
+               f"<input id='pname' name='who' required>"
+               f"<label for='amaster'>Master — once for this action</label>"
+               f"<input id='amaster' type='password' name='master' "
+               f"autocomplete='current-password' required>"
+               f"<p><button type='submit'>Add</button></p></form>"
+               f"<p class='note'>A person receives tasks and no rules, and has "
+               f"no brief and no specs: they already know who they are and "
+               f"what they have to do. Give them an address below, or their "
+               f"desk stays silent.</p>")
+
+        if not people:
+            return head + add + ("<h2>The post</h2><p class='note'>Nobody yet. "
+                                 "Proposals entering the queue notify no one, "
+                                 "and are seen by opening the lot page.</p>")
+
+        rows = "".join(
+            f"<tr><td>{_esc(c['name'])}</td>"
+            f"<td><input name='email:{_esc(c['name'])}' "
+            f"value='{_esc(prj.postbox(c['name'])['email'] if c.get('posted_to') else '')}' "
+            f"placeholder='no address — nothing is posted'></td>"
+            f"<td><label><input type='radio' name='who' "
+            f"value='{_esc(c['name'])}'"
+            + (" checked" if now and now["name"] == c["name"] else "")
+            + "> proposals</label></td></tr>" for c in people)
+
+        post = (f"<h2>The post</h2>"
+                f"<form method='post' action='{act}'>"
+                f"<input type='hidden' name='action' value='post'>"
+                f"<table><tbody>{rows}"
+                f"<tr><td class='note'>—</td><td class='note'>"
+                f"an empty box CLEARS the address</td>"
+                f"<td><label><input type='radio' name='who' value=''"
+                + ("" if now else " checked")
+                + "> nobody</label></td></tr></tbody></table>"
+                f"<p class='note'>Both columns are written in ONE gesture, "
+                f"because they are one question. The mark GRANTS NOTHING — "
+                f"what opens this page is the password — it says which desk "
+                f"hears that a proposal is waiting.</p>"
+                f"<label for='pmaster'>Master — once for this action</label>"
+                f"<input id='pmaster' type='password' name='master' "
+                f"autocomplete='current-password' required>"
+                f"<p><button type='submit'>Write</button></p></form>")
+
+        opts = "".join(f"<option value='{_esc(c['name'])}'>{_esc(c['name'])}"
+                       "</option>" for c in people)
+        gone = (f"<h2>Retire a person</h2>"
+                f"<form method='post' action='{act}'>"
+                f"<input type='hidden' name='action' value='retire'>"
+                f"<select name='who'>{opts}</select>"
+                f"<label for='why'>Why — it is the sentence whoever finds the "
+                f"dead row in six months will read</label>"
+                f"<input id='why' name='reason' required>"
+                f"<label for='rmaster'>Master — once for this action</label>"
+                f"<input id='rmaster' type='password' name='master' "
+                f"autocomplete='current-password' required>"
+                f"<p><button type='submit'>Retire</button></p></form>"
+                f"<p class='note'>The row stays and so does every pointer at "
+                f"it: the history reads. A desk with open post on it is "
+                f"refused — close those first, or hand them over. And the name "
+                f"stays TAKEN, because an ID is never reused.</p>")
+
+        return head + add + post + gone
+
+    async def people_page(request):
+        def render(name, prj):
+            return _people_html(name, prj), f"{name} — people"
+        return _read_page(request, render)
+
+    async def people_action(request):
+        """The three gestures of this page, told apart by a hidden field —
+        add, post, retire. One route, because they are one subject, and one
+        shape each: session, master retyped for the action, refusals as
+        sentences."""
+        if not _session_ok(request):
+            return _guest(request)
+        name = request.path_params["project"]
+        prj = _open(name)
+        if prj is None:
+            return _no_project(name)
+        form = await request.form()
+
+        def say(message="", ok_msg="", status=200):
+            return HTMLResponse(
+                _page(f"{name} — people", _people_html(name, prj, message, ok_msg),
+                      nav=_project_nav(name)), status_code=status)
+
+        if not secrets.compare_digest((form.get("master") or "").strip(), master):
+            log.warning("refused web people: wrong master, from %s", _client(request))
+            return say(message="Wrong master. Nothing was written.", status=401)
+        what = (form.get("action") or "").strip()
+        if what not in ("add", "post", "retire"):
+            return say(message="Unknown action. Nothing was written.", status=400)
+        try:
+            if what == "add":
+                v = prj.amend_project(
+                    "consumer", (form.get("who") or "").strip(), "create",
+                    {"kind": "human"}, actor="web ui", on_the_page=True)
+                return say(ok_msg=f"{v['name']} — {v['note']}")
+            if what == "retire":
+                v = prj.amend_project(
+                    "consumer", (form.get("who") or "").strip(), "retire", {},
+                    reason=(form.get("reason") or "").strip(), actor="web ui",
+                    on_the_page=True)
+                return say(ok_msg=f"{v['name']} is retired. {v['note']}")
+            # THE WHOLE PICTURE, exactly as the form showed it: every box on
+            # the page travels, so what you see is what gets written and a
+            # cleared box clears the address. A form that sent only what
+            # changed would need the page to know what changed, which is a
+            # second opinion about the state.
+            addresses = {k.split(":", 1)[1]: (v or "").strip()
+                         for k, v in form.items() if k.startswith("email:")}
+            v = prj.set_postbox(addresses, (form.get("who") or "").strip())
+            said = "; ".join(v["changed"]) if v["changed"] else "no address moved"
+            log.info("postbox written on %s: %s · approver %s",
+                     name, said, v["approver"])
+            return say(ok_msg=f"{said}. {v['note']}")
+        except fault:
+            raise
+        except refusal as e:
+            log.info("refused web people: %s", e)
+            return say(message=str(e), status=400)
+
+    def _profile_html(name: str, prj, message: str = "", ok_msg: str = "") -> str:
         prof = prj.profile()
         cap = prof["queue_cap"]
         head = (f"<p class='bad'>{_esc(message)}</p>" if message else "") + \
-               (f"<p class='ok'>{_esc(ok_msg)}</p>" if ok_msg else "") + \
-               (f"<p class='ok'>{_esc(approver_msg)}</p>" if approver_msg else "")
+               (f"<p class='ok'>{_esc(ok_msg)}</p>" if ok_msg else "")
         return (head
                 + f"<form method='post' action='/p/{_esc(name)}/profile'>"
                   "<label for='brief'>Brief — the project's identity: whose it "
@@ -1180,8 +1283,7 @@ def build(*, registry, log, master: str, refusal, fault,
                 + (f"<p class='note'>Last written {_esc(prof['updated_at'])}.</p>"
                    if prof["updated_at"] else
                    "<p class='note'>Never written: this project has no profile "
-                   "yet, which is a legitimate state and not a fault.</p>")
-                + _approver_html(name, prj))
+                   "yet, which is a legitimate state and not a fault.</p>"))
 
     async def profile_page(request):
         def render(name, prj):
@@ -1234,40 +1336,6 @@ def build(*, registry, log, master: str, refusal, fault,
             _profile_html(name, prj, ok_msg=f"Written: {said}. Every chat of "
                                             f"this project reads it from the "
                                             f"next rules_list."),
-            nav=_project_nav(name)))
-
-    async def approver_action(request):
-        """Mark the human the proposals are posted to, or clear it. Same shape
-        as every other gesture that writes: session, master retyped once,
-        refusals as sentences."""
-        if not _session_ok(request):
-            return _guest(request)
-        name = request.path_params["project"]
-        prj = _open(name)
-        if prj is None:
-            return _no_project(name)
-        form = await request.form()
-        if not secrets.compare_digest((form.get("master") or "").strip(), master):
-            log.warning("refused web approver: wrong master, from %s", _client(request))
-            return HTMLResponse(
-                _page(f"{name} — profile",
-                      _profile_html(name, prj,
-                                    message="Wrong master. Nothing was marked."),
-                      nav=_project_nav(name)), status_code=401)
-        try:
-            v = prj.set_approver((form.get("who") or "").strip())
-        except fault:
-            raise
-        except refusal as e:
-            log.info("refused web approver: %s", e)
-            return HTMLResponse(
-                _page(f"{name} — profile",
-                      _profile_html(name, prj, message=str(e)),
-                      nav=_project_nav(name)), status_code=400)
-        log.info("approver of %s is now %s", name, v["approver"])
-        return HTMLResponse(_page(
-            f"{name} — profile",
-            _profile_html(name, prj, approver_msg=v["note"]),
             nav=_project_nav(name)))
 
     async def status_page(request):
@@ -1331,7 +1399,8 @@ def build(*, registry, log, master: str, refusal, fault,
         Route("/p/{project}/codes", codes_mint, methods=["POST"]),
         Route("/p/{project}/profile", profile_page, methods=["GET"]),
         Route("/p/{project}/profile", profile_action, methods=["POST"]),
-        Route("/p/{project}/approver", approver_action, methods=["POST"]),
+        Route("/p/{project}/people", people_page, methods=["GET"]),
+        Route("/p/{project}/people", people_action, methods=["POST"]),
         Route("/p/{project}/rules", rules_page, methods=["GET"]),
         Route("/p/{project}/rule/{rule}", rule_page, methods=["GET"]),
         Route("/p/{project}/status", status_page, methods=["GET"]),

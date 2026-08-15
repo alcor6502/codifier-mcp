@@ -2997,6 +2997,8 @@ for _fname, _src4 in (("reference-guide.md", GUIDE_SRC),
     # THE CLAIM, not the words. "the proposals notify nobody" is true and is
     # about something else, so the tokens are anchored on `them` — the human —
     # and on the one phrase that can only ever be the stale promise.
+    # `notifies no one` in set_postbox is about a PROPOSAL with nobody
+    # marked, which is true and is a different sentence.
     _lie = [w for w in ("not notify them", "notifies nobody") if w in _src4]
     ok(not _lie,
        f"{_fname} does not claim a human goes unnotified: since 5.0.0 they are "
@@ -3928,6 +3930,28 @@ ok(any(n.func.attr == "projects" for n in ROUTER_WEB),
 # `batch()` and `status()` already return. Same guarantee, different route, so
 # the check moves rather than dies: every mention of the cap in this file is a
 # subscript of an engine payload, and none of them is a definition.
+# THE FLAG THAT LETS THE PAGE PAST THE PEOPLE REFUSAL is CONTAINED, and this
+# is where that is said. `on_the_page=True` lifts two things at once — the
+# refusal that keeps chats away from people, and the one-time code — so a
+# second caller acquiring it would be a second caller with neither. It is
+# passed in exactly one handler, and that handler is the one whose whole
+# subject is people.
+# Walked from the TREE and not from `_WEB_FUNCS`, which is built further down:
+# a check that depends on where it happens to sit in the file is a check that
+# moves badly.
+# `build` is skipped for the second time in this file and for the same reason:
+# the factory walks its own children, so it "passes" everything they pass. The
+# lesson landed once already, on the guarded writers, and it landed again here
+# — which is the argument for stating it twice instead of remembering it.
+_FLAGGED = sorted({fn.name for fn in ast.walk(WEB_TREE)
+                   if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                   and fn.name != "build"
+                   for n in ast.walk(fn)
+                   if isinstance(n, ast.keyword) and n.arg == "on_the_page"})
+ok(_FLAGGED == ["people_action"],
+   f"`on_the_page` is passed by one handler and it is the people's: {_FLAGGED}",
+   _FLAGGED)
+
 _CAP_KEYS = [n for n in ast.walk(WEB_TREE) if isinstance(n, ast.Subscript)
              and isinstance(n.slice, ast.Constant) and n.slice.value == "queue_cap"]
 ok(bool(_CAP_KEYS),
@@ -3972,17 +3996,17 @@ for _n in ast.walk(WEB_TREE):
 ok(bool(_ROUTES), f"web.py declares its routes explicitly: {len(_ROUTES)}")
 _POSTS = sorted(r for r in _ROUTES if "POST" in r[1])
 ok([(r[0], r[2]) for r in _POSTS] == [("/login", "login"), ("/logout", "logout"),
-                                      ("/p/{project}/approver", "approver_action"),
                                       ("/p/{project}/backup", "project_backup"),
                                       ("/p/{project}/batch", "batch_action"),
                                       ("/p/{project}/codes", "codes_mint"),
+                                      ("/p/{project}/people", "people_action"),
                                       ("/p/{project}/profile", "profile_action")],
    "and exactly seven of them take POST: the door, the exit, and the five "
    "gestures — the lot, minting a one-time code, writing the project's own "
-   "profile, marking who its proposals are posted to, and the backup, which "
-   "asks for no master because it handles no secret. Renewal left with the "
-   "expiry in 5.0.0; creating a project and rekeying it are not here either, "
-   "because a project is a line in a file",
+   "profile, looking after its PEOPLE, and the backup, which asks for no "
+   "master because it handles no secret. Renewal left with the expiry in "
+   "5.0.0; creating a project and rekeying it are not here either, because a "
+   "project is a line in a file",
    [(r[0], r[2]) for r in _POSTS])
 # Every writing route is UNDER a project, and that is the shape of "a project
 # is a database": a gesture that named no project would be a gesture on all of
@@ -4092,7 +4116,7 @@ for _name, _fn in _BUILD_FUNCS.items():
 # a handler leaves: the renewals action left in 5.0.0 and the floor would have
 # stayed at three. The equality fails on either mistake, and it fails saying
 # which name moved.
-ok(sorted(_GUARDED) == ["approver_action", "batch_action", "codes_mint",
+ok(sorted(_GUARDED) == ["batch_action", "codes_mint", "people_action",
                         "profile_action"],
    f"the writing handlers are exactly these, guarded: {sorted(_GUARDED)}",
    sorted(_GUARDED))

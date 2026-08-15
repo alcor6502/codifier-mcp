@@ -947,14 +947,17 @@ one-time authorisation code is minted, and **profile**.
 be written from. No tool reaches them, not even with the admin code. The brief
 is the project's identity and the specs are the facts every reading is done
 against: what is FUNDATIVE has no tool, the way what is catastrophic has none. A
-chat may suggest the wording; the change is a person's. The same page marks the
-project's **approver** — the one human its proposals are posted to — and that
-flag grants nothing at all: what opens this UI is the password, and this only
-says where an email goes.
+chat may suggest the wording; the change is a person's.
+
+**The people page is where the project's PEOPLE are** — added, addressed,
+marked, retired. Same sentence, said about the anagrafica: a chat and a skill
+are machinery and a tool manages them, a person is not. The mark that says whose
+desk hears about a proposal grants nothing at all: what opens this UI is the
+password, and this only says where an email goes.
 
 The password is asked for again on every gesture that WRITES — deciding the lot,
-minting a code, writing the profile, marking the approver — because a session
-alone is a browser left open on the iPad. It is *not* asked again for the backup or the log: a
+minting a code, writing the profile, adding or retiring a person, writing where
+their post goes — because a session alone is a browser left open on the iPad. It is *not* asked again for the backup or the log: a
 `VACUUM INTO` changes nothing and the log is a ring in memory, and a password
 retyped where it defends nothing only teaches the hand to type it without
 looking. One password, from the template, and one hour of inactivity. A restart
@@ -976,14 +979,27 @@ on that person's row — a human is the only kind of consumer that may carry one
 and the schema refuses it on a chat or a skill. Proposals go to the project's
 **approver**, the one human marked for it on the profile page.
 
-**The address and the flag are set in two different places, and the split is
-the point.** The `email` is a field of the consumer like its name or its brief,
-so it goes in through `project_amend` with the admin code — creating a person
-and giving them an address is one gesture, and the seeding of a project happens
-from a chat. The **approver flag** is not a field of anything and no tool
-reaches it: it is marked on the profile page, by whoever holds its password,
-because deciding who gets told about a project's proposals is not the same kind
-of act as recording where somebody's post goes.
+**People are looked after on the page, all of it.** A consumer of kind
+`human` is created, renamed, retired and revived there, their address is typed
+there, and the mark that says whose desk hears about the proposals is set there
+— in one gesture with the addresses, because they are one question.
+
+The reason is not security. A `chat` and a `skill` are machinery, and machinery
+is managed by machinery: `project_amend` wires the project up. A person is not a
+row a chat invents, renames or retires. It is the same sentence as *what is
+fundative has no tool*, said about the anagrafica instead of about the profile,
+and the tools refuse every one of those four actions on a human saying where
+they live. What a chat CAN do with a person is put work on their desk.
+
+The page reaches the engine through the SAME method the tool calls, with a flag
+that lifts that refusal — not through a road of its own. So every guard already
+written keeps working there unduplicated: a name is one word, a retired name is
+still taken, a retirement that would leave a rule binding nobody is refused. A
+page with its own copy of those rules would be a page with one of them out of
+step. The flag also stands in for the one-time code, and for the reason that
+code exists: it is there so a chat holding the admin code cannot modify alone,
+and on the page there is no chat — there is a person who has just retyped a
+password no tool carries.
 
 **There is no on/off switch, anywhere.** The two ways to be quiet are both
 ABSENCES: no `SMTP_HOST` on the container, so nothing is ever sent; no address
@@ -1098,10 +1114,11 @@ registry exactly as it was.
 | put work on somebody's desk | `tasks_add` | reference code |
 | finish or drop a task | `tasks_close` | reference code |
 | fix or reassign an open task | `tasks_amend` | reference code |
-| create a domain, a consumer, a group | `project_amend` | admin code |
+| create a domain, a chat, a skill, a group | `project_amend` | admin code |
 | rename, retire, revive, change a brief or a group | `project_amend` | admin code **+ one-time code** |
 | change your OWN specs, as a consumer | `project_amend` | reference code |
 | change the PROJECT's brief, specs or queue ceiling | *no tool* | the administration page |
+| add, address, mark or retire a PERSON | *no tool* | the administration page |
 | narrow a rule's perimeter | `rules_amend` | admin code **+ one-time code** |
 | end a rule that has no heir | `rules_retire` | admin code **+ one-time code** |
 | see what the working half cannot — dangling citations, retired names, the queue | `project_status` | admin code |

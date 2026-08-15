@@ -73,8 +73,14 @@ def project(**profile):
                     actor="architect")
     p.amend_project("domain", "ST", "create", {"reason": "strategy"}, actor="architect")
     for name, kind in (("architect", "chat"), ("advisory", "chat"),
-                       ("news", "skill"), ("Alfredo", "human")):
+                       ("news", "skill")):
         p.amend_project("consumer", name, "create", {"kind": kind}, actor="architect")
+    # THE PERSON COMES IN THE WAY THE PAGE BRINGS THEM, and the flag in this
+    # line is the whole difference: machinery is created by machinery, a person
+    # by a person. Without `on_the_page` this call is refused, which is a case
+    # of its own further down.
+    p.amend_project("consumer", "Alfredo", "create", {"kind": "human"},
+                    actor="web ui", on_the_page=True)
     p.amend_project("group", "deliberativi", "create",
                     {"members": ["architect", "advisory"]}, actor="architect")
     p.amend_project("group", "automatismi", "create",
@@ -1042,31 +1048,76 @@ allowed("and so does the cross view, which is where their post is read",
 # test_schema, written by hand with sqlite3, because a guarantee that lives
 # only in Python is one the sqlite3 shell walks past.
 pm = project()
-allowed("a human with an address",
-        lambda: pm.amend_project("consumer", "Marta", "create",
-                                 {"kind": "human", "email": "marta@example.com"},
+# A PERSON IS NOT A ROW A CHAT INVENTS. All four actions, because the refusal
+# has to hold on the way in AND on the way out: a tool that could not create a
+# person but could rename or retire one would be a door with a lock on half of
+# it.
+refused("a person, created from a tool", lambda: pm.amend_project(
+    "consumer", "Marta", "create", {"kind": "human"},
+    actor="architect"), "looked after by a person")
+refused("and renamed from a tool", lambda: pm.amend_project(
+    "consumer", "Alfredo", "amend", {"name": "Alfred"}, actor="architect",
+    auth_code=code(pm)), "looked after by a person")
+refused("and retired from a tool", lambda: pm.amend_project(
+    "consumer", "Alfredo", "retire", {}, reason="gone", actor="architect",
+    auth_code=code(pm)), "looked after by a person")
+yields("and the refusal says what a chat CAN do with a person, which is the "
+       "half a bare no leaves out",
+       lambda: "tasks_add" in _refusal(lambda: pm.amend_project(
+           "consumer", "Marta", "create", {"kind": "human"},
+           actor="architect")), True)
+allowed("while a CHAT is still ordinary machinery, created by machinery",
+        lambda: pm.amend_project("consumer", "robot", "create", {"kind": "chat"},
                                  actor="architect"))
-refused("an address on a chat", lambda: pm.amend_project(
-    "consumer", "robot", "create", {"kind": "chat", "email": "r@example.com"},
-    actor="architect"), "only a consumer of kind `human`")
-refused("and on a skill either", lambda: pm.amend_project(
-    "consumer", "cron", "create", {"kind": "skill", "email": "c@example.com"},
-    actor="architect"), "only a consumer of kind `human`")
-refused("something that is not an address", lambda: pm.amend_project(
-    "consumer", "Giulia", "create", {"kind": "human", "email": "giulia"},
-    actor="architect"), "does not look like an address")
+allowed("and a skill too",
+        lambda: pm.amend_project("consumer", "cron", "create", {"kind": "skill"},
+                                 actor="architect"))
+# AND FROM THE PAGE, the same method with the flag: one road, every guard.
+allowed("a person, added from the page",
+        lambda: pm.amend_project("consumer", "Marta", "create", {"kind": "human"},
+                                 actor="web ui", on_the_page=True))
+refused("and the page obeys the same guards as everything else: a name is ONE "
+        "WORD there too",
+        lambda: pm.amend_project("consumer", "Maria Grazia", "create",
+                                 {"kind": "human"}, actor="web ui",
+                                 on_the_page=True), "ONE WORD")
+refused("a brief on a person, even from the page",
+        lambda: pm.amend_project("consumer", "Paolo", "create",
+                                 {"kind": "human", "brief": "do things"},
+                                 actor="web ui", on_the_page=True),
+        "a human has no brief")
+refused("and specs either",
+        lambda: pm.amend_project("consumer", "Paolo", "create",
+                                 {"kind": "human", "specs": "cash 50k"},
+                                 actor="web ui", on_the_page=True),
+        "a human has no specs")
+# THE ADDRESS: not a field of anything, so `email` is not even a name this door
+# knows. That is the strongest form of "no tool reaches it".
+refused("`email` is not a field of this command at all", lambda: pm.amend_project(
+    "consumer", "advisory", "amend", {"email": "a@example.com"},
+    actor="advisory"), "not a field of consumer")
+allowed("the page writes it, with the mark, in ONE gesture",
+        lambda: pm.set_postbox({"Marta": "marta@example.com"}, "Marta"))
+yields("and it is read back", lambda: pm.postbox("Marta")["email"],
+       "marta@example.com")
+refused("an address on a chat", lambda: pm.set_postbox({"robot": "r@example.com"}),
+        "carries no address")
+refused("and on a skill either", lambda: pm.set_postbox({"cron": "c@example.com"}),
+        "carries no address")
+refused("something that is not an address",
+        lambda: pm.set_postbox({"Marta": "giulia"}), "does not look like an address")
+yields("and NOTHING was written by that refusal: the whole form is one "
+       "transaction, so a page that wrote three and refused the fourth would "
+       "leave a state nobody chose",
+       lambda: pm.postbox("Marta")["email"], "marta@example.com")
 allowed("but the check is LOOSE on purpose: refusing a legal address is worse "
         "than letting a typo through, and a typo shows up as post that never "
         "arrives",
-        lambda: pm.amend_project("consumer", "Giulia", "create",
-                                 {"kind": "human", "email": "g+tag@sub.example.co.uk"},
-                                 actor="architect"))
-refused("a brief on a human", lambda: pm.amend_project(
-    "consumer", "Paolo", "create", {"kind": "human", "brief": "do things"},
-    actor="architect"), "a human has no brief")
-refused("and specs on a human", lambda: pm.amend_project(
-    "consumer", "Paolo", "create", {"kind": "human", "specs": "cash 50k"},
-    actor="architect"), "a human has no specs")
+        lambda: pm.set_postbox({"Marta": "g+tag@sub.example.co.uk"}, "Marta"))
+yields("an empty box CLEARS the address",
+       lambda: (pm.set_postbox({"Marta": ""}, "Marta"), pm.postbox("Marta"))[1],
+       None)
+pm.set_postbox({"Marta": "marta@example.com"}, "Marta")
 yields("a human's row in project_info is a DIFFERENT SHAPE, and says so rather "
        "than showing two nulls",
        lambda: sorted(k for k in next(
@@ -1081,20 +1132,24 @@ yields("it is in the overview instead, which is behind the admin code and is "
                     if d["consumer"] == "Marta"), "marta@example.com")
 
 # THE APPROVER: a flag, not a privilege, and no tool reaches it.
-yields("nobody is marked to begin with", lambda: pm.approver(), None)
-refused("and no tool can mark one: it is not a field", lambda: pm.amend_project(
-    "consumer", "Marta", "amend", {"approver": True}, actor="architect",
+# AIMED AT A CHAT, and that is the point of the case: on a person the PEOPLE
+# refusal fires first and would hide this one. What is measured here is that
+# `approver` is not a name this door knows at all — the strongest form of "no
+# tool reaches it", and it holds even where the door is otherwise open.
+refused("no tool can mark one: it is not a field", lambda: pm.amend_project(
+    "consumer", "advisory", "amend", {"approver": True}, actor="architect",
     auth_code=code(pm)), "not a field of consumer")
-allowed("the page marks it", lambda: pm.set_approver("Marta"))
-yields("and it is read back", lambda: pm.approver()["name"], "Marta")
+yields("the page marks it", lambda: pm.approver()["name"], "Marta")
 refused("a chat cannot be one: the flag says where a proposal is POSTED",
-        lambda: pm.set_approver("architect"), "only a human is marked")
+        lambda: pm.set_postbox({}, "architect"), "only a person is marked")
+pm.amend_project("consumer", "Giulia", "create", {"kind": "human"},
+                 actor="web ui", on_the_page=True)
 yields("marking a second one MOVES it rather than adding one",
-       lambda: (pm.set_approver("Giulia"), pm.approver()["name"],
+       lambda: (pm.set_postbox({}, "Giulia"), pm.approver()["name"],
                 pm.cx.execute("SELECT COUNT(*) FROM consumer WHERE approver=1"
                               ).fetchone()[0])[1:], ("Giulia", 1))
 yields("and an empty name clears it: everything here switches off by absence",
-       lambda: (pm.set_approver(""), pm.approver())[1], None)
+       lambda: (pm.set_postbox({}, ""), pm.approver())[1], None)
 # ⚠ AND THE DOOR IS THE ONLY DOOR, which is the half a check on `list_rules`
 # alone would not see. A skill carries the reference code, so it can call
 # everything the reference code opens — if the profile came back through any of
@@ -1199,8 +1254,7 @@ h = allowed("and one for a human",
 equals("and the note says what is on the ROW — no address here, so nothing is "
        "emailed, and that is a choice and not a fault",
        "NO address on this row" in (h or {}).get("note", ""), True)
-p.amend_project("consumer", "Alfredo", "amend", {"email": "a@example.com"},
-                actor="architect", auth_code=code(p))
+p.set_postbox({"Alfredo": "a@example.com"})
 h2 = allowed("and with an address on the row it says the other thing",
              lambda: p.task_add("Alfredo", "sign the other form", "b", "architect"))
 equals("naming the field that actually answers whether it went",

@@ -259,8 +259,12 @@ whether another chat did the work — read it back with `tasks_list(authored=Tru
   desk, and you get the existing task back with `already_open: true` instead of
   a second one. Use it whenever you might be re-running.
 - **Opening a task for a HUMAN emails them, if their row carries an address.**
-  They call no tool, so the register is not where they would find it. The
-  answer says which of the two happened rather than leaving you to assume:
+  They call no tool, so the register is not where they would find it. Their
+  address is not something you can set — people and their post are looked after
+  on the administration page, by a person — so if the answer says there is none,
+  that is a sentence for whoever holds that password, not a thing to fix from
+  here. The answer says which of the two happened rather than leaving you to
+  assume:
 
       alfredo is a human: they call no tool, and their post is read from the
       overview or from the web page. There is an address on this row, so an
