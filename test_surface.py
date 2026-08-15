@@ -1088,6 +1088,7 @@ print("\n== the manual's ceilings are rendered from the engine's constants ==")
 # and everything below — the Dockerfile section, the badges, the whole surface
 # — silently never runs.
 import rules as _rules                                          # noqa: E402
+import mail as _mail                                            # noqa: E402
 
 
 def cut_guide(text: str, label: str):
@@ -1619,7 +1620,12 @@ _ALLOWED_NUMBERS = {
     "rules_get": {_rules.GET_IDS},
     "rules_propose": {_rules.MAX_BODY_BYTES, _rules.MAX_SEQ},
     "tasks_add": {_rules.MAX_BODY_BYTES},
-    "tasks_list": {_rules.TASKS_LIST_CAP, _rules.TASKS_STALE_DAYS},
+    # ⚠ `mail.BODY_CAP` is here and not in `rules.py` because the ceiling on
+    # how much of a task travels by post is the POST's business, not the
+    # register's. The card is allowed to state it — and stating it is how the
+    # number stays true: import it, never retype it.
+    "tasks_list": {_rules.TASKS_LIST_CAP, _rules.TASKS_STALE_DAYS,
+                   _mail.BODY_CAP},
     "tasks_get": {_rules.GET_IDS, _rules.GET_BYTES},
 }
 for _n, _body in _WORK_CARDS.items():
