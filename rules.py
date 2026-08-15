@@ -48,8 +48,12 @@ Invariants
   ed25519 signature that used to ride on top left in v2.0.0 — it was the
   clumsy way of letting a person in instead of a chat, and the admin UI solves
   that at the root. The digest was never the signature's: it stays;
-- an approved rule is PROVISIONAL and expires. Staying costs a decision, going
-  is free — which is the asymmetry that stops rules from piling up.
+- once approved a rule stays until somebody ENDS it. Until 5.0.0 it also
+  expired on its own, and the diagnosis behind that was wrong: rules pile up
+  where there is no gate, not where there is no clock, and the gate is the
+  human approval above. A rule that leaves while nobody is looking is the one
+  failure mode a register of rules cannot afford — the rule too many merely
+  annoys.
 
 The database is owned by root and its files are 0644: whoever mounts the share
 READS it and does not touch it. Writing by hand would bypass the triggers and
@@ -84,14 +88,16 @@ VERSION = "4.1.0"
 # REPAIR, and the preflight duly reported "somebody had removed these
 # objects" about tables that had simply never existed. With this number the
 # router knows before it opens: match and it connects, mismatch and it
-# refuses naming the file. There is NO migration in 4.0.0 — an old database
-# is refused, not upgraded.
-SCHEMA_GENERATION = 4
+# refuses naming the file. There is NO migration, and 5.0.0 is the second
+# release to prove it: an old database is refused, not upgraded. Generation 5
+# is the schema without the expiry, with the specs owned and with the mail
+# fields on a consumer — three cuts that landed in one release precisely
+# because the register was still empty enough to throw the files away.
+SCHEMA_GENERATION = 5
 
 TYPES = ("R", "M", "F")                 # R binding · M method · F technical fact
 KINDS = ("chat", "skill", "human")      # a human calls no tool, but owns tasks
 STATUSES = ("proposed", "active", "retired", "denied")
-PERMANENCE = ("provisional", "permanent")
 REACH = ("all", "targeted")             # the audience is MIXED: groups ∪ exceptions
 VERDICTS = ("approved", "denied")
 TASK_STATUSES = ("pending", "completed", "dropped")
@@ -188,7 +194,6 @@ RE_SLUG_CHAR = re.compile(r"[a-z0-9-]")
 
 FILE_MODE = 0o644                       # root writes, everyone else reads
 DIR_MODE = 0o755
-DEFAULT_PROVISIONAL_DAYS = 90
 MAX_BODY_BYTES = 64_000
 
 # The ceiling of a LIST of rules. Generous on purpose: the cap exists so that a
@@ -440,10 +445,6 @@ def guide_for(text: str, name: str = "") -> dict:
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _plus_days(days: int) -> str:
-    return (datetime.now(timezone.utc) + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _plus_minutes(minutes: int) -> str:
@@ -782,9 +783,6 @@ CREATE TABLE IF NOT EXISTS rule (
   body          TEXT NOT NULL,
   status        TEXT NOT NULL DEFAULT 'proposed'
                 CHECK (status IN ('proposed','active','retired','denied')),
-  permanence    TEXT NOT NULL DEFAULT 'provisional'
-                CHECK (permanence IN ('provisional','permanent')),
-  expires_at    TEXT,
   reach         TEXT NOT NULL CHECK (reach IN ('all','targeted')),
   supersedes_rule_id    INTEGER REFERENCES rule(rule_id),  -- on the PROPOSAL
   superseded_by_rule_id INTEGER REFERENCES rule(rule_id),  -- on the RETIRED one
@@ -855,10 +853,11 @@ CREATE INDEX IF NOT EXISTS ix_rule_ref_dst ON rule_ref(dst_rule_id);
 -- The history: whole snapshots written, diffs computed on read
 -- ---------------------------------------------------------------------
 -- No deltas with NULLs — "unchanged" and "cleared" would become
--- indistinguishable, and they would become indistinguishable precisely on
--- `expires_at`. What a reader actually wants ("show me the history with the
--- date and only what changed") is a DISPLAY requirement, and it is met by
--- computing N against N-1 at read time.
+-- indistinguishable, and a register that cannot tell those two apart is a
+-- register whose history lies about the field that was cleared. What a reader
+-- actually wants ("show me the history with the date and only what changed")
+-- is a DISPLAY requirement, and it is met by computing N against N-1 at read
+-- time.
 CREATE TABLE IF NOT EXISTS rule_version (
   rule_id               INTEGER NOT NULL REFERENCES rule(rule_id),
   version               INTEGER NOT NULL,
@@ -866,8 +865,6 @@ CREATE TABLE IF NOT EXISTS rule_version (
   title                 TEXT,
   body                  TEXT,
   status                TEXT,
-  permanence            TEXT,
-  expires_at            TEXT,
   reach                 TEXT,
   superseded_by_rule_id INTEGER,
   timestamp             TEXT NOT NULL,
@@ -1093,20 +1090,20 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS trg_rule_ins AFTER INSERT ON rule BEGIN
   INSERT INTO rule_version (rule_id, version, type, title, body, status,
-                            permanence, expires_at, reach, superseded_by_rule_id,
+                            reach, superseded_by_rule_id,
                             timestamp, action, reason, actor)
   VALUES (NEW.rule_id, {_f(_NEXT_RULE_V, 'NEW')}, NEW.type, NEW.title, NEW.body,
-          NEW.status, NEW.permanence, NEW.expires_at, NEW.reach,
+          NEW.status, NEW.reach,
           NEW.superseded_by_rule_id, NEW.created_at, 'created', NEW.reason,
           NEW.actor);
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_rule_upd AFTER UPDATE ON rule BEGIN
   INSERT INTO rule_version (rule_id, version, type, title, body, status,
-                            permanence, expires_at, reach, superseded_by_rule_id,
+                            reach, superseded_by_rule_id,
                             timestamp, action, reason, actor)
   VALUES (NEW.rule_id, {_f(_NEXT_RULE_V, 'NEW')}, NEW.type, NEW.title, NEW.body,
-          NEW.status, NEW.permanence, NEW.expires_at, NEW.reach,
+          NEW.status, NEW.reach,
           NEW.superseded_by_rule_id, NEW.updated_at,
           -- The action is the VERB, and the verbs worth having are the ones
           -- the database can DERIVE: a transition of `status` is visible from
@@ -1514,11 +1511,9 @@ class Registry:
     this registry exists to make impossible."""
 
     def __init__(self, root: str = DB_ROOT, *,
-                 provisional_days: int = DEFAULT_PROVISIONAL_DAYS,
                  auth_code_minutes: int = DEFAULT_AUTH_CODE_MINUTES) -> None:
         self.root = root
         self.file = os.path.join(root, REGISTRY_FILE)
-        self.provisional_days = int(provisional_days or DEFAULT_PROVISIONAL_DAYS)
         self.auth_code_minutes = int(auth_code_minutes or DEFAULT_AUTH_CODE_MINUTES)
         self._lock = threading.RLock()
         self._open: dict[str, Project] = {}      # by slug
@@ -1580,7 +1575,6 @@ class Registry:
                         # A different spelling is a different FOLDER, so it is a
                         # different project on disk even when the slug matches.
                         p = Project(name, self.root,
-                                    provisional_days=self.provisional_days,
                                     auth_code_minutes=self.auth_code_minutes)
                         born.append(p)
                     p.reference_code, p.admin_code = ref, adm
@@ -1831,7 +1825,6 @@ class Project:
 
     def __init__(self, name: str, root: str = DB_ROOT, *,
                  reference_code: str = "", admin_code: str = "",
-                 provisional_days: int = DEFAULT_PROVISIONAL_DAYS,
                  auth_code_minutes: int = DEFAULT_AUTH_CODE_MINUTES) -> None:
         self.name = (name or "").strip()
         self.slug = _slug(self.name)
@@ -1839,7 +1832,6 @@ class Project:
         self.admin_code = admin_code
         self.dir = os.path.join(root, self.name)
         self.path = os.path.join(self.dir, self.slug + ".db")
-        self.provisional_days = int(provisional_days or DEFAULT_PROVISIONAL_DAYS)
         self.auth_code_minutes = int(auth_code_minutes or DEFAULT_AUTH_CODE_MINUTES)
         # Re-entrant, and it must exist before anything else: every public
         # method acquires it (see _serialised).
@@ -2525,16 +2517,6 @@ class Project:
         # actionable, and the succession is a FIELD of the row, never a citation
         # in a body, so moving the pointer loses nothing.
         dead = [d for d in rule_ids if found[d]["status"] == "retired"]
-        # EXPIRED IS THE SAME QUESTION WITH A DIFFERENT ANSWER. `_in_force` is
-        # this registry's own word for "binds", `project_status` counts with it
-        # and `_expand` writes `· expired` when it reads one — so a door that
-        # filtered on the verb `retired` instead was the only part of the
-        # system that still thought a lapsed provisional was law. Same refusal,
-        # different way out: a retirement is a gesture somebody made, an expiry
-        # is a date passing on its own, and the rule comes back with the SAME
-        # ID the moment it is renewed from the page. So it is named apart.
-        lapsed = [d for d in rule_ids if found[d]["status"] == "active"
-                  and not self._in_force(found[d])]
         if dead:
             bits = []
             for d in dead:
@@ -2547,14 +2529,6 @@ class Project:
                 "say it in words. A rule that has been taken out of force still reads like "
                 "law when somebody follows the pointer, which is the whole reason this is "
                 "refused instead of marked.")
-        if lapsed:
-            raise RulesError(
-                f"citation in `{field}` towards a rule whose term has EXPIRED: "
-                f"{', '.join(lapsed)}. It is provisional and its date has passed, so it "
-                "binds nobody right now — and nobody decided that, a clock did. It is not "
-                "gone: renew it from the administration page and it is in force again "
-                "under the same ID, and this citation goes through. Renew it first, or "
-                "say the thing in words.")
         # THE GLOSS IS CHECKED, NOT SWALLOWED. Reading hands back
         # `(VA-0002 — its title)` and pasting that straight back must work — but
         # anything else inside those brackets is the author's own words, and
@@ -2641,9 +2615,6 @@ class Project:
                 mark = f" · retired → superseded by {self._display(row['superseded_by_rule_id'])}"
             elif row["status"] != "active":
                 mark = f" · {row['status']}"
-            elif (row["permanence"] != "permanent" and row["expires_at"]
-                  and row["expires_at"] <= now):
-                mark = " · expired"
             return f"({rid}{GLOSS_SEP}{self._gloss(row)}{mark})"
 
         return RE_CITE.sub(one, body or "")
@@ -2682,21 +2653,25 @@ class Project:
     # =================================================================
 
     @staticmethod
-    def _in_force(row, now: str = "") -> bool:
-        """Active, and not past its expiry. Permanence is checked first because
-        a permanent rule has no expiry to be past."""
-        if row["status"] != "active":
-            return False
-        if row["permanence"] == "permanent" or not row["expires_at"]:
-            return True
-        return row["expires_at"] > (now or _now())
+    def _in_force(row) -> bool:
+        """Does this rule BIND, right now. Since 5.0.0 that is one question and
+        not two: `active` and nothing else.
+
+        It stays a method, one line long, because it is this registry's own
+        word for "binds" and a dozen places ask it. Until 5.0.0 it also read an
+        expiry date, and the second axis is what let a rule leave the lists
+        while `status` still said `active` — a state the whole surface had to
+        keep explaining. There is one axis now, and the row says it out loud."""
+        return row["status"] == "active"
 
     LEGEND = {
         "type": {"R": "binding rule", "M": "method", "F": "technical fact"},
         "reach": {"all": "binds every consumer of the project, present and future",
                   "targeted": "binds the union of the groups and the exceptions listed"},
-        "permanence": {"provisional": "expires on the date shown unless it is promoted",
-                       "permanent": "stays until it is retired or superseded"},
+        "status": {"proposed": "waiting for a person on the approval page; binds nobody",
+                   "active": "in force — it binds, and it stays until somebody ends it",
+                   "retired": "ended, by retirement or by a supersede",
+                   "denied": "thrown out at approval; it never bound anybody"},
         "citation": f"(XX-{'N' * ID_DIGITS}) — the ID alone, inside round brackets",
     }
 
@@ -2770,9 +2745,8 @@ class Project:
                 "WHERE m.group_id=? AND c.retired_at IS NULL ORDER BY c.name",
                 (g["group_id"],))]
             groups.append({"name": g["name"], "members": members})
-        now = _now()
-        in_force = sum(1 for r in self.cx.execute(
-            "SELECT * FROM rule WHERE status='active'") if self._in_force(r, now))
+        in_force = self.cx.execute(
+            "SELECT COUNT(*) FROM rule WHERE status='active'").fetchone()[0]
         return {
             "project": self.name,
             "domains": domains, "consumers": consumers, "groups": groups,
@@ -2804,11 +2778,8 @@ class Project:
         members, computed now: a group that has emptied out sorts where it
         belongs today, not where it belonged when the rule was written."""
         out = {}
-        now = _now()
         for row in self.cx.execute("SELECT * FROM v_rule WHERE status='active' "
                                    "ORDER BY domain_id, seq"):
-            if not self._in_force(row, now):
-                continue
             if row["reach"] == "all":
                 out[row["rule_id"]] = (row, "all", 10 ** 9, ["everyone"])
                 continue
@@ -2840,8 +2811,7 @@ class Project:
         line that gets quoted at the wrong person."""
         aud = self._audience(row["rule_id"])
         d = {"id": row["display_id"], "type": row["type"], "title": row["title"],
-             "reach": row["reach"], "permanence": row["permanence"],
-             "expires_at": row["expires_at"], "status": row["status"]}
+             "reach": row["reach"], "status": row["status"]}
         if row["reach"] == "targeted":
             d["groups"] = aud["groups"]
             d["exceptions"] = aud["exceptions"]
@@ -2997,12 +2967,11 @@ class Project:
 
         Whole snapshots go in and the diff comes out here, which is the whole
         of decision 7 of the schema redesign: a stored delta cannot tell
-        "unchanged" from "cleared", and it would fail to tell them apart
-        precisely on `expires_at`. The audience is diffed too, and by NAMES —
+        "unchanged" from "cleared". The audience is diffed too, and by NAMES —
         a photograph that answered in surrogate keys would be a photograph
         nobody can read."""
-        fields = ("type", "title", "body", "status", "permanence", "expires_at",
-                  "reach", "superseded_by_rule_id")
+        fields = ("type", "title", "body", "status", "reach",
+                  "superseded_by_rule_id")
         out, prev, prev_aud = [], None, None
         for v in self.cx.execute("SELECT * FROM rule_version WHERE rule_id=? "
                                  "ORDER BY version", (rule_id,)):
@@ -3066,8 +3035,6 @@ class Project:
             body = self._expand(row["body"])
             d = {"id": row["display_id"], "type": row["type"], "title": row["title"],
                  "body": body, "status": row["status"],
-                 "in_force": self._in_force(row),
-                 "permanence": row["permanence"], "expires_at": row["expires_at"],
                  "reach": row["reach"], "groups": aud["groups"],
                  "exceptions": aud["exceptions"],
                  "reaches_count": len(self._effective(row["rule_id"], row["reach"])),
@@ -3102,18 +3069,6 @@ class Project:
             res["note"] = (f"cut at {GET_BYTES} bytes: {len(out)} of {len(ids)} read. "
                            "Ask for the rest in a second call.")
         return res
-
-    def expiry(self, rid: str) -> dict:
-        """State, permanence, date and in-force for one rule. It exists because
-        the detail page needed it and a page must not compute a lifecycle by
-        itself: the engine is the one that knows when a provisional rule stops
-        binding."""
-        row = self._rule_row(rid)
-        if row is None:
-            raise RulesError(f"{rid}: never defined in this project.")
-        return {"id": row["display_id"], "status": row["status"],
-                "permanence": row["permanence"], "expires_at": row["expires_at"],
-                "in_force": self._in_force(row)}
 
     # =================================================================
     # Writing rules
@@ -3256,9 +3211,9 @@ class Project:
             now = _now()
             self.cx.execute(
                 "INSERT INTO rule (rule_id, domain_id, seq, type, title, body, status, "
-                "permanence, reach, supersedes_rule_id, source, reason, event, "
+                "reach, supersedes_rule_id, source, reason, event, "
                 "proposed_by, actor, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,'proposed','provisional',?,?,?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?,'proposed',?,?,?,?,?,?,?,?,?)",
                 (rule_id, dom["domain_id"], self._next_seq(dom["domain_id"], dom["code"]),
                  rtype, title, body, reach,
                  victim["rule_id"] if victim is not None else None,
@@ -3364,7 +3319,7 @@ class Project:
         if row["status"] == "retired":
             raise RulesError(f"{row['display_id']} was already retired on "
                              f"{row['updated_at']}.")
-        if not self._in_force(row) and row["status"] != "active":
+        if row["status"] != "active":
             raise RulesError(
                 f"{row['display_id']} is {row['status']}: only a rule in force is "
                 "retired. A proposal is denied on the page, not retired here.")
@@ -3420,8 +3375,6 @@ class Project:
             already = []
             for other in self.cx.execute("SELECT * FROM v_rule WHERE status='active' "
                                          "ORDER BY domain_id, seq"):
-                if not self._in_force(other):
-                    continue
                 if reached and reached <= self._effective(other["rule_id"], other["reach"]):
                     already.append(f"{other['display_id']} — {other['title']}")
             d = {"id": row["display_id"], "type": row["type"], "title": row["title"],
@@ -3488,14 +3441,12 @@ class Project:
             did = self.cx.execute("SELECT last_insert_rowid()").fetchone()[0]
             for rid in ticked:
                 row = by_id[rid]
-                expires = _plus_days(self.provisional_days)
                 self.cx.execute(
-                    "UPDATE rule SET status='active', permanence='provisional', "
-                    "expires_at=?, event='approved', actor=?, updated_at=? "
-                    "WHERE rule_id=?", (expires, actor, now, row["rule_id"]))
+                    "UPDATE rule SET status='active', event='approved', actor=?, "
+                    "updated_at=? WHERE rule_id=?", (actor, now, row["rule_id"]))
                 self.cx.execute("INSERT INTO decision_rule (decision_id, rule_id, verdict) "
                                 "VALUES (?,?,'approved')", (did, row["rule_id"]))
-                approved_out.append({"id": rid, "expires_at": expires})
+                approved_out.append({"id": rid})
                 if row["supersedes_rule_id"]:
                     victim = self._rule_by_pk(row["supersedes_rule_id"])
                     self.cx.execute(
@@ -3513,52 +3464,7 @@ class Project:
                 self.cx.execute("INSERT INTO decision_rule (decision_id, rule_id, verdict, "
                                 "reason) VALUES (?,?,'denied',?)", (did, row["rule_id"], why))
                 denied_out.append({"id": rid, "reason": why})
-        return {"decision": did, "approved": approved_out, "denied": denied_out,
-                "provisional_days": self.provisional_days}
-
-    def renew(self, ids, days: int = 0, actor: str = "web ui") -> dict:
-        """Push the expiry of a provisional rule out by another term. It is a
-        decision to keep something, so it is taken on the page and it is
-        recorded like every other gesture."""
-        days = int(days or self.provisional_days)
-        out = []
-        with self._transaction():
-            for rid in (ids or []):
-                row = self._rule_row(str(rid))
-                if row is None:
-                    raise RulesError(f"{rid}: never defined in this project.")
-                if row["status"] != "active":
-                    raise RulesError(f"{row['display_id']} is {row['status']}: only a rule "
-                                     "in force is renewed.")
-                if row["permanence"] == "permanent":
-                    raise RulesError(f"{row['display_id']} is permanent: it has no expiry "
-                                     "to push.")
-                expires = _plus_days(days)
-                self.cx.execute(
-                    "UPDATE rule SET expires_at=?, event=?, actor=?, updated_at=? "
-                    "WHERE rule_id=?",
-                    (expires, f"renewed for {days} days", actor, _now(), row["rule_id"]))
-                out.append({"id": row["display_id"], "expires_at": expires})
-        return {"renewed": out, "days": days}
-
-    def promote(self, ids, actor: str = "web ui") -> dict:
-        """From provisional to permanent: the rule stops having to be renewed.
-        Staying costs a decision, and this is that decision."""
-        out = []
-        with self._transaction():
-            for rid in (ids or []):
-                row = self._rule_row(str(rid))
-                if row is None:
-                    raise RulesError(f"{rid}: never defined in this project.")
-                if row["status"] != "active":
-                    raise RulesError(f"{row['display_id']} is {row['status']}: only a rule "
-                                     "in force is promoted.")
-                self.cx.execute(
-                    "UPDATE rule SET permanence='permanent', expires_at=NULL, "
-                    "event='promoted to permanent', actor=?, updated_at=? "
-                    "WHERE rule_id=?", (actor, _now(), row["rule_id"]))
-                out.append(row["display_id"])
-        return {"promoted": out}
+        return {"decision": did, "approved": approved_out, "denied": denied_out}
 
     # =================================================================
     # The anagrafica: the project itself, and its structure
@@ -4069,20 +3975,8 @@ class Project:
         pointer that points nowhere is impossible now, because it is a foreign
         key. What is left is the half a database cannot see: citations inside
         PROSE, and the overlaps that formed after the fact."""
-        now = _now()
         rules = list(self.cx.execute("SELECT * FROM v_rule ORDER BY domain_id, seq"))
-        in_force = [r for r in rules if self._in_force(r, now)]
-
-        expiring = []
-        for r in in_force:
-            if r["permanence"] == "permanent" or not r["expires_at"]:
-                continue
-            days = (datetime.strptime(r["expires_at"], "%Y-%m-%dT%H:%M:%SZ")
-                    - datetime.strptime(now, "%Y-%m-%dT%H:%M:%SZ")).days
-            if days <= 30:
-                expiring.append({"id": r["display_id"], "title": r["title"],
-                                 "expires_at": r["expires_at"], "in_days": days,
-                                 "reason": r["reason"]})
+        in_force = [r for r in rules if self._in_force(r)]
 
         # Citations in PROSE, towards a rule that is retired or was never
         # defined. The body of a rule is only one of the fields it can hide in.
@@ -4121,13 +4015,6 @@ class Project:
                                  + self._display(target["superseded_by_rule_id"]))
                     dangling.append({"in": where, "field": label, "cites": dst,
                                      "state": state})
-                elif target["status"] == "active" and not self._in_force(target):
-                    # The one that arrives without anybody doing anything: a
-                    # provisional term runs out and every pointer at it goes
-                    # quiet. The door cannot catch this one by construction —
-                    # it was in force when it was written.
-                    dangling.append({"in": where, "field": label, "cites": dst,
-                                     "state": "expired"})
 
         for r in rules:
             for col, label in seen_fields:
@@ -4245,7 +4132,6 @@ class Project:
                             "SELECT COUNT(*) FROM task WHERE status='pending'"
                         ).fetchone()[0]},
             "queue_cap": self.queue_cap(),
-            "expiring": expiring,
             "dangling_citations": dangling,
             "overlaps": overlaps,
             "stray_audience_rows": strays,
@@ -4271,9 +4157,8 @@ class Project:
             rows = [t[0] for t in sorted(self._reaching(c["consumer_id"]).values(),
                                          key=lambda t: t[0]["display_id"])]
         else:
-            rows = [r for r in self.cx.execute(
-                "SELECT * FROM v_rule WHERE status='active' ORDER BY domain_id, seq")
-                if self._in_force(r)]
+            rows = list(self.cx.execute(
+                "SELECT * FROM v_rule WHERE status='active' ORDER BY domain_id, seq"))
         lines = [f"# {self.name} — rules in force", ""]
         prof = self.profile()
         if prof["brief"]:
@@ -4287,8 +4172,7 @@ class Project:
                                                     for e in aud["exceptions"]]))
             lines += [f"## {r['display_id']} — {r['title']}",
                       "",
-                      f"*{r['type']} · {r['permanence']} · reaches: {perimeter}*"
-                      + (f" · expires {r['expires_at']}" if r["expires_at"] else ""),
+                      f"*{r['type']} · reaches: {perimeter}*",
                       "",
                       self._expand(r["body"]) if expand else r["body"],
                       "",

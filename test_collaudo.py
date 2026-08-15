@@ -530,28 +530,21 @@ allowed("while the heir itself may be cited",
         lambda: p2.propose("VA", "R", "t", f"see ({new['id']})", "why", "all",
                            "architect"))
 
-# AND THE ONE NOBODY DECIDED: a provisional term running out. `_in_force` says
-# it binds nobody, `project_status` counts it out and reading writes `· expired`
-# — the door was the only part of the system still treating it as law, because
-# it filtered on the VERB `retired` instead of on force. Named apart from a
-# retirement on purpose: a retirement is a gesture, this is a clock, and the
-# rule comes back under the same ID when it is renewed.
+# THE FOUR CASES that used to sit here went with the expiry in 5.0.0. They
+# described a rule reading `active` that bound nobody, reached by pushing
+# `expires_at` into the past by hand — and the column is gone, `_in_force` has
+# one axis, and the state is now unreachable rather than unwatched. That a
+# citation towards a rule OUT OF FORCE is refused is still measured: by the
+# retired block directly above, which is the only way out of force there is.
+# The one case below is the new statement of the same guarantee, and it is
+# here so that a second axis coming back finds a red line waiting for it.
 p3 = project()
-prov = rule(p3, title="a provisional one")
-p3.cx.execute("UPDATE rule SET expires_at='2000-01-01T00:00:00Z' WHERE rule_id=?",
-              (p3._rule_row(prov)["rule_id"],))
-yields("the rule is still `active` and yet in force it is NOT — which is the "
-       "whole trap: a status check and a force check disagree here",
-       lambda: (p3._rule_row(prov)["status"], p3._in_force(p3._rule_row(prov))),
-       ("active", False))
-refused("a rule that cites a rule whose term EXPIRED", lambda: p3.propose(
-    "VA", "R", "t", f"see ({prov})", "why", "all", "architect"), "EXPIRED")
-refused("and a task cannot either", lambda: p3.task_add(
-    "architect", "t", f"see ({prov})", "architect"), "EXPIRED")
-yields("and the refusal points at the renewal, not at a rewrite: nobody took "
-       "this rule out of force",
-       lambda: "renew it" in _refusal(lambda: p3.task_add(
-           "architect", "t", f"see ({prov})", "architect")).lower(), True)
+still = rule(p3, title="in force, and it stays that way")
+yields("a rule in force has ONE axis: `active` is the whole of it, and reading "
+       "the row twice cannot produce two answers",
+       lambda: (p3._rule_row(still)["status"], p3._in_force(p3._rule_row(still)),
+                "expires_at" in p3._rule_row(still).keys()),
+       ("active", True, False))
 
 # =====================================================================
 print("\n— THE TASK LOG IS THE SAME DOOR, WITH TWO DIFFERENCES —")
@@ -650,8 +643,12 @@ yields("the denial is in the decision log, not lost",
        lambda: p.cx.execute("SELECT verdict, reason FROM decision_rule "
                             "ORDER BY rule_id").fetchall()[1][1],
        "not now: it needs the tax desk")
-yields("an approved rule is provisional and dated",
-       lambda: p.get_rules([a])["rules"][0]["permanence"], "provisional")
+yields("an approved rule is in force, and carries no second axis to be "
+       "out of force by",
+       lambda: (p.get_rules([a])["rules"][0]["status"],
+                sorted(k for k in p.get_rules([a])["rules"][0]
+                       if k in ("permanence", "expires_at", "in_force"))),
+       ("active", []))
 refused("deciding an empty queue", lambda: p.decide("x", [], {}), "nothing to decide")
 
 p = project(queue_cap=2)
@@ -1151,17 +1148,6 @@ equals("a citation towards a retired rule is reported, in the rule AND in the ta
        [("VA-0003", "VA-0001", "retired"), (orphan, "VA-0001", "retired")])
 equals("and the CLOSED task is not, because nothing could ever clear it",
        [d["in"] for d in (rep or {})["dangling_citations"] if d["in"] == closed], [])
-# The EXPIRED one is the case the door cannot take by construction — the rule
-# was in force when the pointer was written and a clock did the rest, so if the
-# sweep does not carry it, nothing does.
-lapsing = p.task_add("architect", "t", f"and this points at ({b_})", "architect")["id"]
-p.cx.execute("UPDATE rule SET expires_at='2000-01-01T00:00:00Z' WHERE rule_id=?",
-             (p._rule_row(b_)["rule_id"],))
-yields("a citation towards a rule whose term ran out is reported too",
-       lambda: sorted((d["in"], d["cites"], d["state"])
-                      for d in p.status()["dangling_citations"]
-                      if d["state"] == "expired"),
-       [(lapsing, b_, "expired")])
 equals("a domain nothing was ever filed under is reported",
        (rep or {})["domains_with_no_rules"], ["ST"])
 equals("and a consumer no rule reaches", (rep or {})["consumers_no_rule_reaches"],

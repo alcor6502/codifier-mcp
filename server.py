@@ -15,8 +15,9 @@ preflight. Three deliberate differences:
   file, `projects.txt`, that only Unraid writes;
 - writing is a two-step affair. A chat PROPOSES; the batch is approved in the
   administration UI, behind its password, against the batch's DIGEST — you
-  approve the batch you read. Approving, denying, renewing, promoting, minting
-  the one-time codes and taking a backup are NOT tools and never will be:
+  approve the batch you read. Approving, denying, editing the project's own
+  profile, minting the one-time codes and taking a backup are NOT tools and
+  never will be:
   what is catastrophic has no tool, so the UI password never travels in a
   conversation.
 
@@ -45,7 +46,6 @@ Configuration, all through environment variables:
                           project holding that project's database. Born
                           optional with a working default in the code
   BACKUP_DIR              VACUUM INTO copies (default: <db dir>/backup)
-  PROVISIONAL_DAYS        how long an approved rule lives (default 90)
   ADMIN_AUTH_CODE_DURATION  how long a one-time auth code lives, in minutes
                           (default 5). Born optional with a working default in
                           the code: Unraid does not propagate new variables to
@@ -233,9 +233,7 @@ BACKUP_DIR = os.environ.get("BACKUP_DIR") or os.path.join(DB_DIR, "backup")
 # never disagree about what the filter is.
 ALLOWED_CIDRS = cidrs_from_env()
 
-registry = Registry(DB_DIR,
-                    provisional_days=int(os.environ.get("PROVISIONAL_DAYS") or 90),
-                    auth_code_minutes=ADMIN_AUTH_CODE_DURATION)
+registry = Registry(DB_DIR, auth_code_minutes=ADMIN_AUTH_CODE_DURATION)
 for _name, _objects in registry.repaired().items():
     log.warning("schema rebuilt at open for %s: %s — somebody had removed these objects",
                 _name, ", ".join(_objects))
@@ -247,8 +245,8 @@ for _name, _objects in registry.repaired().items():
 if registry.born_empty():
     log.warning("created empty for: %s — expected on a new project, and the mark of a "
                 "folder not renamed on any other day", ", ".join(registry.born_empty()))
-log.info("registry %s — %s — %s projects — provisional %s days",
-         VERSION, registry.file, registry.projects()["count"], registry.provisional_days)
+log.info("registry %s — %s — %s projects",
+         VERSION, registry.file, registry.projects()["count"])
 
 auth = GitHubProvider(
     client_id=env("GITHUB_CLIENT_ID"),
@@ -507,9 +505,9 @@ def rules_list(project: str, consumer: str, query: str = "",
 def rules_get(project: str, ids: list[str], consumer: str,
               history: bool = False) -> dict:
     """Full detail for the rules you name: body, `reach` with the names,
-    permanence, expiry, supersede links both ways, citations expanded. Short
-    forms are forgiven on READ — `VA-02` resolves — because there the ID
-    identifies a row that exists.
+    `status`, supersede links both ways, citations expanded. Short forms are
+    forgiven on READ — `VA-02` resolves — because there the ID identifies a row
+    that exists.
 
     `history=True` adds the rule's story as DATED GESTURES: timestamp, verb,
     actor, and only the fields that differ from the version before, computed on
@@ -769,10 +767,9 @@ def rules_retire(project: str, id: str, reason: str, auth_code: str,
 @tool
 def project_status(project: str, key: str) -> dict:
     """The project's health in one report: counts computed on read and never
-    stored, rules expiring with their reasons, the pending queue, prose
-    citations pointing at retired or missing rules, and the overlaps that FORMED
-    after the fact — an exception a group has since swallowed, a domain or a
-    consumer nothing reaches any more.
+    stored, the pending queue, prose citations pointing at retired or missing
+    rules, and the overlaps that FORMED after the fact — an exception a group
+    has since swallowed, a domain or a consumer nothing reaches any more.
 
     `dangling_citations` reads the prose of every rule and the title and body of
     every OPEN task. Closed tasks are out of it on purpose: `tasks_amend`

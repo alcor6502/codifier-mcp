@@ -71,8 +71,8 @@ def _rule(con, reach="all", groups=(), exceptions=(), seq=1,
         c.execute("INSERT INTO rule_audience_exception VALUES (?,?)", (rid, e))
     c.execute(
         "INSERT INTO rule (rule_id,domain_id,seq,type,title,body,status,"
-        "permanence,reach,reason,proposed_by,actor,created_at,updated_at)"
-        " VALUES (?,1,?,'R','a title','a body',?, 'provisional',?,"
+        "reach,reason,proposed_by,actor,created_at,updated_at)"
+        " VALUES (?,1,?,'R','a title','a body',?,?,"
         "'because it was decided','architect',?,?,?)",
         (rid, seq, status, reach, actor, NOW, NOW))
     con.commit()
@@ -243,13 +243,13 @@ print("\n— THE CORPUS —")
 refused("two pending proposals cannot claim the same victim",
         lambda c: (_rule(c, "all"),
                    c.execute("INSERT INTO rule (domain_id,seq,type,title,body,"
-                             "status,permanence,reach,reason,created_at,updated_at,"
+                             "status,reach,reason,created_at,updated_at,"
                              "supersedes_rule_id) VALUES (1,2,'R','a','b','proposed',"
-                             "'provisional','all','r',?,?,1)", (NOW, NOW)),
+                             "'all','r',?,?,1)", (NOW, NOW)),
                    c.execute("INSERT INTO rule (domain_id,seq,type,title,body,"
-                             "status,permanence,reach,reason,created_at,updated_at,"
+                             "status,reach,reason,created_at,updated_at,"
                              "supersedes_rule_id) VALUES (1,3,'R','a','b','proposed',"
-                             "'provisional','all','r',?,?,1)", (NOW, NOW))),
+                             "'all','r',?,?,1)", (NOW, NOW))),
         "unique")
 refused("a citation towards a rule that does not exist",
         lambda c: (_rule(c, "all"),

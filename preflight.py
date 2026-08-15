@@ -29,9 +29,9 @@ preflight that passes while three databases are broken.
   ownership   the process is root, no database is writable by anyone else — a
               write from the share would bypass the triggers — and the registry
               file, which holds the codes in clear, is readable by root alone
-  approval    the two knobs the lifecycle reads, PROVISIONAL_DAYS and
-              ADMIN_AUTH_CODE_DURATION, validated at the edge instead of at the
-              first approval and the first minting
+  approval    ADMIN_AUTH_CODE_DURATION, the one knob the approval road
+              still reads, validated at the edge instead of at the first
+              minting
   web         the administration UI: its password present, long enough and not
               a placeholder, and its port neither publishable by the Funnel nor
               the MCP's own
@@ -213,27 +213,22 @@ def c_ownership():
 
 @check("approval")
 def c_approval():
-    """What is left of this check after the signature's exit is the one knob
-    the approval lifecycle still reads. Validated AT THE EDGE, at boot: a bad
-    number found here is one line with a name, found at the first approval it
-    is a traceback in a chat."""
-    days = os.environ.get("PROVISIONAL_DAYS", "").strip()
-    if days:
-        if not days.isdigit() or int(days) < 1:
-            raise RuntimeError(f"PROVISIONAL_DAYS={days!r}: a positive whole number of days")
-    # PENDING_CAP is gone: the proposal ceiling is `queue_cap`, policy of each
-    # project, because the container is multi-tenant. What is validated here in
-    # its place is the life of a one-time auth code — the same reason, at the
-    # same edge: a bad number caught at boot is a line with a name on it, and
-    # caught at the first minting it is a traceback in a browser.
+    """The one knob the approval road still reads. Validated AT THE EDGE, at
+    boot: a bad number found here is one line with a name, found at the first
+    minting it is a traceback in a browser.
+
+    PROVISIONAL_DAYS left in 5.0.0 with the expiry itself, and PENDING_CAP
+    before it: the proposal ceiling is `queue_cap`, policy of each project,
+    because the container is multi-tenant. A knob that no longer has a reader
+    is checked nowhere — and the template stops declaring it, or Unraid would
+    keep offering a field that decides nothing."""
     mins = os.environ.get("ADMIN_AUTH_CODE_DURATION", "").strip()
     if mins:
         if not mins.isdigit() or int(mins) < 1:
             raise RuntimeError(f"ADMIN_AUTH_CODE_DURATION={mins!r}: a positive whole "
                                "number of minutes")
-    return (f"provisional {days or 90} days · auth codes live "
-            f"{mins or DEFAULT_AUTH_CODE_MINUTES} minutes · the UI approves, behind "
-            "its password")
+    return (f"auth codes live {mins or DEFAULT_AUTH_CODE_MINUTES} minutes · "
+            "the UI approves, behind its password")
 
 
 @check("web")

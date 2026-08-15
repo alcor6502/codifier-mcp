@@ -1022,10 +1022,16 @@ ok("denied, retired or superseded is refused" in GUIDE_FLAT,
    "and names the three states that are refused")
 ok("the refusal **names the heir**" in GUIDE_FLAT,
    "and that the refusal names the heir, which is what makes it actionable")
-ok("term has **expired** is refused" in GUIDE_FLAT,
-   "and that an expired term is refused as well — the one no gesture caused")
-ok("renew it from the administration page" in GUIDE_FLAT.lower(),
-   "with the way out that belongs to it, which is not the one for a retirement")
+# The two cases that stood here pinned the manual's prose about a citation
+# towards a rule whose TERM had expired. 5.0.0 took the term away, so the
+# sentences are false and the state unreachable; the two lines above still pin
+# the three states that ARE refused, and the check further down proves the
+# manual names no expiry at all.
+ok(not any(_w in GUIDE_FLAT.lower() for _w in
+           ("expires", "expiry", "provisional", "renew it", "promote it")),
+   "and the manual carries no lifecycle a clock decides: there is none",
+   [_w for _w in ("expires", "expiry", "provisional", "renew it", "promote it")
+    if _w in GUIDE_FLAT.lower()])
 ok("A **closed** task stays citable" in GUIDE_FLAT,
    "the manual says a task may cite a task, closed ones included")
 ok("the `outcome` or `reason` you give `tasks_close`" in GUIDE_FLAT,
@@ -2370,7 +2376,7 @@ ok("<PostArgs/>" in TEMPLATE,
 # Unraid does not propagate new variables to containers already installed, so a
 # variable introduced later means editing every existing install by hand. These
 # go in now, inert or not.
-for var in ("PROVISIONAL_DAYS", "WEB_PORT", "WEB_UI_PASSWORD",
+for var in ("WEB_PORT", "WEB_UI_PASSWORD",
             "ADMIN_AUTH_CODE_DURATION",
             "LOG_LEVEL", "ALLOWED_CIDRS", "DB_DIR", "BACKUP_DIR"):
     ok(f'Target="{var}"' in TEMPLATE, f"template declares {var}")
@@ -2417,7 +2423,8 @@ ok(not _ORPHANS,
 # And the four that died, by name: the check above would go green again the day
 # somebody re-added a reader for one of them, which is not the same thing as
 # these being gone.
-for _dead_var in ("DB_PATH", "WEB_MASTER_CODE", "PENDING_CAP", "WEB_ACTION_CAP"):
+for _dead_var in ("DB_PATH", "WEB_MASTER_CODE", "PENDING_CAP", "WEB_ACTION_CAP",
+                  "PROVISIONAL_DAYS"):
     ok(f'Target="{_dead_var}"' not in TEMPLATE,
        f"and {_dead_var} is not declared: it has had no reader since v4.0.0")
 
@@ -2928,8 +2935,12 @@ for _t in TOOLS:
         ok("pending=True" in _doc and "reason" in _doc,
            "and that the queue it now carries comes with the reasons")
     if _t.name == "project_status":
-        ok("expiring" in _doc and "reason" in _doc,
-           "project_status says the expiring rules carry their reason")
+        # It used to promise the expiring queue with its reasons. That queue
+        # went with the expiry, and what the docstring must NOT do now is go on
+        # advertising it — a manual whose limits are wrong is worse than one
+        # with no limits.
+        ok("expiring" not in _doc,
+           "project_status no longer advertises a queue it does not carry")
 ok(GUIDE_SRC.count("legend of the domains present") == 1,
    "the manual pins the legend, exactly once",
    GUIDE_SRC.count("legend of the domains present"))
@@ -3811,10 +3822,14 @@ _CAP_ENV = sorted({n.args[0].value for n in ast.walk(WEB_TREE)
 ok(not _CAP_ENV,
    "and neither it nor the preflight reads a ceiling from the environment: "
    "those two knobs left the template when they became one number", _CAP_ENV)
-_CAP_FN = _WEB_FUNCS.get("_cap")
-ok(_CAP_FN is not None and "prj.queue_cap()" in ast.unparse(_CAP_FN),
-   "and the one expression that resolves it asks the project",
-   ast.unparse(_CAP_FN)[:80] if _CAP_FN is not None else "absent")
+# The helper that used to answer this — `_cap`, one line, `prj.queue_cap()` —
+# left with the renewals action, its only caller. The guarantee did not: it is
+# measured in the consultation block, by SHAPE, where every mention of the cap
+# in this file is shown to be a subscript of a payload the engine returned.
+# Naming a helper was the weaker form of the same question.
+ok("_cap" not in _WEB_FUNCS,
+   "the ceiling has no helper of its own any more, and needs none",
+   sorted(n for n in _WEB_FUNCS if n == "_cap"))
 
 print("\n== the consultation reads, and only reads ==")
 
@@ -3827,10 +3842,7 @@ for _m, _what in (("project_info", "the living structure of a project"),
                   ("get_rules", "a rule with its dated history"),
                   ("batch", "the lot as it is now"),
                   ("decide", "one turn of the lot page"),
-                  ("renew", "another term for a rule about to expire"),
-                  ("promote", "a rule made permanent"),
                   ("status", "the state of the project, the retired included"),
-                  ("queue_cap", "the ceiling on one action"),
                   ("mint_auth_code", "a one-time code, minted"),
                   ("auth_codes", "the live codes and the spent ones"),
                   ("backup", "a quiescent copy of one project")):
@@ -3838,6 +3850,35 @@ for _m, _what in (("project_info", "the living structure of a project"),
        f"the UI serves {_what} from prj.{_m}()")
 ok(any(n.func.attr == "projects" for n in ROUTER_WEB),
    "and the menu of what is served from registry.projects()")
+
+# THE CEILING IS READ, NEVER WORKED OUT. Until 5.0.0 this was proved by the
+# page calling `prj.queue_cap()`; the helper that did it went with the renewals
+# action, its only caller, and the pages take the key off the payload
+# `batch()` and `status()` already return. Same guarantee, different route, so
+# the check moves rather than dies: every mention of the cap in this file is a
+# subscript of an engine payload, and none of them is a definition.
+_CAP_NODES = [n for n in ast.walk(WEB_TREE)
+              if isinstance(n, ast.Constant) and n.value == "queue_cap"]
+_CAP_KEYS = [n for n in ast.walk(WEB_TREE) if isinstance(n, ast.Subscript)
+             and isinstance(n.slice, ast.Constant) and n.slice.value == "queue_cap"]
+ok(bool(_CAP_KEYS) and len(_CAP_KEYS) == len(_CAP_NODES),
+   f"the ceiling is named only as a key of an engine payload "
+   f"({len(_CAP_KEYS)} readings)",
+   [ast.unparse(n) for n in _CAP_NODES])
+# AND THE HALF THE LINE ABOVE DOES NOT REACH, which is the half that matters:
+# `min(current["queue_cap"] or 99, 12)` is still a subscript and still passes
+# the count. What must not happen is ARITHMETIC on the value — the page taking
+# the engine's number and making its own out of it. Written as a defect and
+# injected before it was believed: the count alone went green on it.
+_CAP_MATH = [ast.unparse(n) for n in ast.walk(WEB_TREE)
+             if (isinstance(n, ast.BinOp)
+                 or (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                     and n.func.id in ("min", "max", "int", "round", "abs", "sum")))
+             and any(isinstance(s, ast.Subscript) and isinstance(s.slice, ast.Constant)
+                     and s.slice.value == "queue_cap" for s in ast.walk(n))]
+ok(not _CAP_MATH,
+   "and no arithmetic is done on it: the ceiling the page shows is the "
+   "ceiling the engine enforces, to the digit", _CAP_MATH)
 
 # The brief LEADS the list: that is the shape rules_list promises, and a page
 # that dropped it would be showing a consumer something different from what
@@ -3864,12 +3905,12 @@ _POSTS = sorted(r for r in _ROUTES if "POST" in r[1])
 ok([(r[0], r[2]) for r in _POSTS] == [("/login", "login"), ("/logout", "logout"),
                                       ("/p/{project}/backup", "project_backup"),
                                       ("/p/{project}/batch", "batch_action"),
-                                      ("/p/{project}/codes", "codes_mint"),
-                                      ("/p/{project}/renewals", "renewals_action")],
-   "and exactly six of them take POST: the door, the exit, and the four "
-   "gestures — the lot, renewal/promotion, minting a one-time code, and the "
-   "backup, which asks for no master because it handles no secret. Creating a "
-   "project and rekeying it are NOT here: a project is a line in a file now",
+                                      ("/p/{project}/codes", "codes_mint")],
+   "and exactly five of them take POST: the door, the exit, and the three "
+   "gestures — the lot, minting a one-time code, and the backup, which asks "
+   "for no master because it handles no secret. Renewal left with the expiry "
+   "in 5.0.0; creating a project and rekeying it are not here either, because "
+   "a project is a line in a file",
    [(r[0], r[2]) for r in _POSTS])
 # Every writing route is UNDER a project, and that is the shape of "a project
 # is a database": a gesture that named no project would be a gesture on all of
@@ -3954,24 +3995,34 @@ def _engine_reached(fn) -> set[str]:
             and isinstance(n.func.value, ast.Name) and n.func.value.id == "prj"}
 
 
-_GUARDED = 0
+_GUARDED = []
 for _name, _fn in _BUILD_FUNCS.items():
+    # `build` itself is skipped, and saying so is the point: ast.walk on the
+    # factory sees every nested handler, so the factory "reaches" everything
+    # its children reach and its two assertions below can only ever pass —
+    # they find the children's own guards. It sat in this set unnoticed while
+    # the block counted with a floor.
+    if _name == "build":
+        continue
     _writes = _engine_reached(_fn) & MUTATING
     if not _writes:
         continue
-    _GUARDED += 1
+    _GUARDED.append(_name)
     ok(_reaches(_name, "_session_ok"),
        f"{_name} writes ({', '.join(sorted(_writes))}) and is behind the session")
     ok(any(ast.unparse(n.func) == "secrets.compare_digest" for n in ast.walk(_fn)
            if isinstance(n, ast.Call)),
        f"{_name} writes and retypes the master — a session alone is a browser "
        f"left open on the iPad")
-# And the block COUNTS what it guarded. Without this line the loop above is
-# green on a file where nothing writes at all, which is exactly what it looked
-# like the moment the writes moved from one class to another.
-ok(_GUARDED >= 3,
-   f"{_GUARDED} writing handlers found and guarded: the lot, the renewals and "
-   f"the minting", _GUARDED)
+# And the block NAMES what it guarded, in both directions. A count with a
+# floor — it read `>= 3` — catches a guard that vanishes and says nothing
+# about a writer that arrives unguarded, and it goes stale in silence the day
+# a handler leaves: the renewals action left in 5.0.0 and the floor would have
+# stayed at three. The equality fails on either mistake, and it fails saying
+# which name moved.
+ok(sorted(_GUARDED) == ["batch_action", "codes_mint"],
+   f"the writing handlers are exactly these, guarded: {sorted(_GUARDED)}",
+   sorted(_GUARDED))
 
 # And the mirror image, because the interesting half of a rule is its
 # exceptions. `backup` is NOT in MUTATING — VACUUM INTO produces a file and
@@ -4040,22 +4091,14 @@ if _ACT is not None:
     ok("seen = (form.get('digest') or '').strip()" in ast.unparse(_ACT),
        "and `seen` is that hidden field and nothing else",
        [x[:60] for x in ast.unparse(_ACT).splitlines() if "seen" in x])
-_REN = _WEB_FUNCS.get("renewals_action")
-ok(_REN is not None, "web.py defines the renewals action")
-if _REN is not None:
-    _TESTS = [ast.unparse(n.test) for n in ast.walk(_REN) if isinstance(n, ast.If)]
-    ok("not secrets.compare_digest((form.get('master') or '').strip(), master)"
-       in _TESTS,
-       "the renewals action's master check is the constant-time comparison too",
-       [t[:60] for t in _TESTS])
-    # THE ONE PLACE the ceiling is still enforced by this file, because renew
-    # and promote have no engine method that does it. MORE than the cap, not as
-    # many — one character either way is the whole knob — and `cap > 0` because
-    # zero means the queue is closed to PROPOSING, not that nothing may be
-    # renewed. The engine spells it the same way in decide().
-    ok("cap is not None and cap > 0 and (len(ticked) > cap)" in _TESTS,
-       "and the ceiling refuses MORE than the cap, reading zero the way the "
-       "engine reads it", [t[:60] for t in _TESTS])
+# The three cases that stood here belonged to `renewals_action`, which left
+# with the expiry. Its master check is covered for EVERY writer by the loop
+# above, which names them; the ceiling it enforced by hand belonged to a
+# gesture that does not exist. What must not come back is the handler itself,
+# and that is what this says — the name, in the file, in either direction.
+ok("renewals_action" not in _WEB_FUNCS and "renewals" not in WEB_SRC,
+   "the renewals handler and its route are gone, and stayed gone",
+   sorted(n for n in _WEB_FUNCS if "renew" in n))
 
 # The session's own machinery is pinned by NAME too: `_session_ok = lambda r:
 # True` further down, under a flag, leaves every check above green and the UI

@@ -39,8 +39,8 @@ managers, which key an entry on a user and fill a password-only form wrong, in
 silence.
 
 WHERE THE MASTER IS RETYPED, AND WHERE IT IS NOT. Every gesture that WRITES
-asks for it again — deciding the lot, renewing, promoting, minting a one-time
-code — because a session alone is a browser left open on the iPad. The backup
+asks for it again — deciding the lot, minting a one-time code — because a
+session alone is a browser left open on the iPad. The backup
 does not, and the log page does not: a `VACUUM INTO` changes nothing and drops
 a file on the server's disk, and the log is a ring in memory. A master retyped
 where it defends nothing does not add a guard, it teaches the hand to type it
@@ -381,17 +381,6 @@ def build(*, registry, log, master: str, refusal, fault,
     def _client(request) -> str:
         return request.client.host if request.client else "unknown"
 
-    def _cap(prj):
-        """How many rules ONE action may carry, asked of the project.
-
-        ONE expression, and it is the engine's: `decide()` asks the same
-        method before it writes, so the page never holds a second opinion
-        about the ceiling — it holds the same one, early, to say so on the
-        page the person is looking at. `None` means no ceiling and `0` means
-        the queue is closed, which is a policy about proposing rather than
-        about approving: both readings live in `queue_cap`, not here."""
-        return prj.queue_cap()
-
     def _guest(request):
         """Not signed in: the login page, and nothing about what is behind
         it."""
@@ -495,7 +484,6 @@ def build(*, registry, log, master: str, refusal, fault,
     def _project_nav(name: str) -> str:
         n = _esc(name)
         return (f"<a href='/p/{n}/batch'>lot</a><a href='/p/{n}/rules'>rules</a>"
-                f"<a href='/p/{n}/renewals'>renewals</a>"
                 f"<a href='/p/{n}/codes'>codes</a>"
                 f"<a href='/p/{n}/status'>state</a><a href='/'>projects</a>"
                 "<form class='inline' method='post' action='/logout'>"
@@ -723,9 +711,9 @@ def build(*, registry, log, master: str, refusal, fault,
     def _verdict_html(name: str, verdict) -> str:
         out = []
         for a in verdict["approved"]:
-            line = (f"<p class='ok'>In force: <b>{_esc(a['id'])}</b> — "
-                    f"provisional, until {_esc(a['expires_at'])}. Staying costs "
-                    f"a decision; going is free.")
+            line = (f"<p class='ok'>In force: <b>{_esc(a['id'])}</b>. It stays "
+                    f"until somebody ends it — retire it, or supersede it with "
+                    f"an heir.")
             if a.get("retired"):
                 line += (f" It retired {_esc(a['retired'])} in the same "
                          f"transaction, so there was no moment in which both "
@@ -737,9 +725,7 @@ def build(*, registry, log, master: str, refusal, fault,
                        f"whoever filed it: silence became an answer.</p>")
         if not verdict["approved"] and not verdict["denied"]:
             out.append("<p class='note'>Nothing was decided.</p>")
-        out.append(f"<p class='note'>Decision {_esc(verdict['decision'])}, "
-                   f"provisional term {_esc(verdict['provisional_days'])} "
-                   f"days.</p>")
+        out.append(f"<p class='note'>Decision {_esc(verdict['decision'])}.</p>")
         out.append(f"<p><a href='/p/{_esc(name)}/batch'>Back to the lot</a></p>")
         return "".join(out)
 
@@ -1001,7 +987,7 @@ def build(*, registry, log, master: str, refusal, fault,
                 f"<tr><td><a href='/p/{_esc(name)}/rule/{_esc(r['id'])}"
                 f"?consumer={_esc(consumer)}'>{_esc(r['id'])}</a></td>"
                 f"<td>{_esc(r['title'])}</td>"
-                f"<td class='note'>{_esc(r['reach'])} · {_esc(r['permanence'])}"
+                f"<td class='note'>{_esc(r['reach'])}"
                 + (f" · {_esc(r.get('reaches_you'))}" if r.get("reaches_you") else "")
                 + "</td></tr>" for r in data["rules"])
             # The DESK, in the short form the engine serves — id, title,
@@ -1041,17 +1027,15 @@ def build(*, registry, log, master: str, refusal, fault,
             data = prj.get_rules([rid], consumer, history=True)
             for f in data["rules"]:
                 mark = f" — <b>{_esc(f['status'])}</b>"
-                if not f["in_force"] and f["status"] == "active":
-                    mark += " (expired: it has left the lists on its own)"
                 if f.get("superseded_by"):
                     mark += f", superseded by {_esc(f['superseded_by'])}"
                 if f.get("supersedes"):
                     mark += f", superseding {_esc(f['supersedes'])}"
                 out.append(f"<p>{_esc(f['id'])} · {_esc(f['title'])}{mark}</p>"
                            f"<pre>{_esc(f['body'])}</pre>")
-                # The PERIMETER and the LIFE, both read off the same payload:
-                # a page that asked a second method for the expiry would be a
-                # second reading of the row it is already holding.
+                # The PERIMETER, read off the payload the page is already
+                # holding: a page that asked a second method for it would be a
+                # second reading of the same row.
                 perimeter = f["reach"]
                 if f.get("groups"):
                     perimeter += " · groups: " + ", ".join(f["groups"])
@@ -1059,14 +1043,6 @@ def build(*, registry, log, master: str, refusal, fault,
                     perimeter += " · plus: " + ", ".join(f["exceptions"])
                 out.append(f"<p class='note'>{_esc(perimeter)} — reaches "
                            f"{_esc(f['reaches_count'])}</p>")
-                if f["permanence"] == "permanent":
-                    out.append("<p class='note'>Permanent: no expiry — somebody "
-                               "promised to notice when it goes stale.</p>")
-                elif f["expires_at"]:
-                    out.append(f"<p class='note'>Expires {_esc(f['expires_at'])}. "
-                               f"Renewal lives on the "
-                               f"<a href='/p/{_esc(name)}/renewals'>renewals</a> "
-                               f"page, where the reason is in front of you.</p>")
                 out.append(f"<p class='note'>why: {_esc(f['reason'])} · "
                            f"proposed by {_esc(f['proposed_by'])} "
                            f"({_esc(f['source'])})</p>")
@@ -1103,117 +1079,6 @@ def build(*, registry, log, master: str, refusal, fault,
             return "".join(out), f"{name} — {rid}"
         return _read_page(request, render)
 
-    async def renewals_page(request):
-        def render(name, prj):
-            # The page is called RENEWALS and not "pending" since v4.0.0,
-            # because the pending queue moved: the whole lot is on the lot
-            # page, where it is decided. What is left here is the only other
-            # queue there is — what is about to stop binding — and it is
-            # PROJECT-WIDE now, read from the state report rather than from a
-            # per-consumer list. A rule that expires stops binding everybody
-            # it reached, so a queue that showed one consumer's half was a
-            # queue that made the decision look smaller than it is.
-            #
-            # This is where the corpus is GOVERNED: the question is not "is it
-            # still true?" but "would I file this today, for the reason it was
-            # filed for?" — and the reason is on the row. Same contract as the
-            # lot: master once per action, ceiling per action.
-            expiring = prj.status()["expiring"]
-            if not expiring:
-                return ("<h2>Expiring within 30 days</h2>"
-                        "<p class='note'>None.</p>", f"{name} — renewals")
-            trs = "".join(
-                f"<tr><td><label><input type='checkbox' name='rule' "
-                f"value='{_esc(r['id'])}'> "
-                f"<a href='/p/{_esc(name)}/rule/{_esc(r['id'])}'>"
-                f"{_esc(r['id'])}</a></label></td><td>{_esc(r['title'])}</td>"
-                f"<td class='note'>{_esc(r['expires_at'])} — "
-                f"{_esc(r['in_days'])} days</td>"
-                f"<td class='note'>{_esc(r['reason'])}</td></tr>"
-                for r in expiring)
-            return (f"<h2>Expiring within 30 days</h2>"
-                    f"<form method='post' action='/p/{_esc(name)}/renewals'>"
-                    f"<table><tbody>{trs}</tbody></table>"
-                    f"<p class='note'>Renewal is where the corpus is governed, "
-                    f"and the question is not \"is it still true?\" but \"would "
-                    f"I file this today, for the reason it was filed for?\" — "
-                    f"the reason is on the row. Promotion is rare and "
-                    f"deliberate: a permanent rule is one you promise to "
-                    f"notice when it goes stale.</p>"
-                    f"<label for='pmaster'>Master — once for this action</label>"
-                    f"<input id='pmaster' type='password' name='master' "
-                    f"autocomplete='current-password' required>"
-                    f"<p><button type='submit' name='action' value='renew'>"
-                    f"Renew the ticked</button> "
-                    f"<button type='submit' name='action' value='promote'>"
-                    f"Promote the ticked to PERMANENT</button></p></form>",
-                    f"{name} — renewals")
-        return _read_page(request, render)
-
-    async def renewals_action(request):
-        """Renew or promote the ticked rules: the write half of the renewals
-        page. Same shape as the lot's action — session, master retyped once,
-        ceiling per action, refusals as sentences — because a second shape
-        would be a second thing to get wrong."""
-        if not _session_ok(request):
-            return _guest(request)
-        name = request.path_params["project"]
-        prj = _open(name)
-        if prj is None:
-            return _no_project(name)
-        form = await request.form()
-        back = (f"<p><a href='/p/{_esc(name)}/renewals'>Back to the renewals "
-                f"page</a></p>")
-        def say(msg, cls, status):
-            return HTMLResponse(_page(f"{name} — renewals",
-                                      f"<p class='{cls}'>{msg}</p>{back}",
-                                      nav=_project_nav(name)), status_code=status)
-        if not secrets.compare_digest((form.get("master") or "").strip(), master):
-            log.warning("refused web renewal: wrong master, from %s",
-                        _client(request))
-            return say("Wrong master. Nothing was changed.", "bad", 401)
-        action = (form.get("action") or "").strip()
-        ticked = [i.strip() for i in form.getlist("rule") if i.strip()]
-        if action not in ("renew", "promote"):
-            return say("Unknown action. Nothing was changed.", "bad", 400)
-        if not ticked:
-            return say("Nothing ticked, nothing done.", "bad", 400)
-        # The ceiling, asked of the project — the same knob the lot obeys, for
-        # the same reason: at the twelfth signature in a row a person signs
-        # without reading. `decide()` enforces it on its own side; here there
-        # is no engine method that would, so this is the one place it is
-        # checked, and it is checked BEFORE anything is written.
-        cap = _cap(prj)
-        if cap is not None and cap > 0 and len(ticked) > cap:
-            return say(f"{len(ticked)} ticked and the ceiling for one action "
-                       f"is {cap}. Nothing was changed: do it in more "
-                       f"than one pass, which is the point of the ceiling.",
-                       "bad", 400)
-        try:
-            if action == "renew":
-                v = prj.renew(ticked)
-                rows = "".join(f"<li>{_esc(r['id'])} <span class='note'>— until "
-                               f"{_esc(r['expires_at'])}</span></li>"
-                               for r in v["renewed"])
-                return HTMLResponse(_page(
-                    f"{name} — renewed",
-                    f"<p class='ok'>Renewed for another {_esc(v['days'])} days "
-                    f"— let in again, which is what staying costs.</p>"
-                    f"<ul>{rows}</ul>{back}",
-                    nav=_project_nav(name)))
-            v = prj.promote(ticked)
-            return HTMLResponse(_page(
-                f"{name} — promoted",
-                f"<p class='ok'>Permanent: <b>{_esc(', '.join(v['promoted']))}"
-                f"</b>. No expiry, it never leaves on its own — you promised "
-                f"to notice when it goes stale.</p>{back}",
-                nav=_project_nav(name)))
-        except fault:
-            raise
-        except refusal as e:
-            log.info("refused web renewal: %s", e)
-            return say(_esc(e), "bad", 400)
-
     async def status_page(request):
         def render(name, prj):
             st = prj.status()
@@ -1245,11 +1110,6 @@ def build(*, registry, log, master: str, refusal, fault,
             out.append(findings("Retired — the names still taken", retired_rows,
                                 lambda r: r, "None: every name is free."))
             out.append(findings(
-                "Expiring within 30 days", st["expiring"],
-                lambda r: (f"<a href='/p/{_esc(name)}/rule/{_esc(r['id'])}'>"
-                           f"{_esc(r['id'])}</a> — {_esc(r['title'])}, "
-                           f"{_esc(r['in_days'])} days")))
-            out.append(findings(
                 "Citations pointing nowhere", st["dangling_citations"],
                 lambda r: (f"{_esc(r['in'])} ({_esc(r['field'])}) cites "
                            f"{_esc(r['cites'])} — {_esc(r['state'])}")))
@@ -1278,8 +1138,6 @@ def build(*, registry, log, master: str, refusal, fault,
         Route("/p/{project}/batch", batch_action, methods=["POST"]),
         Route("/p/{project}/codes", codes_page, methods=["GET"]),
         Route("/p/{project}/codes", codes_mint, methods=["POST"]),
-        Route("/p/{project}/renewals", renewals_page, methods=["GET"]),
-        Route("/p/{project}/renewals", renewals_action, methods=["POST"]),
         Route("/p/{project}/rules", rules_page, methods=["GET"]),
         Route("/p/{project}/rule/{rule}", rule_page, methods=["GET"]),
         Route("/p/{project}/status", status_page, methods=["GET"]),

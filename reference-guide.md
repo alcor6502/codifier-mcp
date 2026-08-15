@@ -152,12 +152,12 @@ The session-start call, and the one that answers *what binds me right now*.
 Rules in full, up to **10** at a time.
 
 - What binds you is **the ID and the body, and nothing else**. The rest — title,
-  domain, perimeter, permanence, expiry — is there so you can tell one rule from
-  another and find your way back to the decision.
+  domain, perimeter, state — is there so you can tell one rule from another and
+  find your way back to the decision.
 - The `reason` is the WHY, and **`reason` is immutable**: written when the rule
   is proposed, never rewritten, because a why that could be edited afterwards is
   a why that gets edited to fit. You read it where a person decides — the
-  proposal queue, the expiring list, the approval page.
+  proposal queue and the approval page.
 - **`history=True`** gives the rest of the story: dated gestures, the hand, and
   only the fields that changed — including the version number, which is what
   whoever administers the project will be asked for before they can move the
@@ -223,10 +223,10 @@ refusal **names the heir**, so there is one thing to do about it:
     superseded by VA-0007. Where an heir is named, cite that one; where none
     is, say it in words.
 
-A provisional rule whose term has **expired** is refused for the same reason and
-answered differently: nobody took it out of force, a date passed. Renew it from
-the administration page — it comes back under the same ID — and the citation
-goes through. And one that never existed at all:
+There is no fourth way out of force: a rule that has been approved **stays**
+until somebody ends it. It does not lapse on a date, and nothing in this
+registry takes a rule out of the lists while nobody is looking. And a citation
+towards one that never existed at all:
 
     citation in `body` that does not resolve: PE-9999 was never defined in
     this project.
@@ -291,7 +291,8 @@ So when the cap cuts, it cuts the fresh work. Recently closed ones trail.
   truncated list never looks like a short one.
 - Tasks **do not expire**. One pending for more than **30** days comes out
   MARKED, and that is all: a deadline nobody set is not a deadline, and a task
-  that vanished on a timer is work nobody decided to drop.
+  that vanished on a timer is work nobody decided to drop. Since 5.0.0 rules
+  answer the same way, for the same sentence.
 - Bodies are not here. `tasks_get` carries those.
 
 ## tasks_get(project, ids)

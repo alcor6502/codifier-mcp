@@ -50,7 +50,7 @@ down for a typo does not cost you a trip back to the page.
 ## WHAT IS NOT HERE
 
 **The web UI**, which no chat can reach: approve or deny the batch against the
-digest, renew and promote, mint one-time auth codes, per-project backup,
+digest, mint one-time auth codes, per-project backup,
 consultation, log. Approval is the act these tools deliberately do not have.
 
 # COMMANDS
