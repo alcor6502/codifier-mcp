@@ -1382,5 +1382,82 @@ p.cx.execute("INSERT INTO rule_audience_group (rule_id, group_id) VALUES (3,1)")
 yields("an audience row next to a universal rule is reported before it bites",
        lambda: p.status()["stray_audience_rows"][0]["rule"], "VA-0003")
 
+
+
+# =====================================================================
+print("\n— THE MESSAGES —")
+# Three guarantees, and each one was watched failing before it was kept: a
+# check nobody has seen go red is not a check.
+
+p = project()
+# Three tasks first, on purpose: the numbering of a kind must not inherit the
+# numbering of the log.
+for i in range(3):
+    p.task_add("advisory", f"task {i}", "a body", "architect")
+
+# ---- 1. THE COUNTER, and the WHERE that makes it right ----------------------
+# `UNIQUE (domain_id, seq)` forbids a duplicate; it does NOT hand out the next
+# number. Read across the whole table — `MAX(seq) FROM task` without the WHERE
+# — this comes back MS-0004, with no error and no red anywhere else, and the
+# series starts wrong FOREVER, because IDs are never reused.
+equals("the first message is MS-0001, even with tasks already in the log",
+       p.task_add("architect", "a message", "a body", "advisory",
+                  kind="message")["id"],
+       "MS-0001")
+equals("and the tasks keep their own series, ungapped",
+       p.task_add("advisory", "task 4", "a body", "architect")["id"], "TK-0004")
+
+# ---- 2. THE TWO READERS OF ONE TABLE ---------------------------------------
+# The legend must HIDE the reserved codes and the sanitiser must SEE them, and
+# the two assertions are written together, on the same code, because that is
+# the shape of the failure: factor them into one accessor and the first stays
+# green while the second silently stops refusing anything.
+equals("MS is NOT in the legend of the domains",
+       [d["code"] for d in p.project_info()["domains"] if d["code"] == "MS"], [])
+refused("and MS IS visible to the sanitiser: a bare ID is still refused",
+        lambda: p.task_add("advisory", "see MS-0001 for the rest", "a body",
+                           "architect"),
+        "MS-0001")
+
+# ---- 3. THE AUTOMATIC OUTCOME MUST NOT REFUSE ITSELF ------------------------
+# The sentence the engine writes goes through the SAME citation door as prose a
+# human typed — measured on the live service, where a bare ID inside `outcome`
+# was refused. A signature that reads like an ID would turn an ordinary closure
+# into a refusal nobody wrote.
+mid = p.task_add("architect", "a second message", "a body", "advisory",
+                 kind="message")["id"]
+out = allowed("a message closes with no outcome given, and the engine writes one",
+              lambda: p.task_close(mid, by="advisory"))
+if out:
+    equals("and it states the gesture, never the reason",
+           out["outcome"].startswith("closed by advisory on "), True)
+    equals("and the date carries the month in letters, like the vault it feeds",
+           bool(__import__("re").search(r" \d{4}-[A-Z][a-z]{2}-\d{2}$",
+                                        out["outcome"])), True)
+
+# ---- and the powers, which are the point of the kind ------------------------
+mid2 = p.task_add("architect", "a third message", "a body", "advisory",
+                  kind="message")["id"]
+allowed("the SENDER may close a message",
+        lambda: p.task_close(mid2, by="advisory", outcome="the condition cleared"))
+tid = p.task_add("architect", "a task", "a body", "advisory")["id"]
+refused("but the sender may NOT close a task",
+        lambda: p.task_close(tid, by="advisory", outcome="done"),
+        "admin code")
+refused("a message to yourself is refused, because that is a task",
+        lambda: p.task_add("advisory", "a note", "a body", "advisory",
+                           kind="message"),
+        "somebody ELSE")
+refused("a sender nobody can resolve is refused on a message",
+        lambda: p.task_add("advisory", "a note", "a body", "Some Human",
+                           kind="message"),
+        "live consumer")
+allowed("but a free signature is still fine on a task",
+        lambda: p.task_add("advisory", "a task", "a body", "Some Human"))
+refused("a kind that does not exist is refused WITH the list",
+        lambda: p.task_add("advisory", "x", "a body", "architect", kind="msg"),
+        "message")
+
+
 # =====================================================================
 _finished = True

@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-5.0.3-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-6.0.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -1230,7 +1230,7 @@ registry hands back the ID. `supersedes` is how a decision is changed in one
 gesture: approving the heir retires the old rule inside the same transaction.
 File it and forget it — the outcome is in `rules_list(pending=True)`.
 
-    tasks_add(project, consumer, title, body, created_by, urgent=False,
+    tasks_add(project, consumer, title, body, created_by, urgent=False, kind='',
               idem_key='', consumer_key='')
 
 Put work on a desk — yours or anybody's. Opening one for another desk is the

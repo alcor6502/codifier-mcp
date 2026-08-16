@@ -72,19 +72,25 @@ def _rule(con, reach="all", groups=(), exceptions=(), seq=1,
     c.execute(
         "INSERT INTO rule (rule_id,domain_id,seq,type,title,body,status,"
         "reach,reason,proposed_by,actor,created_at,updated_at)"
-        " VALUES (?,1,?,'R','a title','a body',?,?,"
+        " VALUES (?,(SELECT domain_id FROM domain WHERE code='VA'),?,"
+        "'R','a title','a body',?,?,"
         "'because it was decided','architect',?,?,?)",
         (rid, seq, status, reach, actor, NOW, NOW))
     con.commit()
     return rid
 
 
-def _task(con):
+def _task(con, code="TK", seq=1):
+    """The kind is a DOMAIN now, and it is looked up by code and never by id:
+    the seed owns the first ids, and a number written here would be a fact
+    about insertion order rather than about the kind."""
+    did = con.execute("SELECT domain_id FROM domain WHERE code=?",
+                      (code,)).fetchone()[0]
     con.execute(
-        "INSERT INTO task (seq,title,body,consumer_id,created_by,urgent,"
+        "INSERT INTO task (domain_id,seq,title,body,consumer_id,created_by,urgent,"
         "status,created_at,updated_at)"
-        " VALUES (1,'a title','a body',1,'architect',0,'pending',?,?)",
-        (NOW, NOW))
+        " VALUES (?,?,'a title','a body',1,'architect',0,'pending',?,?)",
+        (did, seq, NOW, NOW))
 
 
 def refused(name, gesture, expect):
@@ -165,23 +171,27 @@ con.close()
 # =====================================================================
 print("\n— THE ANAGRAFICA —")
 refused("a domain code is written once",
-        lambda c: c.execute("UPDATE domain SET code='XX' WHERE domain_id=1"),
+        lambda c: c.execute("UPDATE domain SET code='XX' WHERE code='VA'"),
         "written once")
 refused("a domain with active rules cannot retire",
         lambda c: (_rule(c),
                    c.execute("UPDATE domain SET retired_at=?,retired_reason='done'"
-                             " WHERE domain_id=1", (NOW,))),
+                             " WHERE code='VA'", (NOW,))),
         "active rules")
-refused("TK is reserved for tasks",
+# The reservation is a ROW now, not a CHECK in the DDL: the unique index on
+# the folded code is what refuses the second TK, and that is the point — a
+# third kind one day is a row in the seed, not a rewrite of the schema.
+refused("TK is reserved for tasks, and lowercase does not sneak past",
         lambda c: c.execute("INSERT INTO domain (code,reason,created_at)"
                             " VALUES ('tk','sneaking in lowercase',?)", (NOW,)),
-        "CHECK")
+        "UNIQUE")
 for entity, table, pk in (("domain", "domain", "domain_id"),
                           ("consumer", "consumer", "consumer_id"),
                           ("group", "consumer_group", "group_id")):
     refused(f"retiring a {entity} costs a reason",
             lambda c, t=table, k=pk: c.execute(
-                f"UPDATE {t} SET retired_at=? WHERE {k}=1", (NOW,)),
+                f"UPDATE {t} SET retired_at=? WHERE {k}="
+                f"(SELECT MAX({k}) FROM {t})", (NOW,)),
             "CHECK")
 
 # =====================================================================
@@ -244,7 +254,9 @@ refused("two pending proposals cannot claim the same victim",
         lambda c: (_rule(c, "all"),
                    c.execute("INSERT INTO rule (domain_id,seq,type,title,body,"
                              "status,reach,reason,created_at,updated_at,"
-                             "supersedes_rule_id) VALUES (1,2,'R','a','b','proposed',"
+                             "supersedes_rule_id) VALUES ("
+                             "(SELECT domain_id FROM domain WHERE code='VA'),"
+                             "2,'R','a','b','proposed',"
                              "'all','r',?,?,1)", (NOW, NOW)),
                    c.execute("INSERT INTO rule (domain_id,seq,type,title,body,"
                              "status,reach,reason,created_at,updated_at,"

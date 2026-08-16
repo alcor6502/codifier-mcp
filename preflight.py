@@ -177,6 +177,43 @@ def c_schema():
             f"{len(TRIGGERS)} triggers, in each of {len(served)}")
 
 
+@check("kinds")
+def c_kinds():
+    """The reserved codes are SEEDED, and they are the kinds of the log.
+
+    ⚠ This check exists for one silent failure. `INSERT OR IGNORE` is what makes
+    the seed safe to re-apply — and it is also what makes it skip a code some
+    project already declared as an ordinary domain. Then `task_kind` has no row
+    for it, `tasks_add(kind=…)` refuses a kind that ought to exist, and nothing
+    anywhere says why. The list is imported, never retyped: a copy here would
+    drift from the seed it is supposed to be watching."""
+    from rules import RESERVED_CODES
+    served, _, _, registry_file = _served()
+    if not served:
+        return f"no project served by {registry_file}: nothing to check"
+    for prj in served:
+        cx = sqlite3.connect(prj["path"], timeout=10)
+        try:
+            rows = {r[0]: r[1] for r in cx.execute(
+                "SELECT d.code, k.label FROM domain d LEFT JOIN task_kind k "
+                "ON k.domain_id = d.domain_id WHERE d.reserved = 1")}
+        finally:
+            cx.close()
+        missing = [c for c in RESERVED_CODES if c not in rows]
+        if missing:
+            raise RuntimeError(
+                f"{prj['path']}: {', '.join(missing)} is reserved but not seeded — "
+                "a project that declared it as an ordinary domain first would "
+                "silently have no kind by that name")
+        unpaired = sorted(c for c, lab in rows.items() if lab is None)
+        if unpaired:
+            raise RuntimeError(
+                f"{prj['path']}: {', '.join(unpaired)} is a reserved domain with no "
+                "kind behind it — the code numbers nothing")
+    return (f"{len(RESERVED_CODES)} reserved codes seeded and paired, "
+            f"in each of {len(served)}")
+
+
 @check("writable")
 def c_writable():
     p = os.path.join(DBDIR, f".preflight-{secrets.token_hex(4)}")

@@ -2972,7 +2972,11 @@ _MAIL_ASKS = sorted({n.func.attr for n in ast.walk(_MAIL_TREE)
                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                      and isinstance(n.func.value, ast.Name)
                      and n.func.value.id == "prj"})
-ok(_MAIL_ASKS == ["approver", "postbox"],
+# The list is CLOSED and written by hand: a door added to mail.py has to be
+# added here too, and that second gesture is the whole point — it is where
+# somebody notices that the mailer has started asking the engine for something
+# new. `mail_cap` arrived with the per-kind ceiling and this line saw it.
+ok(_MAIL_ASKS == ["approver", "mail_cap", "postbox"],
    f"and the doors it uses are exactly these: {_MAIL_ASKS}", _MAIL_ASKS)
 
 # AND THE OTHER DIRECTION, on the DOCUMENTS this image serves. The check above
@@ -3459,11 +3463,25 @@ for _label in SERVED_FILES:
        f"scaffolding, not a thing a chat has to carry",
        [ln.strip()[:60] for ln in _PROSE.splitlines() if "consumer_key" in ln])
 
-# TK is reserved, and the two letter-pair checks that used to be written twice
-# are ONE door now. The literal is counted: a second copy is how a reservation
-# added to one door stops holding on the other.
-ok(getattr(_rules, "RESERVED_DOMAINS", ()) == (getattr(_rules, "TASK_PREFIX", ""),),
-   "RESERVED_DOMAINS is exactly the task prefix",
+# The reservation is ONE tuple with two names, and the check is that it stays
+# one: `RESERVED_DOMAINS` is the older name kept for `_valid_domain`, which is
+# a module function with no database in reach. A SECOND LIST is how a code
+# added to one door stops being refused at the other — and since the seed in
+# SCHEMA is written from this same tuple, a divergence here would seed a code
+# nobody refuses, or refuse one nobody seeded.
+# The SEED is written by hand inside SCHEMA — it carries a reason and the
+# policy of each kind, which no tuple could hold — so the codes exist twice.
+# Where a copy is needed, a check compares it: a code seeded but not reserved
+# would be a domain anybody could file rules under; reserved but not seeded
+# would be a kind `tasks_add` refuses because its row is not there.
+_SEEDED = set(re.findall(r"\(\s*'([A-Z]{2})'\s*,\s*'reserved:",
+                        getattr(_rules, "SCHEMA", "")))
+ok(_SEEDED == set(getattr(_rules, "RESERVED_CODES", ())),
+   "every reserved code is seeded, and every seeded code is reserved",
+   sorted(_SEEDED ^ set(getattr(_rules, "RESERVED_CODES", ()))))
+
+ok(getattr(_rules, "RESERVED_DOMAINS", ()) is getattr(_rules, "RESERVED_CODES", None),
+   "RESERVED_DOMAINS and RESERVED_CODES are the same tuple, not two copies",
    getattr(_rules, "RESERVED_DOMAINS", None))
 ok(RULES_SRC.count(r'r"^[A-Z]{2}$"') == 1,
    "the domain letter-pair is validated in ONE place, so the reservation cannot "

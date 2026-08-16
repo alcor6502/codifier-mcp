@@ -149,21 +149,27 @@ class Mailer:
 
     # ---------- the brake ----------
 
-    def _allow(self, project: str) -> tuple[bool, bool]:
+    def _allow(self, project: str, kind: str = "task",
+               cap: int = DAILY_CAP) -> tuple[bool, bool]:
         """(may send, this is the last one). Under the lock, because the tools
         run in a thread pool and two threads reading the same count is exactly
         the shape a cap must not have."""
+        # The counter is keyed by PROJECT AND KIND: messages must not eat the
+        # tasks' allowance, because the day eleven skills all go quiet is the
+        # day the alarms matter most — and `idem_key` collapses a repeat of the
+        # SAME fault, never different faults at the same moment.
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        slot = f"{project}/{kind}"
         with self._lock:
-            day, sent = self._sent.get(project, [today, 0])
+            day, sent = self._sent.get(slot, [today, 0])
             if day != today:
                 day, sent = today, 0
-            if sent >= DAILY_CAP:
-                self._sent[project] = [day, sent]
+            if sent >= cap:
+                self._sent[slot] = [day, sent]
                 return False, False
             sent += 1
-            self._sent[project] = [day, sent]
-            return True, sent == DAILY_CAP
+            self._sent[slot] = [day, sent]
+            return True, sent == cap
 
     # ---------- the one way out ----------
 
@@ -240,7 +246,7 @@ class Mailer:
         return msg
 
     def send(self, project: str, to: str, subject: str, sender: str, lines,
-             note: str = "") -> bool:
+             note: str = "", kind: str = "task", cap: int = DAILY_CAP) -> bool:
         """True if it went. NEVER raises: a notification that can make a write
         fail is worse than no notification, and every caller of this is a
         caller whose transaction has already committed.
@@ -254,18 +260,19 @@ class Mailer:
         the pause is visible in the post and not only in the log."""
         if not self.configured or not (to or "").strip():
             return False
-        allowed, last = self._allow(project)
+        allowed, last = self._allow(project, kind, cap)
         if not allowed:
             if self.log:
                 self.log.warning(
-                    "mail not sent for %s: %s already posted today, which is the cap. "
-                    "Something is looping — the cap exists so a runaway cannot burn a "
-                    "month's allowance in an afternoon", project, DAILY_CAP)
+                    "mail not sent for %s: %s %s already posted today, which is the "
+                    "cap for that kind. Something is looping — the cap exists so a "
+                    "runaway cannot burn a month's allowance in an afternoon",
+                    project, cap, kind)
             return False
         lines = list(lines)
         if last:
             lines.append(
-                f"This is the {DAILY_CAP}th message about {project} today, which is "
+                f"This is the {cap}th {kind} notice about {project} today, which is "
                 f"the daily ceiling: nothing else will be posted about this project "
                 f"until tomorrow. The work itself is unaffected — tasks are opened "
                 f"and proposals are queued as usual — but you will not hear about "
@@ -335,7 +342,8 @@ def from_env(log=None) -> Mailer:
 # =====================================================================
 
 def task_opened(mailer: Mailer, prj, tid: str, owner: str, sender: str,
-                title: str, body: str = "", urgent: bool = False) -> bool:
+                title: str, body: str = "", urgent: bool = False,
+                kind: str = "task") -> bool:
     """A task landed on a human's desk, WITH ITS TEXT.
 
     ⚠ It used to be a knock on the door and nothing more — the ID, who sent it,
@@ -371,11 +379,15 @@ def task_opened(mailer: Mailer, prj, tid: str, owner: str, sender: str,
     # message arrived — true, and known to the one person who can change it,
     # since they typed it on the page themselves. A footer nobody needs is a
     # footer that teaches the eye to stop before the end.
+    # The cap is asked of the ENGINE, by method: mail.py never reaches into
+    # `prj.cx`, because the lock that makes one connection safe lives inside
+    # those methods, and a shape check keeps it that way.
     return mailer.send(
         prj.name, row["email"],
         f"{mark}{tid} — {_short(title)}",
         sender, _paragraphs(body),
-        "Read it with tasks_get, or on the project's page.")
+        "Read it with tasks_get, or on the project's page.",
+        kind=kind, cap=prj.mail_cap(kind))
 
 
 def proposal_queued(mailer: Mailer, prj, rid: str, title: str,

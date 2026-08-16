@@ -17,8 +17,10 @@ people of the project: **consumers** (chats, skills, humans), their **groups**,
 and the project's own **profile** — its brief and its specs.
 
 Rules are law: a chat proposes, a human approves on a web page no chat can
-reach. Tasks are messages with an obligation: opening one for someone else is
-normal; closing one costs an outcome or a reason.
+reach. **A TASK is work that waits** — opening one for someone else is normal,
+and closing one costs an outcome or a reason. **A MESSAGE is a condition that
+decays**: same log, same commands, one letter-pair of difference in the ID, and
+the one who sent it may close it when the reason is gone.
 
 Every call names the project by its **reference code**, never by name. You are a
 **consumer**: your name is in your instructions, and it is what you pass in
@@ -56,8 +58,8 @@ Empty set or silent registry: stop and say so.
 
 ## CITING
 
-Rules are cited as `(VA-0002)`, tasks as `(TK-0012)` — ID in round brackets,
-four digits, in every prose field. Reads forgive the short form (`VA-02`
+Rules are cited as `(VA-0002)`, tasks as `(TK-0012)`, messages as `(MS-0001)` —
+ID in round brackets, four digits, in every prose field. Reads forgive the short form (`VA-02`
 resolves); writes refuse anything else, naming field and token, spending
 neither a number nor a queue slot.
 
@@ -240,7 +242,7 @@ of what is waiting, because the ceiling exists so that whoever approves reads
 what they tick. The body of one rule stops at **64000** bytes — a rule that long
 is two rules.
 
-## tasks_add(project, consumer, title, body, created_by, urgent=False, idem_key='', consumer_key='')
+## tasks_add(project, consumer, title, body, created_by, urgent=False, idem_key='', consumer_key='', kind='')
 
 Put work on a desk — yours or anybody's. Opening one for another desk is the
 point of the log, and it is free.
@@ -258,6 +260,30 @@ whether another chat did the work — read it back with `tasks_list(authored=Tru
 - **`idem_key`** is how a retried call does not become twins: same key, same
   desk, and you get the existing task back with `already_open: true` instead of
   a second one. Use it whenever you might be re-running.
+- **`kind`** is what you open. Left out, you get a **task**, exactly as before.
+  Pass `'message'` and you get one of those instead — `MS-0001`, its own
+  numbering, and **the sender may close it**. A word that is not a kind is
+  refused with the list of the ones that are.
+
+**A MESSAGE is for a condition that DECAYS.** The reminder stops because the
+thing happened, and whoever sent it is usually the one who finds out: the tax
+monitor says a statement is missing, the statement arrives, and the same skill
+closes its own message on the next round. Nobody has to open a web page for the
+circle to close.
+
+Two guards come with it, and both are about the CLOSING rather than the opening:
+
+- the **sender** must be a live consumer of this project, spelled as the
+  registry spells it — because a right to close cannot belong to a signature
+  nobody can resolve;
+- the **desk must be somebody else**. A message to yourself is a note to
+  yourself, and a note on your own desk is a task, which already works.
+
+⚠ **A message is NOT a push notification.** A chat sees its desk when it starts,
+and between two starts a day can pass: a message opened and closed in between is
+one nobody will ever see, and that is correct. **For something that has to be
+read regardless, open a TASK** — it stays on the desk until whoever owns it
+closes it.
 - **Opening a task for a HUMAN emails them, if their row carries an address.**
   They call no tool, so the register is not where they would find it. Their
   address is not something you can set — people and their post are looked after
@@ -347,10 +373,30 @@ reason if it is closed.
 ## tasks_close(project, id, by, outcome='', reason='', consumer_key='', key='')
 
 One gesture with two verdicts: **`outcome`** completes it, **`reason`** drops
-it, **exactly one of the two**. Neither is optional — only the owner knows how
-it went, and a closed task with nothing written is a task nobody can learn from.
+it, **exactly one of the two**. On a TASK neither is optional — only the owner
+knows how it went, and a closed task with nothing written is a task nobody can
+learn from.
+
+**On a MESSAGE the outcome may be left out, and the asymmetry is deliberate.**
+Send nothing and it closes `completed`, with a line the engine writes itself:
+
+    closed by FP-Update-Tax on YYYY-Mmm-DD
+
+That sentence states the gesture this engine WITNESSED — who closed it and when
+— and never why. It did not see a condition clear; it saw somebody press close.
+**`reason` has no default and never will:** dropping something is a decision —
+*I let this go knowing the condition did not clear* — and that is the one line
+that explains a hole six months later. The ordinary ending is free; the
+exceptional one is argued.
 
 - **`by`** is the signature.
+- **A message is closed by its desk OR by the one who sent it**, and that is the
+  only power a message has that a task does not. Anybody else still needs the
+  admin code:
+
+      MS-0001 is between FP-Update-Tax and Proprietario: a message is closed
+      by its desk or by the one who sent it, and anybody else takes the admin
+      code in `key`.
 - **Closed is closed** — no amend, no reopen. If the work came back, open a new
   task and cite this one.
 - Closing somebody else's task is an administration gesture: the admin code goes

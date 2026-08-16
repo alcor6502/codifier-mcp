@@ -592,7 +592,7 @@ def rules_propose(project: str, domain: str, type: str, title: str, body: str,
 @tool
 def tasks_add(project: str, consumer: str, title: str, body: str,
               created_by: str, urgent: bool = False, idem_key: str = "",
-              consumer_key: str = "") -> dict:
+              consumer_key: str = "", kind: str = "") -> dict:
     """Open a task on a desk — yours or anybody's. Opening for others is the
     POINT of the log: an audit that finds something routes it to the owner who
     can fix it instead of carrying it. `created_by` is the signature, humans
@@ -622,14 +622,15 @@ def tasks_add(project: str, consumer: str, title: str, body: str,
     posts nothing, because nothing happened."""
     prj = _project(project)
     out = prj.task_add(consumer, title, body, created_by, urgent=urgent,
-                       idem_key=idem_key, consumer_key=consumer_key)
+                       idem_key=idem_key, consumer_key=consumer_key, kind=kind)
     # AFTER the write, and outside its transaction by construction: the engine
     # has already committed by the time this line runs, so an unreachable SMTP
     # server cannot turn an opened task into a failed gesture. `already_open`
     # is the absorbed repeat — nothing happened, so nobody is told.
     if "already_open" not in out:
         out["posted"] = mail.task_opened(mailer, prj, out["id"], out["owner"],
-                                         created_by, title, body, urgent=urgent)
+                                         created_by, title, body, urgent=urgent,
+                                         kind=out["kind"])
     return out
 
 

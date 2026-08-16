@@ -144,6 +144,12 @@ The project's STRUCTURE — the one door for all of it.
 
 The cases nobody guesses:
 
+- ⚠ **Two letter-pairs are RESERVED and cannot be declared as domains**: they
+  number this project's log — `TK` for tasks, `MS` for messages — and a rule
+  numbered `MS-0001` could not be told apart from a message. They are rows the
+  engine seeds, not a rule written into the schema, so a third kind one day is
+  a row and not a migration. Try one and the refusal names it. Every other pair
+  is free.
 - **A domain's code is immutable.** Retiring a domain that still has active
   rules is refused, naming them.
 - **A name of a consumer or a group is ONE WORD** — letters, digits, `-` and

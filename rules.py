@@ -79,7 +79,7 @@ from datetime import datetime, timedelta, timezone
 # and both are alarms about the world outside this process.
 log = logging.getLogger("codifier-mcp.registry")
 
-VERSION = "5.0.3"
+VERSION = "6.0.0"
 
 # The GENERATION of the schema, and it is a number the database carries in
 # `PRAGMA user_version`. It exists because of a thing that was seen live at
@@ -93,7 +93,7 @@ VERSION = "5.0.3"
 # is the schema without the expiry, with the specs owned and with the mail
 # fields on a consumer — three cuts that landed in one release precisely
 # because the register was still empty enough to throw the files away.
-SCHEMA_GENERATION = 5
+SCHEMA_GENERATION = 6
 
 TYPES = ("R", "M", "F")                 # R binding · M method · F technical fact
 KINDS = ("chat", "skill", "human")      # a human calls no tool, but owns tasks
@@ -211,8 +211,22 @@ RULES_LIST_CAP = 50
 # belt-and-braces for its own sake: a row put there by hand with sqlite3 never
 # passed the first door, and the guarantee has to hold whichever door the
 # write came through.
+# The DEFAULT kind: what `tasks_add` writes when nobody says otherwise, so
+# every call written before kinds existed keeps meaning what it meant.
+DEFAULT_KIND = "task"
+# What a kind gets when its row does not say — the same ten the post has always
+# had. It lives here and in the seed's DEFAULT, and a check compares them.
+DEFAULT_MAIL_CAP = 10
+# The codes the engine seeds and owns. ONE list, and the rows in `domain` are
+# the truth: the seed is written from this tuple and a preflight check compares
+# the two, because a reservation kept in two places is a reservation that holds
+# in one of them. `RESERVED_DOMAINS` is this same tuple under its older name —
+# `_valid_domain` is a module function with no database in reach, so the door
+# that refuses a letter-pair before any row exists still reads a constant.
+RESERVED_CODES = ("TK", "MS")
 TASK_PREFIX = "TK"
-RESERVED_DOMAINS = (TASK_PREFIX,)
+# Kept as a NAME, not as a second list: one tuple, two readers.
+RESERVED_DOMAINS = RESERVED_CODES
 
 # The ceilings, NAMED, because a literal repeated in four queries is a number
 # written four times.
@@ -562,7 +576,7 @@ def _valid_domain(d: str) -> str:
     d = (d or "").strip()
     if not re.match(r"^[A-Z]{2}$", d):
         raise RulesError(f"domain {d!r}: exactly two uppercase letters")
-    if d in RESERVED_DOMAINS:
+    if d in RESERVED_CODES:
         raise RulesError(
             f"domain {d!r} is RESERVED: it is the prefix of the task log, and a rule "
             f"numbered {d}-0001 could not be told apart from a task. Pick another pair.")
@@ -657,7 +671,13 @@ CREATE TABLE IF NOT EXISTS project_profile_version (
 -- drawer, and drawers fill up.
 CREATE TABLE IF NOT EXISTS domain (
   domain_id      INTEGER PRIMARY KEY,
-  code           TEXT NOT NULL CHECK (upper(code) <> 'TK'),
+  code           TEXT NOT NULL,
+  -- A RESERVED code belongs to the engine: it numbers the log itself, and no
+  -- hand creates, amends or retires it. Seeded at boot, idempotently. This
+  -- replaced a CHECK that named 'TK' inside the DDL — where a second type
+  -- meant rewriting the schema, and rewriting the schema here means deleting
+  -- the databases, because there is no migration by decision.
+  reserved       INTEGER NOT NULL DEFAULT 0 CHECK (reserved IN (0,1)),
   description    TEXT,
   reason         TEXT NOT NULL,
   created_at     TEXT NOT NULL,
@@ -950,7 +970,10 @@ CREATE TABLE IF NOT EXISTS decision_rule (
 -- TK-0004 came back after TK-0007.
 CREATE TABLE IF NOT EXISTS task (
   task_id        INTEGER PRIMARY KEY,
-  seq            INTEGER NOT NULL UNIQUE,
+  -- The KIND lives here as the domain that numbers it, exactly like a rule:
+  -- the prefix is a datum read from the row, never a constant in a view.
+  domain_id      INTEGER NOT NULL REFERENCES domain(domain_id),
+  seq            INTEGER NOT NULL,
   title          TEXT NOT NULL,
   body           TEXT NOT NULL,
   consumer_id    INTEGER NOT NULL REFERENCES consumer(consumer_id),  -- the OWNER
@@ -973,8 +996,42 @@ CREATE TABLE IF NOT EXISTS task (
       OR (status = 'completed'
             AND TRIM(IFNULL(outcome,'')) <> '' AND closed_at IS NOT NULL)
       OR (status = 'dropped'
-            AND TRIM(IFNULL(reason_dropped,'')) <> '' AND closed_at IS NOT NULL))
+            AND TRIM(IFNULL(reason_dropped,'')) <> '' AND closed_at IS NOT NULL)),
+  -- Per KIND, like rule's UNIQUE (domain_id, seq). It forbids a duplicate; it
+  -- does NOT hand out the next number — that is `_next_task_seq`, and it needs
+  -- the same WHERE or the first message is born MS-0004.
+  UNIQUE (domain_id, seq)
 );
+
+-- ---------------------------------------------------------------------
+-- The KINDS of log entry, and the policy of each one
+-- ---------------------------------------------------------------------
+-- A row per kind, pointing at the domain that carries its code. A THIRD kind
+-- one day is a row in the seed below, applied to a live database by the same
+-- re-apply that repairs a missing trigger: no migration, no generation bump,
+-- no reload of the corpus. A new POLICY, on the other hand, is a column — and
+-- that one does cost a schema. Said here so the promise has an edge.
+CREATE TABLE IF NOT EXISTS task_kind (
+  domain_id        INTEGER PRIMARY KEY REFERENCES domain(domain_id),
+  label            TEXT NOT NULL UNIQUE,   -- what `kind` takes on tasks_add
+  sender_may_close INTEGER NOT NULL DEFAULT 0 CHECK (sender_may_close IN (0,1)),
+  outcome_optional INTEGER NOT NULL DEFAULT 0 CHECK (outcome_optional IN (0,1)),
+  peers_only       INTEGER NOT NULL DEFAULT 0 CHECK (peers_only       IN (0,1)),
+  daily_mail_cap   INTEGER NOT NULL DEFAULT 10
+);
+
+-- The SEED. INSERT OR IGNORE and nothing else: the schema is re-applied at
+-- every open, so this reaches a database that already exists without anybody
+-- writing a migration for it.
+INSERT OR IGNORE INTO domain (code, reason, reserved, created_at) VALUES
+  ('TK', 'reserved: it numbers the tasks of this project',    1, '1970-01-01T00:00:00Z'),
+  ('MS', 'reserved: it numbers the messages of this project', 1, '1970-01-01T00:00:00Z');
+
+INSERT OR IGNORE INTO task_kind (domain_id, label, sender_may_close,
+                                 outcome_optional, peers_only, daily_mail_cap)
+SELECT domain_id, 'task',    0, 0, 0, 10 FROM domain WHERE code = 'TK'
+UNION ALL
+SELECT domain_id, 'message', 1, 1, 1, 10 FROM domain WHERE code = 'MS';
 
 -- Partial on `pending`, which is the whole semantics: the same key after the
 -- task is closed opens a NEW task, because the recurring audit that finds the
@@ -1032,8 +1089,14 @@ CREATE VIEW IF NOT EXISTS v_rule AS
 SELECT r.*, d.code || '-' || printf('%04d', r.seq) AS display_id
   FROM rule r JOIN domain d ON d.domain_id = r.domain_id;
 
+-- The twin of v_rule, and the twin-ness is the point: the same join on the
+-- same table, and NEITHER view names a prefix.
 CREATE VIEW IF NOT EXISTS v_task AS
-SELECT t.*, 'TK-' || printf('%04d', t.seq) AS display_id FROM task t;
+SELECT t.*, d.code || '-' || printf('%04d', t.seq) AS display_id,
+       k.label AS kind, k.sender_may_close, k.outcome_optional,
+       k.peers_only, k.daily_mail_cap
+  FROM task t JOIN domain d    ON d.domain_id = t.domain_id
+              JOIN task_kind k ON k.domain_id = t.domain_id;
 
 -- =====================================================================
 -- The history is written by the DATABASE, not by tool code
@@ -1241,6 +1304,16 @@ END;
 
 -- Retiring a domain that still has rules in force would leave those rules
 -- with a dead label. The rules go first.
+-- A RESERVED domain is the engine's own: it numbers the log, and a hand that
+-- retired or renamed it would relabel every ID ever handed out. The guard is
+-- here and not only at the door, because this file is readable from the share.
+CREATE TRIGGER IF NOT EXISTS trg_domain_reserved_frozen
+BEFORE UPDATE ON domain
+WHEN OLD.reserved = 1
+BEGIN
+  SELECT RAISE(ABORT, 'reserved domain: it numbers the log itself — the engine seeds it and no hand amends, retires or revives it');
+END;
+
 CREATE TRIGGER IF NOT EXISTS trg_domain_retire_active
 BEFORE UPDATE ON domain
 WHEN NEW.retired_at IS NOT NULL AND OLD.retired_at IS NULL
@@ -1351,7 +1424,7 @@ TABLES = ("project_profile", "project_profile_version",
           "rule", "rule_audience_group", "rule_audience_exception", "rule_ref",
           "rule_version", "rule_version_audience",
           "decision", "decision_rule",
-          "task", "task_version",
+          "task", "task_version", "task_kind",
           "auth_code")
 
 VIEWS = ("v_rule", "v_task")
@@ -1369,6 +1442,7 @@ TRIGGERS = ("trg_profile_ins", "trg_profile_upd",
             "trg_rule_version_audience",
             "trg_domain_code_frozen", "trg_domain_retire_active",
             "trg_rule_arc_ins", "trg_rule_arc_upd",
+            "trg_domain_reserved_frozen",
             "trg_task_closed_is_closed", "trg_task_archive_closed_only",
             "trg_task_frozen",
             "trg_auth_code_spent_once")
@@ -2090,7 +2164,16 @@ class Project:
         """Every domain code this project ever declared, retired ones
         INCLUDED. Retiring a domain does not un-print the IDs it handed out,
         so a citation towards `VE-0003` has to keep resolving, and the relic
-        hunt has to keep recognising `VE` as one of ours."""
+        hunt has to keep recognising `VE` as one of ours.
+
+        ⚠ AND THE RESERVED ONES TOO — do NOT add `WHERE reserved = 0` here.
+        This is the SANITISER's source, and it has the opposite need from the
+        legend: the legend must HIDE the reserved codes, this must SEE them, or
+        `MS-0001` written bare in a body stops being refused. It would fail in
+        SILENCE — no error, no red, just an ID walking through a door that used
+        to be shut. One query cannot serve both readers, and the day somebody
+        factors these two into a shared accessor is the day the citations to
+        messages quietly stop being protected."""
         return [r[0] for r in self.cx.execute(
             "SELECT code FROM domain ORDER BY code")]
 
@@ -2748,8 +2831,12 @@ class Project:
         `project_status`, behind the admin code, because the name stays taken
         even retired and a revive needs a target you can see."""
         domains = []
+        # `reserved = 0`: TK and MS number the log, they are not places a rule
+        # can be filed under, and a reader of this list is choosing where to
+        # file one. ⚠ The sanitiser reads the SAME table without this clause,
+        # on purpose — see `_domain_codes`.
         for d in self.cx.execute("SELECT * FROM domain WHERE retired_at IS NULL "
-                                 "ORDER BY code"):
+                                 "AND reserved = 0 ORDER BY code"):
             n = self.cx.execute("SELECT COUNT(*) FROM rule WHERE domain_id=? "
                                 "AND status='active'", (d["domain_id"],)).fetchone()[0]
             domains.append({"code": d["code"], "description": d["description"],
@@ -3904,8 +3991,20 @@ class Project:
             # reservation of TK holds here and at every use, because a row put
             # in by hand never passed this one.
             code = _valid_domain((fields.get("code") or name or "").strip().upper())
-            if self.cx.execute("SELECT 1 FROM domain WHERE lower(code)=?",
-                               (code.lower(),)).fetchone():
+            taken = self.cx.execute("SELECT reserved FROM domain WHERE lower(code)=?",
+                                    (code.lower(),)).fetchone()
+            if taken and taken["reserved"]:
+                # BY NAME, and not «already declared», which is true and
+                # useless: a person choosing a two-letter code has to be told
+                # that this one is the engine's, not that somebody got there
+                # first. Without this line the refusal is the database's —
+                # `UNIQUE constraint failed: index 'ux_domain_fold'` — which
+                # reads like a fault.
+                raise RulesError(
+                    f"{code} is reserved: it numbers this project's log, and "
+                    f"{' and '.join(RESERVED_CODES)} belong to the engine. No domain may "
+                    "take one; every other two-letter code is free.")
+            if taken:
                 raise RulesError(f"domain {code} is already declared.")
             why = self._prose("reason", fields.get("reason") or reason)
             if not why.strip():
@@ -4031,6 +4130,15 @@ class Project:
             open_tasks = self.cx.execute(
                 "SELECT COUNT(*) FROM task WHERE consumer_id=? AND status='pending'",
                 (row["consumer_id"],)).fetchone()[0]
+            # WHAT is open, not just how many. With two kinds on one desk, a
+            # message counted as a "task" sends whoever reads this to look for
+            # the wrong thing.
+            by_kind = ", ".join(
+                f"{n} {lab}" for lab, n in self.cx.execute(
+                    "SELECT k.label, COUNT(*) FROM task t JOIN task_kind k "
+                    "ON k.domain_id = t.domain_id WHERE t.consumer_id=? "
+                    "AND t.status='pending' GROUP BY k.label ORDER BY k.label",
+                    (row["consumer_id"],)))
             if open_tasks:
                 raise RulesError(
                     f"{row['name']} still has {open_tasks} open "
@@ -4495,8 +4603,11 @@ class Project:
                            "ORDER BY name")],
         }
 
+        # A reserved code has no rules BY DESIGN — reporting it as an empty
+        # domain would be an audit that flags its own furniture, every time.
         orphan_domains = [d[0] for d in self.cx.execute(
-            "SELECT code FROM domain WHERE retired_at IS NULL AND domain_id NOT IN "
+            "SELECT code FROM domain WHERE retired_at IS NULL AND reserved = 0 "
+            "AND domain_id NOT IN "
             "(SELECT DISTINCT domain_id FROM rule) ORDER BY code")]
         unreached = []
         for c in self.cx.execute("SELECT consumer_id, name, kind FROM consumer "
@@ -4582,25 +4693,85 @@ class Project:
     # The task log: work, not law
     # =================================================================
 
-    @staticmethod
-    def _norm_task_id(tid: str) -> str:
+    def _kinds(self) -> dict:
+        """The kinds alive in THIS database, by label. Read every time and
+        never cached: a kind added to the seed reaches a live database through
+        the re-apply, and a cache would hide it until the next restart."""
+        return {r["label"]: r for r in self.cx.execute(
+            "SELECT k.*, d.code FROM task_kind k JOIN domain d "
+            "ON d.domain_id = k.domain_id")}
+
+    def _kind_or_refuse(self, label: str):
+        """The label a caller passed, or the refusal that LISTS what exists —
+        the same shape `reference_guide` uses for a card that is not there.
+        No tolerance on spelling: a kind that answered to three words would be
+        a rule with exceptions, and those are the ones nobody can check."""
+        kinds = self._kinds()
+        want = (label or "").strip() or DEFAULT_KIND
+        row = kinds.get(want)
+        if row is None:
+            raise RulesError(
+                f"kind {label!r}: one of {', '.join(sorted(kinds))}. It is written "
+                "exactly, in lower case — the kind decides who may close the entry "
+                "and whether its outcome can be left out, so a near-miss is not "
+                "corrected in silence.")
+        return row
+
+    def mail_cap(self, kind: str) -> int:
+        """The daily ceiling of the post FOR ONE KIND, read from its row.
+
+        A METHOD and not a column somebody reaches for: `mail.py` never touches
+        `prj.cx`, because the lock that makes one connection safe lives inside
+        these methods — there is a shape check that keeps it that way.
+
+        Per kind, and not per project, because the two share nothing: eleven
+        skills going quiet at once is a SYSTEMIC failure and the day the alarms
+        matter most, while a project's ordinary tasks have no reason to be
+        starved by it. ⚠ The other way out — urgent messages outside the count
+        — was refused: it would put the ceiling behind a flag the SENDER sets,
+        which is the manual's own sentence about `urgent` in a mirror."""
+        row = self.cx.execute(
+            "SELECT daily_mail_cap FROM task_kind k JOIN domain d "
+            "ON d.domain_id = k.domain_id WHERE k.label=?", (kind,)).fetchone()
+        return int(row[0]) if row else DEFAULT_MAIL_CAP
+
+    def _kind_of(self, row):
+        """The kind row behind a task row, by its domain."""
+        return self.cx.execute(
+            "SELECT k.*, d.code FROM task_kind k JOIN domain d "
+            "ON d.domain_id = k.domain_id WHERE k.domain_id=?",
+            (row["domain_id"],)).fetchone()
+
+    def _norm_task_id(self, tid: str) -> str:
         t = (tid or "").strip().upper()
         m = RE_ID_IN.match(t)
-        if not m or m.group(1) != TASK_PREFIX:
-            raise RulesError(f"malformed task ID {tid!r}: it is "
-                             f"{TASK_PREFIX}-{'N' * ID_DIGITS}, e.g. {TASK_PREFIX}-0012")
-        return f"{TASK_PREFIX}-{int(m.group(2)):0{ID_DIGITS}d}"
+        codes = sorted({r["code"] for r in self._kinds().values()})
+        if not m or m.group(1) not in codes:
+            shown = " or ".join(f"{c}-{'N' * ID_DIGITS}" for c in codes)
+            raise RulesError(f"malformed log ID {tid!r}: it is {shown}, "
+                             f"e.g. {codes[0]}-0012")
+        return f"{m.group(1)}-{int(m.group(2)):0{ID_DIGITS}d}"
 
     def _task_row(self, tid: str):
         return self.cx.execute("SELECT * FROM v_task WHERE display_id=?",
                                (self._norm_task_id(tid),)).fetchone()
 
-    def _next_task_seq(self) -> int:
-        """MAX(seq)+1, and it can be trusted because the prune ARCHIVES instead
-        of deleting: every number ever handed out is still a row. In 3.1.0 the
-        prune deleted, MAX went backwards, and TK-0004 came back after
-        TK-0007."""
-        last = self.cx.execute("SELECT IFNULL(MAX(seq),0) FROM task").fetchone()[0]
+    def _next_task_seq(self, domain_id: int) -> int:
+        """MAX(seq)+1 WITHIN THE KIND, and the WHERE is the whole of it.
+
+        Trusted because the prune ARCHIVES instead of deleting: every number
+        ever handed out is still a row. In 3.1.0 the prune deleted, MAX went
+        backwards, and TK-0004 came back after TK-0007.
+
+        ⚠ The WHERE is the same failure in a second dress. `UNIQUE (domain_id,
+        seq)` forbids a duplicate; it does NOT hand out the next number. Read
+        across the whole table, the first message of a log that already holds
+        three tasks would be born MS-0004 — no error, no red, just a series
+        that starts wrong and can never be renumbered, because IDs are never
+        reused. `_next_seq` has carried this WHERE for rules since the
+        beginning; this is that line, copied."""
+        last = self.cx.execute("SELECT IFNULL(MAX(seq),0) FROM task "
+                               "WHERE domain_id=?", (domain_id,)).fetchone()[0]
         n = int(last) + 1
         if n > MAX_SEQ:
             raise RulesError(f"the task log has burned all {MAX_SEQ} numbers.")
@@ -4615,7 +4786,14 @@ class Project:
             return 0
 
     def _task_brief(self, row, now: str) -> dict:
-        d = {"id": row["display_id"], "title": row["title"],
+        """⚠ `kind` is here and NOT in `_desk`, and the difference is what the
+        reader DOES with the row. These rows are worked on — filtered, grouped,
+        decided about — and a typed field spares every caller a parse of the
+        ID. The desk answers one question, whether there is work, and nobody
+        branches on the kind at session start: there it would be a field paid
+        by every chat on every open and read by none. The prefix inside the ID
+        is already there, and it cannot contradict this."""
+        d = {"id": row["display_id"], "kind": row["kind"], "title": row["title"],
              "owner": self.cx.execute("SELECT name FROM consumer WHERE consumer_id=?",
                                       (row["consumer_id"],)).fetchone()[0],
              "created_by": row["created_by"], "status": row["status"],
@@ -4651,7 +4829,8 @@ class Project:
 
     def task_add(self, consumer: str, title: str, body: str, created_by: str,
                  urgent: bool = False, idem_key: str = "",
-                 consumer_key: str = "", admin: bool = False) -> dict:
+                 consumer_key: str = "", kind: str = "",
+                 admin: bool = False) -> dict:
         """Open a task on a desk — yours or anybody's. Opening for others is
         the POINT of the log: the audit that finds something routes it to the
         owner who can fix it, instead of carrying it.
@@ -4662,6 +4841,7 @@ class Project:
         after this transaction has committed, and `posted` on the tool's
         verdict says whether it went. A database that opened a socket would be
         a database whose transactions depend on somebody else's network."""
+        kind_row = self._kind_or_refuse(kind)
         owner = self._consumer_row(consumer)
         who = (created_by or "").strip()
         if not who:
@@ -4671,6 +4851,24 @@ class Project:
                                  (_fold(who),)).fetchone()
         if signer is not None:
             self._check_consumer_key(signer, consumer_key, admin=admin)
+        if kind_row["peers_only"]:
+            # TWO GUARDS, and they exist because of the CLOSING, not the
+            # opening. On a task `created_by` is a signature and free text —
+            # the sender never comes back, the desk closes it. On a kind whose
+            # sender MAY close, the sender has to be findable again, and a
+            # right to close cannot belong to a string nobody can resolve:
+            # those would be entries nobody could ever close.
+            if signer is None or signer["retired_at"]:
+                raise RulesError(
+                    f"{who}: the sender of a {kind_row['label']} must be a live consumer "
+                    "of this project, spelled as it is in the registry — because the "
+                    "sender may close it, and a signature nobody can resolve is a right "
+                    "nobody can exercise. Read the name from project_info.")
+            if signer["consumer_id"] == owner["consumer_id"]:
+                raise RulesError(
+                    f"a {kind_row['label']} goes to somebody ELSE: {who} is both sender "
+                    "and desk here. A note to yourself is a task on your own desk, and "
+                    "that already works.")
         if not (title or "").strip():
             raise RulesError("the task needs a title")
         if not (body or "").strip():
@@ -4695,14 +4893,16 @@ class Project:
                                 "that was already there, not a twin."}
         with self._transaction():
             self.cx.execute(
-                "INSERT INTO task (seq, title, body, consumer_id, created_by, urgent, "
-                "status, actor, idem_key, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?, 'pending', ?,?,?,?)",
-                (self._next_task_seq(), title, body, owner["consumer_id"], who,
+                "INSERT INTO task (domain_id, seq, title, body, consumer_id, created_by, "
+                "urgent, status, actor, idem_key, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?, 'pending', ?,?,?,?)",
+                (kind_row["domain_id"], self._next_task_seq(kind_row["domain_id"]),
+                 title, body, owner["consumer_id"], who,
                  1 if urgent else 0, who, key, _now(), _now()))
             tid = self.cx.execute("SELECT display_id FROM v_task WHERE task_id="
                                   "last_insert_rowid()").fetchone()[0]
-        out = {"id": tid, "owner": owner["name"], "urgent": bool(urgent)}
+        out = {"id": tid, "kind": kind_row["label"], "owner": owner["name"],
+               "urgent": bool(urgent)}
         if owner["kind"] == "human":
             # WHAT THIS LAYER KNOWS, and nothing more. Until 5.0.0 the sentence
             # here said a human was not reached at all, which was true and is
@@ -4868,7 +5068,16 @@ class Project:
                 f"{row['display_id']} is already {row['status']} since {row['closed_at']}: "
                 "closed is closed — no amend, no reopen. If the work came back, open a new "
                 "task and cite this one.")
-        if not admin and _fold(who) != _fold(owner["name"]):
+        kind_row = self._kind_of(row)
+        is_owner = _fold(who) == _fold(owner["name"])
+        is_sender = _fold(who) == _fold(row["created_by"] or "")
+        may = is_owner or (kind_row["sender_may_close"] and is_sender)
+        if not admin and not may:
+            if kind_row["sender_may_close"]:
+                raise RulesError(
+                    f"{row['display_id']} is between {row['created_by']} and "
+                    f"{owner['name']}: a {kind_row['label']} is closed by its desk or by "
+                    "the one who sent it, and anybody else takes the admin code in `key`.")
             raise RulesError(
                 f"{row['display_id']} belongs to {owner['name']}: closing somebody else's "
                 "task takes the admin code in `key`. Opening one for another desk is free; "
@@ -4878,6 +5087,27 @@ class Project:
         if signer is not None:
             self._check_consumer_key(signer, consumer_key, admin=admin)
         has_out, has_why = bool((outcome or "").strip()), bool((reason or "").strip())
+        if kind_row["outcome_optional"] and not has_out and not has_why:
+            # THE ASYMMETRY, and it is a reason and not a convenience.
+            # `completed` is the expected ending: the reminder stops because
+            # the thing happened, there is nothing to learn, and charging a
+            # sentence for an ordinary event is a tax that gets paid by never
+            # closing anything. `dropped` is a DECISION — I let this go knowing
+            # the condition did not clear — and that is the one line that
+            # explains a hole six months later.
+            #
+            # The sentence states the GESTURE THIS ENGINE WITNESSED and nothing
+            # else: who closed it, and when. It did not see a condition clear;
+            # it saw somebody press close. A default that asserted the WHY
+            # would put a machine's inference in the history, where it reads
+            # like something a person observed.
+            #
+            # `%Y-%b-%d` and not ISO: this string is not only displayed, it is
+            # copied by skills into the vault's files, whose standard is
+            # 2026-Aug-17. Aligning at the source costs a format string;
+            # not aligning costs a conversion at every reader.
+            outcome = f"closed by {who} on {datetime.now(timezone.utc):%Y-%b-%d}"
+            has_out = True
         if has_out == has_why:
             raise RulesError(
                 "exactly one of the two: `outcome` completes the task — what came of it —"
