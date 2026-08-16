@@ -478,7 +478,7 @@ def c_manuals():
     return f"{len(MANUALS)} manuals, in the image · cards: {', '.join(counts)}"
 
 
-CHECKS = [c_db, c_schema, c_writable, c_ownership, c_approval, c_mail,
+CHECKS = [c_db, c_schema, c_kinds, c_writable, c_ownership, c_approval, c_mail,
           c_web, c_oauth, c_token_store, c_funnel, c_node_key, c_cidrs, c_dns,
           c_manuals]
 

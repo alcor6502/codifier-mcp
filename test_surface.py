@@ -2972,6 +2972,23 @@ _MAIL_ASKS = sorted({n.func.attr for n in ast.walk(_MAIL_TREE)
                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                      and isinstance(n.func.value, ast.Name)
                      and n.func.value.id == "prj"})
+# ⚠ A CHECK THAT IS WRITTEN AND NOT REGISTERED IS WORSE THAN A MISSING ONE:
+# the function is there, the documents count it, and it never runs. `c_kinds`
+# went out in 6.0.0 exactly like that — the suite counted the `c_*` functions
+# in the module and found fifteen, while `CHECKS` ran fourteen, and the service
+# said `PREFLIGHT: 14/14` to nobody's surprise because nobody was comparing the
+# two. Counting what is DEFINED is not counting what is EXECUTED.
+_PRE = parse(os.path.join(HERE, "preflight.py"))
+_DEFINED = {n.name for n in ast.walk(_PRE)
+            if isinstance(n, ast.FunctionDef) and n.name.startswith("c_")}
+_LISTED = {e.id for n in ast.walk(_PRE)
+           if isinstance(n, ast.Assign)
+           and any(getattr(t_, "id", "") == "CHECKS" for t_ in n.targets)
+           for e in getattr(n.value, "elts", []) if isinstance(e, ast.Name)}
+ok(_DEFINED == _LISTED,
+   f"every preflight check written is a check that RUNS: {len(_LISTED)} of them",
+   sorted(_DEFINED ^ _LISTED))
+
 # The list is CLOSED and written by hand: a door added to mail.py has to be
 # added here too, and that second gesture is the whole point — it is where
 # somebody notices that the mailer has started asking the engine for something

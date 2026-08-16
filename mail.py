@@ -142,7 +142,7 @@ class Mailer:
             return ("off — no SMTP host or sender, so nothing is posted and nothing "
                     "complains")
         return (f"{self.host}:{self.port or self._default_port()} {self.security} "
-                f"as {self.sender} · at most {DAILY_CAP} a day per project")
+                f"as {self.sender} · at most {DAILY_CAP} a day per project and kind")
 
     def _default_port(self) -> int:
         return {"ssl": 465, "none": 25}.get(self.security, 587)
