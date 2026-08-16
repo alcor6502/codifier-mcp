@@ -78,6 +78,9 @@ The project's STRUCTURE — the one door for all of it.
   `project_info` shows you PLUS the new one.** The verdict answers with
   `joined` and `left`, and those two lists are the only place you find out what
   you actually did: a `left` you did not intend is a group you just emptied.
+- ⚠ **A `human` IS NOT A MEMBER**, on `create` or on `amend`. A group is a
+  perimeter for rules, and a person has none — see the bullet on people below
+  for why that is a refusal and not an emptiness.
 - ⚠ **`secret` on a consumer WRITES THAT CONSUMER'S CREDENTIAL**, in clear, on
   both `create` and `amend`. It is the one door in the world that switches on,
   replaces or clears the secret with which somebody signs in that consumer's
@@ -108,6 +111,19 @@ The project's STRUCTURE — the one door for all of it.
 
   What you CAN do with a person from here is the thing that matters: put work
   on their desk, with `tasks_add`.
+- ⚠ **A PERSON IS NOT AN AUDIENCE**, and both doors into a rule's perimeter
+  refuse one: `members` here, and `exceptions` on `rules_propose`.
+
+      Alfredo is a person, and a person is not an audience: a human has no
+      brief and no specs, and rules_list on one is REFUSED — not answered
+      empty.
+
+  The damage it prevents is quiet: a rule naming a person would be law in front
+  of somebody who can never read it, and it would still COUNT as reached — so
+  it would satisfy the guard that refuses a rule binding nobody. A constraint
+  that binds no one while reading as though it binds somebody is worse than a
+  missing one. The refusal is in the engine AND in the database, for the same
+  reason the brief/specs ban is.
 - **A person's row is a different shape, and the schema holds it, not the
   code.** Only a human may carry an `email`, and a human has **no `brief` and
   no `specs`**: they already know who they are and what they have to do, and
@@ -204,7 +220,19 @@ The cases nobody guesses:
   finished is RETIRED, which costs a reason and says so in the history.
 - **A consumer with entries still open on their desk cannot be retired**, and
   it is the refusal you meet FIRST — before the one about rules reaching
-  nobody. Close them, or hand them to whoever takes the work over.
+  nobody. It says the KINDS, because two tasks and a message are not three
+  tasks and the noun is what you go and look for:
+
+      news still has 2 tasks, 1 message: close them or hand them to whoever
+      takes the work over.
+
+  ⚠ **A message holds the desk only when the leaver is its LAST LIVE END.** A
+  task has one responsible end, the desk it sits on. A message has TWO, because
+  its sender may close it — so while either end is alive the retirement goes
+  through, and the refusal names the entry and the end that is missing when it
+  does not. It cuts the other way as well, and that half is easy to miss: the
+  SENDER of an open message cannot walk out either once its desk is retired,
+  because that would leave it open with nobody able to close it.
 - **A group edit or a consumer retire that would leave a rule in force with ZERO
   effective consumers is refused**, naming the rules. A rule that binds nobody
   is a retirement in disguise.

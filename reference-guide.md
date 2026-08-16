@@ -247,6 +247,10 @@ The arguments that do not explain themselves:
   covered by this rule's own groups is refused at write time; an overlap that
   forms later blocks nothing — the next write on the rule refuses it, and the
   status report flags it.
+  ⚠ **A `human` cannot be named in `exceptions`**, nor carried in through a
+  group: a person has no rules, `rules_list` on one is refused rather than
+  answered empty, and a rule reaching them would be law nobody can read that
+  counted as read all the same. Reach a person with `tasks_add`.
 - **`reason`** is mandatory and immutable: without the why a rule cannot be
   defended, and at the first opportunity it gets reopened.
 - **`proposed_by`** is a signature — your consumer name, or a person's. An

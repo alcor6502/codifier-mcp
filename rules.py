@@ -79,7 +79,7 @@ from datetime import datetime, timedelta, timezone
 # and both are alarms about the world outside this process.
 log = logging.getLogger("codifier-mcp.registry")
 
-VERSION = "6.1.0"
+VERSION = "6.2.0"
 
 # The GENERATION of the schema, and it is a number the database carries in
 # `PRAGMA user_version`. It exists because of a thing that was seen live at
@@ -1413,6 +1413,35 @@ WHEN OLD.spent_at IS NOT NULL
 BEGIN
   SELECT RAISE(ABORT, 'auth code already spent: a one-time code is spent once — mint another on the maintenance page');
 END;
+
+-- A PERSON IS NOT AN AUDIENCE, and the two triggers below are the two doors
+-- a rule's perimeter can be entered by: the singleton table and the group.
+--
+-- A human has no brief and no specs because they already know who they are,
+-- and `rules_list` on one is REFUSED — not answered empty. So a rule that
+-- named one would be law in front of somebody who can never read it, and it
+-- would COUNT: they would fill `reaches_count` and hold up the guard that
+-- refuses a rule reaching nobody. A constraint binding no one while looking
+-- like it binds somebody is worse than a missing one, because it reads as
+-- covered.
+--
+-- The guard is in Python at both doors as well, and this is not redundancy:
+-- the Python one can say which name and which list, and this one is what
+-- root with sqlite3 open on the file still cannot get past. Same doctrine as
+-- the brief/specs ban on a human, which is a CHECK for the same reason.
+CREATE TRIGGER IF NOT EXISTS trg_no_human_in_group
+BEFORE INSERT ON consumer_group_member
+WHEN (SELECT kind FROM consumer WHERE consumer_id = NEW.consumer_id) = 'human'
+BEGIN
+  SELECT RAISE(ABORT, 'a person is not an audience: a human has no rules and rules_list on one is refused, so a group that carried one would name it in every perimeter that names the group — open a task instead, their desk is real');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_no_human_in_exception
+BEFORE INSERT ON rule_audience_exception
+WHEN (SELECT kind FROM consumer WHERE consumer_id = NEW.consumer_id) = 'human'
+BEGIN
+  SELECT RAISE(ABORT, 'a person is not an audience: a human has no rules and rules_list on one is refused, so a rule naming one would be law nobody can read and would still count as reached — open a task instead, their desk is real');
+END;
 """
 
 # Counted from the code, never written twice. The preflight counts these by
@@ -1445,7 +1474,8 @@ TRIGGERS = ("trg_profile_ins", "trg_profile_upd",
             "trg_domain_reserved_frozen",
             "trg_task_closed_is_closed", "trg_task_archive_closed_only",
             "trg_task_frozen",
-            "trg_auth_code_spent_once")
+            "trg_auth_code_spent_once",
+            "trg_no_human_in_group", "trg_no_human_in_exception")
 
 
 
@@ -2386,12 +2416,45 @@ class Project:
                 "least one group, or one consumer in `exceptions` — or say reach='all' "
                 "if it really binds the whole project.")
         gids = [self._group_row(g)["group_id"] for g in groups]
-        cids = [self._consumer_row(e)["consumer_id"] for e in exceptions]
+        rows = [self._consumer_row(e) for e in exceptions]
+        self._no_human_in_audience(rows, "exceptions")
+        cids = [r["consumer_id"] for r in rows]
         if len(set(gids)) != len(gids) or len(set(cids)) != len(cids):
             raise RulesError("the same group or the same consumer is named twice in the "
                              "perimeter: say it once.")
         self._containment(gids, cids)
         return reach, gids, cids
+
+    def _no_human_in_audience(self, rows, field: str) -> None:
+        """A PERSON IS NOT AN AUDIENCE — the Python half of the two triggers.
+
+        Both doors into a rule's perimeter come through here: `exceptions`,
+        which is the singleton table, and `members`, which carries whoever is
+        in it into the perimeter of every rule that names the group.
+
+        Why it is a refusal and not a warning: `rules_list` on a human is
+        REFUSED, not answered empty. A rule naming one would therefore be law
+        in front of somebody who can never read it — and it would still COUNT,
+        filling `reaches_count` and holding up the guard that refuses a rule
+        reaching nobody. The damage is a rule that binds no one while reading
+        as though it binds somebody, which is the shape nobody goes looking
+        for.
+
+        This half exists to say WHICH name and WHICH list; the trigger exists
+        because a guarantee that lives only in Python is one that root with
+        sqlite3 walks round."""
+        humans = [r["name"] for r in rows if r["kind"] == "human"]
+        if not humans:
+            return
+        one = len(humans) == 1
+        raise RulesError(
+            f"{', '.join(humans)} {'is a person' if one else 'are people'}, and a "
+            "person is not an audience: a human has no brief and no specs, and "
+            "rules_list on one is REFUSED — not answered empty. A rule that reaches "
+            "them is law nobody can read, and it would still count as reached, which "
+            "props up the very guard that refuses a rule binding nobody. Take "
+            f"{'that name' if one else 'those names'} out of `{field}`: a person is "
+            "reached with a task, and tasks_list answers for their desk.")
 
     def _write_audience(self, rule_id, gids, cids) -> None:
         """The perimeter, replaced whole. Called INSIDE the transaction and
@@ -4143,24 +4206,9 @@ class Project:
         if action == "retire":
             if row["retired_at"]:
                 raise RulesError(f"{row['name']} ended on {row['retired_at']} already.")
-            open_tasks = self.cx.execute(
-                "SELECT COUNT(*) FROM task WHERE consumer_id=? AND status='pending'",
-                (row["consumer_id"],)).fetchone()[0]
-            # WHAT is open, not just how many. With two kinds on one desk, a
-            # message counted as a "task" sends whoever reads this to look for
-            # the wrong thing.
-            by_kind = ", ".join(
-                f"{n} {lab}" for lab, n in self.cx.execute(
-                    "SELECT k.label, COUNT(*) FROM task t JOIN task_kind k "
-                    "ON k.domain_id = t.domain_id WHERE t.consumer_id=? "
-                    "AND t.status='pending' GROUP BY k.label ORDER BY k.label",
-                    (row["consumer_id"],)))
-            if open_tasks:
-                raise RulesError(
-                    f"{row['name']} still has {open_tasks} open "
-                    f"{'task' if open_tasks == 1 else 'tasks'}: close them or hand them to "
-                    "whoever takes the work over. A desk that ends with post on it loses "
-                    "the post.")
+            blocking = self._post_that_blocks(row["consumer_id"])
+            if blocking:
+                raise RulesError(self._post_refusal(row["name"], blocking))
             stuck = self._orphaned_by({row["consumer_id"]})
             if stuck:
                 raise RulesError(
@@ -4188,6 +4236,95 @@ class Project:
         return {"entity": "consumer", "action": "revived", "name": row["name"],
                 "note": "it is back in every perimeter it was named in: nothing had been "
                         "deleted."}
+
+    def _post_that_blocks(self, cid: int) -> list:
+        """The open post that a retirement would strand — WHICH entries, not
+        how many.
+
+        A TASK has one responsible end, the desk it sits on: if it is open
+        there, the retirement waits. A MESSAGE has TWO, because its sender may
+        close it — that is the only power an `MS` has and a task has not — so
+        one live end is enough, and the entry only blocks when the consumer
+        leaving is the LAST live end. Which cuts both ways, and the second way
+        is the one nothing caught before: a sender walking out on a message
+        whose desk is already retired left it open FOREVER, with nobody able
+        to close it.
+
+        ⚠ The sender is joined only for `peers_only` kinds. On a task
+        `created_by` is a free signature — 'Alfredo' is valid — and resolving
+        it would mean reading a string as if it were an identity. On a kind
+        whose sender may close, the sender is a live consumer by construction:
+        `task_add` refuses it otherwise, precisely so the right to close
+        belongs to somebody findable."""
+        found = []
+        for r in self.cx.execute(
+                "SELECT t.display_id, t.kind, t.peers_only, t.consumer_id, "
+                "       t.created_by, o.name AS owner_name, "
+                "       o.retired_at AS owner_out, s.consumer_id AS sender_id, "
+                "       s.name AS sender_name, s.retired_at AS sender_out "
+                "  FROM v_task t "
+                "  JOIN consumer o ON o.consumer_id = t.consumer_id "
+                "  LEFT JOIN consumer s ON lower(s.name) = lower(t.created_by) "
+                " WHERE t.status = 'pending' "
+                "   AND (t.consumer_id = ? OR (t.peers_only = 1 AND s.consumer_id = ?)) "
+                # By the domain that numbers each kind, which is the order the
+                # kinds were seeded: the sentence reads 'tasks, message'.
+                # Alphabetical on the label would put the message first.
+                " ORDER BY t.domain_id, t.seq", (cid, cid)):
+            entry = {"id": r["display_id"], "kind": r["kind"],
+                     "other": None, "why": None}
+            if not r["peers_only"]:
+                # One end. It only reaches here as the desk's own.
+                found.append(entry)
+                continue
+            if r["consumer_id"] == cid and r["sender_id"] == cid:
+                # Both ends on one name. The door refuses it and so does the
+                # reassignment, so this is unreachable through any tool — but
+                # if it ever exists, the plain refusal is the honest one:
+                # there is no OTHER end to name.
+                found.append(entry)
+                continue
+            if r["consumer_id"] == cid:
+                entry["other"] = r["sender_name"] or r["created_by"]
+                entry["why"] = "retired" if r["sender_id"] else "unresolved"
+                if r["sender_id"] and not r["sender_out"]:
+                    continue        # the sender is alive: they can close it
+            else:
+                entry["other"] = r["owner_name"]
+                entry["why"] = "retired"
+                if not r["owner_out"]:
+                    continue        # the desk is alive: it can close it
+            found.append(entry)
+        return found
+
+    @staticmethod
+    def _post_refusal(name: str, blocking: list) -> str:
+        """The sentence, and it is written to TEACH — which is why it is long.
+
+        Whoever reads it is a chat, and a chat is ephemeral by definition: it
+        learns, it ends, and the next one starts again knowing none of this.
+        So a refusal here is not an error message, it is the only surface that
+        instructs, and it says three things every time — WHAT is open, WHY
+        this entry blocks and another would not, and WHAT GESTURE clears it.
+        A refusal that only counts makes the next chat repeat the gesture."""
+        counts = {}
+        for b in blocking:
+            counts[b["kind"]] = counts.get(b["kind"], 0) + 1
+        what = ", ".join(f"{n} {k}" if n == 1 else f"{n} {k}s"
+                         for k, n in counts.items())
+        said = (f"{name} still has {what}: close them or hand them to whoever takes "
+                "the work over. A desk that ends with post on it loses the post.")
+        # The worked example, and only when there IS one: an entry with two
+        # ends blocks for a reason the count cannot show, so it gets named.
+        two_ended = next((b for b in blocking if b["other"]), None)
+        if two_ended is None:
+            return said
+        why = ("is already retired" if two_ended["why"] == "retired"
+               else "no longer answers to a consumer of this project")
+        return (f"{said} {two_ended['id']} counts because its other end, "
+                f"{two_ended['other']}, {why} and nobody would be left to close it — "
+                f"a {two_ended['kind']} with both ends alive would not have stopped "
+                "you, since either end can close one.")
 
     @staticmethod
     def _valid_email(raw):
@@ -4360,8 +4497,10 @@ class Project:
             if self.cx.execute("SELECT 1 FROM consumer_group WHERE lower(name)=?",
                                (_fold(gname),)).fetchone():
                 raise RulesError(f"{gname}: this project already has a group by that name.")
-            members = [self._consumer_row(m)["consumer_id"]
-                       for m in (fields.get("members") or [])]
+            member_rows = [self._consumer_row(m)
+                           for m in (fields.get("members") or [])]
+            self._no_human_in_audience(member_rows, "members")
+            members = [r["consumer_id"] for r in member_rows]
             if not members:
                 raise RulesError("a group with no members is a name: give it at least one "
                                  "consumer, or do not create it yet.")
@@ -4391,8 +4530,10 @@ class Project:
             before = self._members_of([row["group_id"]])
             after = before
             if "members" in fields:
-                after = {self._consumer_row(m)["consumer_id"]
-                         for m in (fields.get("members") or [])}
+                after_rows = [self._consumer_row(m)
+                              for m in (fields.get("members") or [])]
+                self._no_human_in_audience(after_rows, "members")
+                after = {r["consumer_id"] for r in after_rows}
                 if not after:
                     raise RulesError(
                         "a group emptied of its members is a name pointing at nobody: if "

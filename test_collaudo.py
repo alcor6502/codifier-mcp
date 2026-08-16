@@ -1550,3 +1550,141 @@ equals("moving a task onto a person's desk hands the surface what to post",
 _t2 = p.task_add("advisory", "a typo hree", "a body", "architect")["id"]
 equals("but fixing a title wakes nobody",
        "arrived" in p.task_amend(_t2, by="advisory", title="a typo here"), False)
+
+
+# =====================================================================
+print("\n— THE THREE GUARDS OF 6.2.0 —")
+# Decided in words before any of this was code, and each one is kept here the
+# only way a guarantee can be kept: by having been watched failing first.
+
+
+def _aborted_with(gesture, expect: str) -> bool:
+    """What the DATABASE says when the gesture skips Python altogether.
+
+    `RAISE(ABORT, …)` arrives as sqlite3.IntegrityError, which `refused` would
+    count as a traceback and fail — rightly, since that helper measures what
+    the SURFACE says. Here the point is the opposite one: that the file
+    refuses even with sqlite3 open on it and no engine in the way."""
+    try:
+        gesture()
+        return False
+    except Exception as exc:                       # noqa: BLE001
+        return expect.lower() in str(exc).lower()
+
+
+# ---- 1. THE REFUSAL OF A RETIREMENT SAYS THE TYPES --------------------------
+# `still has 3 open tasks` on a desk holding two tasks and a message sent
+# whoever read it looking for three tasks. The count was never wrong; the noun
+# was, and the noun is what the reader acts on.
+g = project()
+g.task_add("news", "the first", "a body", "architect")
+g.task_add("news", "the second", "a body", "architect")
+g.task_add("news", "a word from advisory", "a body", "advisory", kind="message")
+g.amend_project("consumer", "advisory", "retire", {}, reason="the chat was folded",
+                actor="architect", auth_code=code(g))
+refused("the refusal decomposes the desk by kind instead of calling it all tasks",
+        lambda: g.amend_project("consumer", "news", "retire", {}, reason="done",
+                                actor="architect", auth_code=code(g)),
+        "still has 2 tasks, 1 message")
+
+# ---- 2. A MESSAGE BLOCKS ONLY WHEN THE LEAVER IS THE LAST LIVE END ----------
+# A task has one responsible end; a message has two, because its sender may
+# close it. Both halves of that are cases, and they pull in opposite
+# directions — one lets a retirement through that used to be refused, the
+# other refuses one that used to go through.
+refused("and it names the message that blocks, not just how many there are",
+        lambda: g.amend_project("consumer", "news", "retire", {}, reason="done",
+                                actor="architect", auth_code=code(g)),
+        "MS-0001")
+refused("and it names the other end, which is the reason THIS one blocks",
+        lambda: g.amend_project("consumer", "news", "retire", {}, reason="done",
+                                actor="architect", auth_code=code(g)),
+        "advisory")
+refused("and it says what would NOT have blocked, which is the part that teaches",
+        lambda: g.amend_project("consumer", "news", "retire", {}, reason="done",
+                                actor="architect", auth_code=code(g)),
+        "either end can close one")
+
+# The half that stops refusing: both ends alive, so the desk may go.
+h = project()
+h.task_add("news", "a word from advisory", "a body", "advisory", kind="message")
+allowed("a desk carrying only a message whose sender is alive still retires",
+        lambda: h.amend_project("consumer", "news", "retire", {}, reason="done",
+                                actor="architect", auth_code=code(h)))
+
+# The half that starts refusing, and it is the one nothing caught: the SENDER
+# walking out of a message whose desk is already gone left it open forever.
+refused("the sender of a message cannot walk out when the desk is already retired",
+        lambda: h.amend_project("consumer", "advisory", "retire", {}, reason="done",
+                                actor="architect", auth_code=code(h)),
+        "MS-0001")
+refused("and that refusal names the retired desk as the missing end",
+        lambda: h.amend_project("consumer", "advisory", "retire", {}, reason="done",
+                                actor="architect", auth_code=code(h)),
+        "news")
+# One entry, singular noun: the sentence is composed, not concatenated.
+refused("one entry is spelled in the singular",
+        lambda: h.amend_project("consumer", "advisory", "retire", {}, reason="done",
+                                actor="architect", auth_code=code(h)),
+        "still has 1 message:")
+# And a task's sender is NOT counted: `created_by` there is a free signature,
+# and reading it as an identity would refuse a retirement on a string.
+i = project()
+i.task_add("news", "signed by a person", "a body", "Alfredo")
+allowed("a task's signature is not an end: the name on it retires freely",
+        lambda: i.amend_project("consumer", "advisory", "retire", {}, reason="done",
+                                actor="architect", auth_code=code(i)))
+
+# ---- 3. A PERSON IS NOT AN AUDIENCE ----------------------------------------
+# `rules_list` on a human is REFUSED, not answered empty. So a rule naming one
+# was law in front of somebody who could never read it — and it counted as
+# reached, propping up the very guard that refuses a rule binding nobody.
+j = project()
+refused("a person cannot be created into a group",
+        lambda: j.amend_project("group", "misti", "create",
+                                {"members": ["architect", "Alfredo"]},
+                                actor="architect"),
+        "Alfredo is a person")
+refused("nor amended into one, which is the door the manual forgot",
+        lambda: j.amend_project("group", "deliberativi", "amend",
+                                {"members": ["architect", "Alfredo"]},
+                                auth_code=code(j), actor="architect"),
+        "not an audience")
+refused("nor named in a rule's exceptions",
+        lambda: rule(j, "targeted", groups=["deliberativi"],
+                     exceptions=["Alfredo"], title="a rule for a person"),
+        "not an audience")
+refused("and the refusal says which list to take them out of",
+        lambda: rule(j, "targeted", groups=["deliberativi"],
+                     exceptions=["Alfredo"], title="a rule for a person"),
+        "`exceptions`")
+refused("and where a person is reached instead",
+        lambda: j.amend_project("group", "misti", "create",
+                                {"members": ["Alfredo"]}, actor="architect"),
+        "tasks_list")
+
+# THE SAME GUARANTEE WITH THE ENGINE OUT OF THE WAY. The process runs as root
+# with the database at 644: a guard that lives only in Python is a guard a
+# hand with sqlite3 walks round, which is why the brief/specs ban on a human
+# is a CHECK and not only a refusal.
+k = project()
+_alf = k.cx.execute("SELECT consumer_id FROM consumer WHERE name='Alfredo'").fetchone()[0]
+_grp = k.cx.execute("SELECT group_id FROM consumer_group WHERE name='deliberativi'"
+                    ).fetchone()[0]
+_rul = rule(k, "targeted", groups=["deliberativi"], title="an ordinary rule")
+equals("the database refuses a person in a group with no Python in the way",
+       _aborted_with(lambda: k.cx.execute(
+           "INSERT INTO consumer_group_member (group_id, consumer_id) VALUES (?,?)",
+           (_grp, _alf)), "a person is not an audience"), True)
+equals("and refuses one in a rule's exceptions the same way",
+       _aborted_with(lambda: k.cx.execute(
+           "INSERT INTO rule_audience_exception (rule_id, consumer_id) "
+           "SELECT rule_id, ? FROM v_rule WHERE display_id=?", (_alf, _rul)),
+           "a person is not an audience"), True)
+# And it lets a consumer through, so the trigger is not simply refusing
+# everything: a guard that never says yes is a guard nobody has calibrated.
+equals("while a machine consumer goes into the same table untouched",
+       _aborted_with(lambda: k.cx.execute(
+           "INSERT INTO rule_audience_exception (rule_id, consumer_id) "
+           "SELECT rule_id, (SELECT consumer_id FROM consumer WHERE name='news') "
+           "FROM v_rule WHERE display_id=?", (_rul,)), "person"), False)
