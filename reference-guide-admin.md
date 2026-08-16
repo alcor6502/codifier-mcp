@@ -65,6 +65,26 @@ The project's STRUCTURE — the one door for all of it.
 - **`entity`**: `domain` | `consumer` | `group`.
   **`action`**: `create` | `amend` | `retire` | `revive`.
   **`name`** identifies the thing; **`fields`** carries what changes.
+- **What `fields` may carry, per entity and per action** — and the refusal is
+  where the list is written down, so it is met by getting it wrong:
+  a **domain** is created with `code`, `description`, `reason` and amended with
+  `description` alone; a **consumer** is created with `name`, `kind`, `brief`,
+  `specs`, `secret` and amended with all of those but `kind`; a **group** is
+  created and amended with `name` and `members`.
+- ⚠⚠ **`members` IS THE WHOLE SET, NOT AN ADDITION.** What you pass REPLACES the
+  membership. A group of three amended with one name keeps that one and the
+  other two are OUT — no warning, because from here it is indistinguishable
+  from a group you meant to shrink. **To add somebody, send the members
+  `project_info` shows you PLUS the new one.** The verdict answers with
+  `joined` and `left`, and those two lists are the only place you find out what
+  you actually did: a `left` you did not intend is a group you just emptied.
+- ⚠ **`secret` on a consumer WRITES THAT CONSUMER'S CREDENTIAL**, in clear, on
+  both `create` and `amend`. It is the one door in the world that switches on,
+  replaces or clears the secret with which somebody signs in that consumer's
+  name. Passed empty it CLEARS it, and the name alone is enough again.
+  `project_info` never shows the secret; it shows `signed`, which says only
+  whether there is one — and that is the field a caller reads to know whether
+  its gestures have to be signed at all.
 - **`by`** is YOUR consumer name, spelled as `project_info` spells it, and it is
   REQUIRED. It is the hand the history records: a register that cannot say whose
   gesture a row was answers the wrong question six months later.
@@ -106,6 +126,12 @@ The project's STRUCTURE — the one door for all of it.
   done against: what is FUNDATIVE has no tool, the way what is catastrophic has
   none. Suggest the wording to whoever administers the project; the change is
   theirs. `entity='project'` is refused saying exactly this.
+
+  For when you have to suggest it: **`queue_cap`** is NULL = unlimited,
+  0 = queue closed, N = N, and it governs both the proposal queue and the batch
+  page's action. It exists so the queue is decided before it grows. Knowing what
+  it means is what lets you ask for the right number — writing it is still not
+  yours.
 - **A CONSUMER'S `specs` ARE THAT CONSUMER'S.** `specs` in the call under a
   different name is refused, and the rule has NO exception — not with the admin
   code, not with a one-time code, whatever else rides along in `fields`. The
@@ -152,12 +178,16 @@ The cases nobody guesses:
   is free.
 - **A domain's code is immutable.** Retiring a domain that still has active
   rules is refused, naming them.
-- **A name of a consumer or a group is ONE WORD** — letters, digits, `-` and
-  `_`, no spaces — and the refusal says which mistake you made. Those names are
-  quoted exactly in `groups`, in chat instructions and in scheduled prompts, and
-  a space is the character nobody sees when it is wrong. A PROJECT name keeps
-  its spaces: the folder is the name as spelled, the file is the slug derived
-  from it.
+- **A name of a consumer or a group is ONE WORD** — and there are three ways to
+  get it wrong, not one. The refusal spells the whole shape:
+
+      invalid consumer name '_advisory': letters, digits, '-' and '_', one
+      word, max 41 characters, and it cannot start with a separator
+
+  A space gets its own refusal, because it is the mistake the eye does not
+  find. Those names are quoted exactly in `groups`, in chat instructions and in
+  scheduled prompts. A PROJECT name keeps its spaces: the folder is the name as
+  spelled, the file is the slug derived from it.
 - **Names are amendable, and the OLD NAME STOPS RESOLVING.** Two factors,
   versioned, and the verdict lists what to update outside the registry — skill
   files, chat instructions, scheduled prompts. Nothing out there is updated for
@@ -166,15 +196,18 @@ The cases nobody guesses:
   past that refusal is `revive` — and you cannot revive what you cannot see, so
   the retired are readable from `project_status` and nowhere else.
 - **Creating a group that mirrors a rule's exceptions is refused**, naming the
-  rule. But ADDING a member to a group passes even when it covers a rule's
-  exception: that overlap is repairable, it goes to the status report, and it is
-  refused at the next write on that rule.
+  rule. But a membership that GROWS over a rule's exception passes: that overlap
+  is repairable, it goes to the status report, and it is refused at the next
+  write on that rule.
+- **A group is never empty.** It cannot be created without at least one member,
+  and an amend that would leave it with none is refused: a group that is
+  finished is RETIRED, which costs a reason and says so in the history.
+- **A consumer with entries still open on their desk cannot be retired**, and
+  it is the refusal you meet FIRST — before the one about rules reaching
+  nobody. Close them, or hand them to whoever takes the work over.
 - **A group edit or a consumer retire that would leave a rule in force with ZERO
   effective consumers is refused**, naming the rules. A rule that binds nobody
   is a retirement in disguise.
-- **`queue_cap`**: NULL = unlimited, 0 = queue closed, N = N. It governs both
-  the proposal queue and the batch page's action. It exists so the queue is
-  decided before it grows.
 
 ## rules_amend(project, id, reach, groups, exceptions, expected_version, reason, auth_code, key)
 
@@ -205,6 +238,11 @@ required: there is no partial call here.
   you never saw.
 - **`reason`** is what the history will carry. It is not the rule's `reason`,
   which is immutable: it is why the perimeter moved.
+- ⚠ **The HAND the history records here is the constant `admin`, not you.**
+  This command takes no `by`: whoever narrowed the rule, the row reads `admin`,
+  and the only account of who it actually was is the `reason` you write. So
+  write it as though it were the only record, because it is. (`project_amend`
+  is the door that learned this lesson already, which is why it asks for `by`.)
 
 ## rules_retire(project, id, reason, auth_code, key)
 
@@ -215,6 +253,9 @@ the way back is a proposal and a human approval, and the ID never comes back.
   and the approval retires the old rule inside the same decision. One gesture,
   one decision, and the succession is recorded as a field of the row.
 - **`reason`** is required.
+- ⚠ **The hand recorded is the constant `admin`**, here as on `rules_amend`:
+  this command takes no `by` either, so your `reason` is the only account of
+  who ended the rule and why.
 - Retirement is a STATE, not a type: nothing is deleted, and the rule stays
   readable through its history.
 - After it, citations pointing at it start being refused, and the ones already
@@ -247,11 +288,23 @@ reports; it does not correct. One factor.
 
 ## rules_export(project, key, consumer='', expand=False)
 
-The corpus in one call, for a migration or a review. One factor.
+The rules IN FORCE, in one call, for a migration or a review. One factor.
 
+- ⚠ **It is not the full corpus, and the word is worth pinning:** `active`
+  only. What is proposed, denied, retired or superseded is NOT in here. A
+  migration built on this export carries the law and loses everything that
+  explains it — read `project_status` and `rules_get(history=True)` for the
+  rest.
+- ⚠ **It carries the PROJECT'S profile** — its brief and its specs, at the head
+  of the markdown, before the first rule. That is usually what you wanted; it
+  is never what you expected, and it is the reason an export is not something
+  to paste somewhere without reading the top of it.
 - **`consumer`** narrows it to what reaches one desk; **`expand=True`** renders
   the citations with their current titles and states instead of leaving the
   bare IDs.
+- **On a `human` it is REFUSED**, not answered with an empty corpus — the same
+  refusal `rules_list` gives, on purpose: a guarantee that holds on one of two
+  doors is not a guarantee.
 - ⚠ **Mind your client's result cap, not this service's**: this is the tool that
   meets it first. Over that cap the result stops being data and becomes a file
   path — useful only if that file lands where your code runs. Narrow with

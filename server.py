@@ -525,9 +525,19 @@ def rules_get(project: str, ids: list[str], consumer: str,
     read. A rule's story is the why of what binds you, so it is at this gate
     and not behind the admin code.
 
+    `consumer` is a NAME CHECK and nothing else: an unknown name is refused, a
+    known one changes not one field of the answer. ⚠ It does not mark what
+    reaches you — that is `rules_list`. This door reads a rule whoever asks,
+    because a rule you are not bound by is still one you may have to read.
+
     Two ceilings of different natures: more IDs than the cap are REFUSED, not
     trimmed — whoever asked for thirty wanted thirty — and past the byte
-    ceiling the text truncates and says so."""
+    ceiling it truncates and says so. ⚠ AND WHAT TRUNCATES IS THE LIST, NEVER
+    THE TEXT: the rule that would cross the ceiling does not arrive, and
+    neither does anything after it, so a short answer is short and never
+    abridged. The first rule always arrives whole. An ID that was never defined
+    comes back in `not_found`, and both notes travel together when a call has
+    unknown IDs AND a cut."""
     return _project(project).get_rules(ids, consumer, history)
 
 
@@ -566,9 +576,20 @@ def rules_propose(project: str, domain: str, type: str, title: str, body: str,
     the named rule inside the same decision. Declare the heir's audience
     yourself: a supersede is where the perimeter is re-decided, not inherited.
 
-    CITATIONS in prose are an ID in round brackets, four digits, `(VA-0002)`.
-    Anything else is refused naming the field and the token — nothing is
-    corrected, no number is spent and no queue slot is taken.
+    CITATIONS in prose are an ID in round brackets, four digits, `(VA-0002)`,
+    and they are checked in FOUR fields — `title`, `body`, `reason` and
+    `source` — through one door, because a `reason` that could carry what a
+    `body` cannot is the same hole under another name. Anything else is refused
+    naming the field and the token: nothing is corrected, no number is spent
+    and no queue slot is taken.
+
+    THREE REFUSALS YOU CAN ONLY MEET BY ARRIVING AT THEM, so they are here: the
+    prefixes that number the log are RESERVED and a proposal into one is
+    refused — they are not in the legend and `project_info` does not show them;
+    the QUEUE has a per-project ceiling and a full one is refused with the
+    titles of what is waiting, because the ceiling exists so whoever approves
+    reads what they tick; and a rule already claimed by a pending `supersedes`
+    cannot be claimed twice.
 
     `consumer_key` is only for a consumer that has been given a secret; where
     none is set, the name is enough.
@@ -600,7 +621,24 @@ def tasks_add(project: str, consumer: str, title: str, body: str,
     afterwards, because a door that let the receiver clear it would put the
     lever in the hand of the one with an interest in clearing it.
 
-    A TASK IS A CHANNEL WITH TWO READERS — the desk it sits on and the hand
+    `kind` IS WHAT YOU OPEN. Left out you get a task, exactly as before, so
+    every call written before kinds existed still means what it meant. Pass
+    `'message'` and you get one instead — `MS-0001`, a numbering of its own,
+    and THE SENDER MAY CLOSE IT. A message is for a condition that DECAYS: the
+    reminder stops because the thing happened, and whoever sent it is usually
+    the one who finds out. Two guards come with it, and both are about the
+    CLOSING rather than the opening — the sender must be a live consumer of
+    this project, spelled as the registry spells it, and the desk must be
+    somebody else. A word that is not a kind is refused with the list of the
+    ones that are.
+
+    ⚠ A MESSAGE IS NOT A PUSH NOTIFICATION. A chat sees its desk when it
+    starts, and between two starts a day can pass: one opened and closed in
+    between is one nobody will ever see, and that is correct. For something
+    that has to be read regardless, open a TASK.
+
+    A TASK IS A CHANNEL WITH TWO READERS
+ — the desk it sits on and the hand
     that opened it — and that makes it two things rather than one. It is a
     MESSAGE between chats: `look at this proposal and tell me what you think`,
     and an open proposal may be cited in the body for exactly that. It is also
@@ -610,8 +648,13 @@ def tasks_add(project: str, consumer: str, title: str, body: str,
     name for it.
 
     Opening one for a HUMAN who carries an address POSTS IT TO THEM, since
-    5.0.0 — a knock on the door with the ID and the sender, never the text: the
-    work is read in the register. A human without an address is not written to,
+    5.0.0 — WITH ITS TEXT: the ID and the title in the subject, and in the
+    message the project, who sent it, the body itself and a footnote saying
+    where it is answered. It was a knock on the door and nothing more until
+    5.0.3, and that argument was written by somebody not reading these on a
+    tablet — a person who has to open a register to find out whether a thing
+    matters opens it late. The markdown arrives RAW, and past 4000 characters
+    the text is cut at the end. A human without an address is not written to,
     and neither is anybody if the container has no SMTP host: the two ways to
     be quiet are both absences, and there is no switch. The verdict says which
     happened, because a notification nobody can confirm is a notification
@@ -639,9 +682,20 @@ def tasks_list(project: str, consumer: str, query: str = "", since: str = "",
                until: str = "", authored: bool = False) -> dict:
     """One desk, short form, ordered by the server: urgent first, then oldest —
     so when the cap cuts, it cuts the FRESH work and never the thing that has
-    been waiting. Recently closed tasks trail the list; `since`/`until` open
-    the window on the older closed ones. `query` filters and returns the
-    fragment.
+    been waiting. Every row carries its `kind`: a desk holds tasks and messages
+    together, and this is where they are told apart. `query` filters and
+    returns the fragment.
+
+    ⚠ `since`/`until` DO NOT WIDEN THIS LIST — THEY REPLACE IT. The window
+    filters on the CLOSING date and a pending entry has none, so a call
+    carrying either one comes back with the open list EMPTY and closed entries
+    only. It is an archive query, not a reading of the desk: to see both, call
+    twice.
+
+    Closed entries trail the list for a RECENCY window and then stop showing
+    up. They are not gone — they are asked for by date. ⚠ And that window is a
+    SECOND one: it is not the staleness window, it is a setting of its own, and
+    the two agreeing today is not a promise.
 
     `authored=True` turns the view round: the tasks THIS consumer opened on
     other desks, with status and outcome. This is the SECOND READING of the
@@ -651,34 +705,60 @@ def tasks_list(project: str, consumer: str, query: str = "", since: str = "",
 
     A task pending for more than the staleness window comes out MARKED, and
     that is all: tasks do not expire. Truncation is always declared with the
-    real total."""
+    real total — on the open list and on the closed one alike."""
     return _project(project).task_list(consumer, query, since, until, authored)
 
 
 @tool
 def tasks_get(project: str, ids: list[str]) -> dict:
-    """Full bodies for the tasks you name, citations expanded — a broken
-    pointer is named inside the text, never refused.
+    """Full bodies for the entries you name, citations expanded — a broken
+    pointer is named inside the text, never refused. Each one carries its
+    `kind`, so a message read in full says that it is one.
 
-    It reads ANY task of the project, deliberately: reads are project-wide and
+    It reads ANY entry of the project, deliberately: reads are project-wide and
     the boundary is the reference code. That is what makes the `authored` view
-    and an audit possible at all. The two ceilings are `rules_get`'s: too many
-    IDs is refused, too many bytes truncates and says so."""
+    and an audit possible at all. ⚠ An EMPTY list of IDs is refused, not
+    answered empty: there is no such thing as reading nothing on purpose.
+
+    The two ceilings are `rules_get`'s: too many IDs is refused, too many bytes
+    truncates and says so. ⚠ AND WHAT TRUNCATES IS THE LIST, NEVER THE TEXT.
+    The entry that would cross the ceiling does not arrive, and neither does
+    anything after it — so a short answer is short, never abridged, and no body
+    ever comes back cut off mid-sentence. The FIRST entry always arrives whole
+    however big it is, because a call that answered nothing would be worse than
+    one that answered once. The cut is declared with the count."""
     return _project(project).task_get(ids)
 
 
 @tool
 def tasks_close(project: str, id: str, by: str, outcome: str = "",
                 reason: str = "", consumer_key: str = "", key: str = "") -> dict:
-    """Close a task: ONE gesture, two verdicts. `outcome` completes it,
-    `reason` drops it — exactly one of the two, and the guarantee is the
-    schema's CHECK, not this docstring. Closed is closed: no amend, no reopen.
+    """Close an entry of the log: ONE gesture, two verdicts. `outcome`
+    completes it, `reason` drops it — exactly one of the two. Closed is closed:
+    no amend, no reopen.
 
-    Closing a task you do not own takes the ADMIN CODE in `key`, and the
+    ⚠ ON A MESSAGE THE OUTCOME MAY BE LEFT OUT, and the asymmetry is
+    deliberate. Send neither and it closes `completed`, with a line the engine
+    writes itself — who closed it and when, and never why: it did not see a
+    condition clear, it saw somebody press close. `reason` has no default and
+    never will, because dropping something is a DECISION, and that sentence is
+    the one line that explains a hole six months later. On a TASK neither is
+    optional.
+
+    ⚠ AND A MESSAGE IS CLOSED BY ITS DESK **OR BY THE ONE WHO SENT IT** — the
+    only power a message has that a task does not, and the whole reason the
+    kind exists: the skill that raised a condition is the one that sees it
+    decay. Anybody else still needs the admin code.
+
+    Closing something you do not own takes the ADMIN CODE in `key`, and the
     refusal names the owner and the gate. It is the one declared exception to
     the flat ladder — one factor, not two — because a task closed wrong reopens
-    as a new task, while a rule retired wrong loses its ID and its
-    continuity."""
+    as a new task, while a rule retired wrong loses its ID and its continuity.
+
+    ⚠ The «exactly one» is enforced HERE, in Python. The schema's CHECK is
+    weaker than it reads — it forbids a closure with NEITHER, not one with
+    both — and until 6.1.0 this docstring pointed at it, sending whoever went
+    looking for the guarantee to the wrong place."""
     admin = bool((key or "").strip())
     prj = _admin(project, key) if admin else _project(project)
     return prj.task_close(id, by, outcome=outcome, reason=reason,
@@ -688,7 +768,16 @@ def tasks_close(project: str, id: str, by: str, outcome: str = "",
 @tool
 def tasks_amend(project: str, id: str, by: str, title: str = "", body: str = "",
                 consumer: str = "", consumer_key: str = "", key: str = "") -> dict:
-    """Amend an OPEN task: title, body, or `consumer` to hand it to the right
+    """⚠ REASSIGNING IS AN ARRIVAL, and it is posted like one: moving a task
+    onto the desk of a HUMAN who carries an address emails them, and `posted`
+    says whether it went. Until 6.1.0 it did not, and for a person that meant
+    never — they call no tool and do not go and look, so the post is the only
+    channel there is. The gesture that corrects a wrong desk was the one that
+    silenced the notice. ⚠ Only a change of DESK posts: fixing a typo in a
+    title wakes nobody, and the desk it leaves is not written to — the register
+    never posts a subtraction.
+
+    Amend an OPEN task: title, body, or `consumer` to hand it to the right
     desk — the reassignment is named in the story, which keeps both owners.
     Only what you pass changes.
 
@@ -697,8 +786,25 @@ def tasks_amend(project: str, id: str, by: str, title: str = "", body: str = "",
     do not own takes the admin code in `key`, like closing one."""
     admin = bool((key or "").strip())
     prj = _admin(project, key) if admin else _project(project)
-    return prj.task_amend(id, by, title=title, body=body, consumer=consumer,
-                          consumer_key=consumer_key, admin=admin)
+    out = prj.task_amend(id, by, title=title, body=body, consumer=consumer,
+                         consumer_key=consumer_key, admin=admin)
+    # A REASSIGNMENT IS AN ARRIVAL, and it is posted like one — same shape as
+    # `tasks_add`, after the write and outside its transaction, so an
+    # unreachable mail host cannot turn an amendment into a failed gesture.
+    # ⚠ Only when the DESK changed: an amendment that fixes a typo in a title
+    # must wake nobody. The old owner is not written to either — the register
+    # never posts a subtraction.
+    # ⚠ Key access and `del`, never `.pop()`: the shape check binds this name to
+    # the engine door it came from, so a method call on it reads as a call into
+    # the engine — and that check is right to be blunt. `tasks_add` writes its
+    # verdict the same way.
+    arrived = out["arrived"] if "arrived" in out else None
+    if arrived:
+        del out["arrived"]
+        out["posted"] = mail.task_opened(mailer, prj, out["id"], out["owner"],
+                                         by, arrived["title"], arrived["body"],
+                                         kind=out["kind"])
+    return out
 
 
 # =====================================================================
@@ -758,11 +864,25 @@ def project_amend(project: str, entity: str, name: str, action: str,
     naming the field that needs the higher port. The authorised subset is never
     written and the rest dropped: one gesture, one door, no silent halves.
 
+    ⚠ `members` IS THE WHOLE SET, NOT AN ADDITION. What you pass REPLACES the
+    membership: a group of three amended with one name keeps that one, and the
+    other two are out. To add somebody, send the members `project_info` shows
+    you PLUS the new one. The verdict says who `joined` and who `left`, and
+    that pair is the only place the damage shows.
+
+    ⚠ `secret` on a consumer WRITES THAT CONSUMER'S CREDENTIAL. It is the one
+    door in the world that switches on, replaces or clears the secret with
+    which somebody signs in that consumer's name; passed empty it clears it,
+    and the name alone is enough again.
+
     The guarantees live in the schema and this door repeats them speaking: a
     domain's code is immutable; retiring a domain with rules in force is
-    refused naming them; retiring anything costs a reason; creating a group
-    that mirrors a rule's exceptions is refused naming the rule, while ADDING a
-    member passes even when it covers one — that overlap is repairable, so it
+    refused naming them; retiring anything costs a reason; retiring a consumer
+    who still has entries open on their desk is refused, and it is the refusal
+    met first; a group is never created empty and never emptied by an amend —
+    a group that is finished is RETIRED, which costs a reason. Creating a group
+    that mirrors a rule's exceptions is refused naming the rule, while a
+    membership that GROWS over one passes — that overlap is repairable, so it
     goes to `project_status` and is refused at the next write on that rule. A
     group edit or a consumer retire that would leave a rule in force with ZERO
     consumers is refused naming the rules: that damage is silent. Names of
@@ -864,7 +984,13 @@ def project_status(project: str, key: str) -> dict:
 @tool
 def rules_export(project: str, key: str, consumer: str = "",
                  expand: bool = False) -> dict:
-    """The full corpus in one call, for a migration or for reading off-site.
+    """The corpus IN FORCE in one call, for a migration or for reading
+    off-site. ⚠ `active` ONLY: proposals, retired and denied rules are not in
+    it, and a migration built on this export leaves them behind. It called
+    itself «full» until 6.1.0. It also carries the PROJECT'S own brief and
+    specs, which neither manual mentioned: an export is the identity of the
+    project plus its law, and it leaves the building.
+
     `consumer` narrows it to one perimeter; `expand` inlines the titles of the
     cited rules.
 
@@ -878,9 +1004,13 @@ def tasks_overview(project: str, key: str) -> dict:
     """Every desk at once, short form, ceilings declared — the cross-view that
     lets an audit route work to the owner who can do it.
 
-    It also counts the urgent tasks BY CREATOR, and that is the guard against
-    urgency inflation: if one creator's column is all urgent, what gets
-    corrected is that skill, not the tasks it filed. Reading it moves nothing:
+    ⚠ IT COUNTS THE URGENT ONES PER DESK, NOT PER CREATOR. This docstring
+    said per creator until 6.1.0 and described a guard against urgency
+    inflation that the code has never had: `created_by` sits on each row and is
+    aggregated nowhere, and the row list is capped, so it cannot be rebuilt by
+    hand either. A desk whose column is all urgent still tells you something —
+    but who filed them does not come from here.
+ Reading it moves nothing:
     no counter, no timestamp."""
     return _admin(project, key).task_overview()
 

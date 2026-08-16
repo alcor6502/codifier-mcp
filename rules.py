@@ -79,7 +79,7 @@ from datetime import datetime, timedelta, timezone
 # and both are alarms about the world outside this process.
 log = logging.getLogger("codifier-mcp.registry")
 
-VERSION = "6.0.1"
+VERSION = "6.1.0"
 
 # The GENERATION of the schema, and it is a number the database carries in
 # `PRAGMA user_version`. It exists because of a thing that was seen live at
@@ -3207,8 +3207,12 @@ class Project:
                              "not a formatting refusal: those rules are not here.")
         if cut:
             res["truncated"] = True
-            res["note"] = (f"cut at {GET_BYTES} bytes: {len(out)} of {len(ids)} read. "
-                           "Ask for the rest in a second call.")
+            # APPENDED, never assigned: a call that has BOTH unknown IDs and a
+            # byte cut used to lose the first note under the second, and the
+            # caller was told the smaller half of what happened.
+            cut_note = (f"cut at {GET_BYTES} bytes: {len(out)} of {len(ids)} read. "
+                        "Ask for the rest in a second call.")
+            res["note"] = f"{res['note']} {cut_note}" if res.get("note") else cut_note
         return res
 
     # =================================================================
@@ -4018,6 +4022,18 @@ class Project:
             return {"entity": "domain", "action": "created", "code": code}
 
         row = self._domain_row(name, live=False)
+        if row["reserved"]:
+            # ⚠ THE TRIGGER ALREADY REFUSES THIS, and that was the whole defect:
+            # `trg_domain_reserved_frozen` raises inside SQLite, so what came
+            # back was an IntegrityError — which is neither RulesError nor
+            # RulesFault, so the decorator converted nothing. The caller got a
+            # traceback and the log got no `refused` line at all. A guarantee
+            # enforced only by the database is a guarantee the surface cannot
+            # SPEAK, and a traceback is a bug, not an answer.
+            raise RulesError(
+                f"{row['code']} is reserved: it numbers this project's log, and "
+                f"{' and '.join(RESERVED_CODES)} belong to the engine. They are seeded, "
+                "not declared, and no hand amends, retires or revives them.")
         if action == "amend":
             desc = self._prose("description", fields.get("description") or "")
             with gesture():
@@ -4661,6 +4677,16 @@ class Project:
         be aimed."""
         if consumer:
             c = self._consumer_row(consumer)
+            if c["kind"] == "human":
+                # THE SAME REFUSAL `rules_list` gives, and it has to be the same
+                # on both doors: a guarantee that holds on one of two ways in is
+                # not a guarantee. An empty export of a person's perimeter reads
+                # as a project with no rules in it — which is the exact sentence
+                # the other door exists to avoid.
+                raise RulesError(
+                    f"{c['name']} is a human, and this call is refused rather than "
+                    "answered empty: no rule binds a person through this registry, so an "
+                    "empty corpus here would read as a project with nothing in it.")
             rows = [t[0] for t in sorted(self._reaching(c["consumer_id"]).values(),
                                          key=lambda t: t[0]["display_id"])]
         else:
@@ -4887,8 +4913,14 @@ class Project:
             if twin is not None:
                 # It does not PUNISH the repeat, it absorbs it: a recurring
                 # audit that finds the same thing again is reporting it again.
-                return {"id": twin["display_id"], "owner": owner["name"],
-                        "already_open": True,
+                #
+                # ⚠ `kind` IS ON THIS BRANCH TOO, and it repairs the same
+                # asymmetry `task_get` had: the ordinary verdict named the kind
+                # and the absorbed repeat did not, so the one answer that hands
+                # back a row the caller did not just write was the one that
+                # would not say what that row is.
+                return {"id": twin["display_id"], "kind": kind_row["label"],
+                        "owner": owner["name"], "already_open": True,
                         "note": "same idem_key, same desk, still open: this is the task "
                                 "that was already there, not a twin."}
         with self._transaction():
@@ -4973,12 +5005,24 @@ class Project:
         res = {"project": self.name, "consumer": c["name"],
                "view": "authored" if authored else "desk",
                "open": out, "open_count": total,
-               "closed_recent": closed_out[:TASKS_LIST_CAP]}
+               "closed_recent": closed_out[:TASKS_LIST_CAP],
+               "closed_count": len(closed_out)}
+        notes = []
         if total > len(out):
             res["truncated"] = True
-            res["note"] = (f"{total} open and the first {TASKS_LIST_CAP} are here: the cut "
-                           "falls on the FRESH work, because the oldest is what the desk "
-                           "owes.")
+            notes.append(f"{total} open and the first {TASKS_LIST_CAP} are here: the cut "
+                         "falls on the FRESH work, because the oldest is what the desk "
+                         "owes.")
+        if len(closed_out) > TASKS_LIST_CAP:
+            # ⚠ THIS CUT USED TO BE SILENT, while both the docstring and the card
+            # promised that truncation is always declared with the real total.
+            # A list cut without saying so is a SHORT LIST — and the reader who
+            # believes the promise concludes that nothing else was ever closed.
+            res["truncated"] = True
+            notes.append(f"{len(closed_out)} closed in the window and the most recent "
+                         f"{TASKS_LIST_CAP} are here: ask by date for the rest.")
+        if notes:
+            res["note"] = " ".join(notes)
         if q:
             res["query"] = q
             for d, r in zip(out, sorted(pending, key=self._task_order)):
@@ -5011,16 +5055,18 @@ class Project:
                 # looking for a row that is sitting right there.
                 rule = self._rule_row(tid)
                 if rule is not None:
+                    codes = sorted({k["code"] for k in self._kinds().values()})
                     raise RulesError(
-                        f"{rule['display_id']} is a RULE, not a task: read it with "
-                        "rules_get. Tasks are TK-NNNN.") from None
+                        f"{rule['display_id']} is a RULE, not an entry of the log: read "
+                        f"it with rules_get. The log is "
+                        f"{' or '.join(c + '-NNNN' for c in codes)}.") from None
                 raise
             if row is None:
                 missing.append(self._norm_task_id(tid))
                 continue
             if cut:
                 continue
-            d = {"id": row["display_id"], "title": row["title"],
+            d = {"id": row["display_id"], "kind": row["kind"], "title": row["title"],
                  "body": self._expand(row["body"]),
                  "owner": self.cx.execute("SELECT name FROM consumer WHERE consumer_id=?",
                                           (row["consumer_id"],)).fetchone()[0],
@@ -5148,8 +5194,8 @@ class Project:
             raise RulesError(f"{row['display_id']} is {row['status']}: closed is closed.")
         if not admin and _fold(who) != _fold(owner["name"]):
             raise RulesError(
-                f"{row['display_id']} belongs to {owner['name']}: amending somebody else's "
-                "task takes the admin code in `key`.")
+                f"{row['display_id']} belongs to {owner['name']}: amending somebody "
+                f"else's {self._kind_of(row)['label']} takes the admin code in `key`.")
         signer = self.cx.execute("SELECT * FROM consumer WHERE lower(name)=?",
                                  (_fold(who),)).fetchone()
         if signer is not None:
@@ -5157,6 +5203,17 @@ class Project:
         new_owner = owner
         if (consumer or "").strip():
             new_owner = self._consumer_row(consumer)
+            kind_row = self._kind_of(row)
+            if kind_row["peers_only"] and _fold(new_owner["name"]) == _fold(
+                    row["created_by"] or ""):
+                # The SAME guard `task_add` applies, applied again here — because
+                # a rule enforced at the door and not at the window is a rule
+                # with a way round it: handing a message to its own sender
+                # produces exactly the state the opening refuses.
+                raise RulesError(
+                    f"a {kind_row['label']} goes to somebody ELSE: {new_owner['name']} "
+                    "sent this one. Handing it back to its own sender would make it a "
+                    "note to itself, which the opening refuses.")
         new_title = self._task_prose("title", title) if (title or "").strip() \
             else row["title"]
         new_body = self._task_prose("body", body) if (body or "").strip() else row["body"]
@@ -5170,9 +5227,19 @@ class Project:
                 "WHERE task_id=?",
                 (new_title, new_body, new_owner["consumer_id"], who, _now(),
                  row["task_id"]))
-        out = {"id": row["display_id"], "owner": new_owner["name"], "by": who}
+        out = {"id": row["display_id"], "kind": self._kind_of(row)["label"],
+               "owner": new_owner["name"], "by": who}
         if new_owner["consumer_id"] != owner["consumer_id"]:
             out["reassigned_from"] = owner["name"]
+            # WHAT THE SURFACE NEEDS TO POST, and nothing it could not see for
+            # itself. A desk that CHANGES hands is an arrival for whoever
+            # receives it — and for a person it is the only arrival there is,
+            # because a human calls no tool and does not go and look. Until
+            # 6.0.1 a task moved onto their desk reached them never: the very
+            # gesture that corrects a wrong desk was the one that silenced the
+            # notice. The engine still opens no socket — it says what is on the
+            # row, and the surface posts after the commit.
+            out["arrived"] = {"title": new_title, "body": new_body}
         return out
 
     def task_overview(self) -> dict:

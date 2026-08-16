@@ -107,11 +107,24 @@ may ask for. With `name` it serves ONE card and nothing else.
 The technical structure of the project, and only what is ALIVE in it: the
 domains with their gloss, the consumers with kind, brief and specs, the groups
 with their live members, and three counts. Retired names are not here at all —
-they are readable only from the administration side.
+they are readable only from the administration side. The domains that number
+the log are not here either: this is a list of places a rule can be FILED, and
+those are not places.
 
 **Do this first, with `rules_list`:** find your own consumer name in the list,
 spelled exactly. A misspelt or retired role fails later in ways that look like
 something else.
+
+- ⚠ **Every consumer carries `signed`**, and it is the field to read before you
+  write anything in somebody's name: `true` means that consumer's gestures have
+  to be signed as well as addressed, `false` means the name alone is enough.
+  The secret itself never leaves the database — `signed` says only whether
+  there is one, and which of the two worlds you are in.
+- **A `human`'s row is a DIFFERENT SHAPE**, and the payload says so rather than
+  showing two nulls: no `brief` and no `specs` — they have no mandate by
+  construction — and in their place `posted_to`, whether an address is on the
+  row, and `approver`, whether the project's proposals are announced to them.
+  The address itself is not here: it is not a working chat's business.
 
 - The refusal you will meet if the code is wrong, and it is ONE answer for four
   different mistakes — nothing passed, the project's NAME instead of its code, a
@@ -147,6 +160,20 @@ The session-start call, and the one that answers *what binds me right now*.
   It is never dropped in silence, because a missing field reads like an empty
   project. If a skill needs something out of the project's profile, that thing
   belongs in the skill's own brief, or the job belongs to a chat.
+- ⚠ **ON A `human` THIS CALL IS REFUSED, not answered empty** — and it is worth
+  knowing before it happens, because this is the call a session opens with:
+
+      alfredo is a human, and this call is refused rather than answered empty:
+      no rule binds a person through this registry — one that does says so in
+      its body — so an empty list here would read as a project with no rules
+      in it.
+
+  Their desk is real and `tasks_list` reads it. Nothing is broken: a person is
+  bound by rules the way anybody is, and where a rule means to bind them it
+  says so in its own body.
+- **The list stops at 50 rules**, and says the real total when it cuts, with
+  what to do about it — narrow with `query`, or read them by ID. `count` is
+  always the true number reaching you, not the number of lines you got.
 - A consumer name that is not in the registry is refused naming the live ones.
 
 ## rules_get(project, ids, consumer, history=False)
@@ -164,8 +191,12 @@ Rules in full, up to **10** at a time.
   only the fields that changed — including the version number, which is what
   whoever administers the project will be asked for before they can move the
   rule's perimeter.
-- **`consumer`** is who is asking: it is what lets the answer say whether the
-  rule reaches you.
+- **`consumer`** is who is asking, and it is a NAME CHECK and nothing more: a
+  name the registry does not know is refused, a name it knows changes not one
+  field of the answer. ⚠ It does **not** mark which rules reach you — that is
+  `rules_list`, which is the call built to answer it. This one reads a rule
+  whoever asks, on purpose: a rule you are not bound by is still one you may
+  have to read.
 - The short form resolves on a read — `VA-02` finds `VA-0002` — so an old text
   does not have to be rewritten to be followed.
 - More than ten IDs is refused, not trimmed:
@@ -174,8 +205,17 @@ Rules in full, up to **10** at a time.
       trimmed, because a silent cut answers a question you did not ask.
       Split the batch.
 
-- An ID that was never defined comes back in `missing`, not as an error: asking
-  about a rule that turns out not to exist is a legitimate question.
+  An EMPTY list is refused too: there is no reading nothing on purpose.
+- **There is a second ceiling, in bytes — 60000 — and it behaves differently.**
+  Where the ID ceiling refuses, this one TRUNCATES and says so. ⚠ And it drops
+  **whole rules, never text**: the rule that would cross the line does not
+  arrive, and neither does anything after it, so what comes back is a SHORT
+  LIST of complete rules and never a body cut off in the middle. The first rule
+  always arrives whole however big it is. Ask for the rest in a second call.
+- An ID that was never defined comes back in **`not_found`**, not as an error:
+  asking about a rule that turns out not to exist is a legitimate question. Both
+  things can happen in one call — unknown IDs and a byte cut — and the `note`
+  then carries both sentences, one after the other.
 
 ## rules_propose(project, domain, type, title, body, reason, reach, proposed_by, groups=[], exceptions=[], supersedes='', source='', consumer_key='')
 
@@ -185,7 +225,11 @@ web page no chat can reach. File it and forget it — the outcome is in
 
 There is **no `id` parameter**. You give the `domain` — two uppercase letters
 the project has declared — and the registry assigns the next number in it, four
-digits, up to **9999** per domain. A number is not a choice, it is a position in
+digits, up to **9999** per domain. ⚠ **The prefixes that number the log are
+RESERVED and a proposal into one is refused**: they are not in the legend, and
+`project_info` does not show them, so this is a constraint you meet by walking
+into it. A rule numbered like an entry of the log could not be told apart from
+one. A number is not a choice, it is a position in
 a sequence, and the one you were given comes back in the verdict. Numbers are
 assigned in order of ARRIVAL, not of calling: five proposals in flight come back
 numbered in any order, so a batch that has to read in order is filed one at a
@@ -213,7 +257,13 @@ The arguments that do not explain themselves:
   proposals cannot claim the same victim.
 - **`source`** is free text: where the thing came from.
 
-⚠ **Citations in `body` and `reason`.** A rule cites a RULE, never a task. And
+⚠ **Citations are checked in FOUR fields — `title`, `body`, `reason` and
+`source`** — through one door, with no exceptions: a `reason` that could carry
+what a `body` cannot would be the same hole under a different name. So a title
+with a bare `VE-05` in it is refused exactly as a body would be, and that is
+the one people do not see coming.
+
+A rule cites a RULE, never a task. And
 in the body of a rule, a citation points at something that can still be used —
 that means one thing only: a rule **in force**. A proposal has no number worth citing
 yet — file the cited rule, let it be approved, then file the one that cites it —
@@ -244,8 +294,10 @@ is two rules.
 
 ## tasks_add(project, consumer, title, body, created_by, urgent=False, idem_key='', consumer_key='', kind='')
 
-Put work on a desk — yours or anybody's. Opening one for another desk is the
-point of the log, and it is free.
+Put work on a desk — yours or any LIVE consumer's. Opening one for another desk
+is the point of the log, and it is free. ⚠ A RETIRED name is refused, not
+queued: a desk that has ended is a desk nothing reaches, and a task filed there
+would be work nobody is going to see.
 
 **A task is a channel with two readers**, the desk it sits on and the hand that
 opened it, and that makes the log two things: a message between chats (*look at
@@ -258,8 +310,12 @@ whether another chat did the work — read it back with `tasks_list(authored=Tru
 - **`urgent`** belongs to whoever creates the task, for good. The owner cannot
   clear it.
 - **`idem_key`** is how a retried call does not become twins: same key, same
-  desk, and you get the existing task back with `already_open: true` instead of
-  a second one. Use it whenever you might be re-running.
+  desk, and you get the existing entry back with `already_open: true` and its
+  `kind`, instead of a second one. Use it whenever you might be re-running.
+  ⚠ **The twin has to still be OPEN.** The key absorbs a repeat, it does not
+  remember one: once the first entry is closed the same key opens a NEW one —
+  which is what a recurring audit wants, because finding the same thing again
+  after it was dealt with is a new finding.
 - **`kind`** is what you open. Left out, you get a **task**, exactly as before.
   Pass `'message'` and you get one of those instead — `MS-0001`, its own
   numbering, and **the sender may close it**. A word that is not a kind is
@@ -318,15 +374,27 @@ closes it.
 One desk, short form, ordered by the server: **urgent first, then the oldest**.
 So when the cap cuts, it cuts the fresh work. Recently closed ones trail.
 
+**Tasks and messages sit on the same desk and arrive in the same list**, and
+every row carries its `kind`. This is where they are told apart — the ID says
+it too, but the field is the one to branch on.
+
 - **`authored=True`** turns the call around: the tasks YOU opened on other
   desks, with status and outcome. That is the channel's second reading — check
   it before re-sending a reminder, and use it to learn a task was closed without
   asking anybody.
-- **`since` / `until`** open the window on the older closed ones. Days, not
-  times.
+- ⚠ **`since` / `until` DO NOT WIDEN THIS LIST — THEY REPLACE IT.** The window
+  filters on the CLOSING date, and something still open has not got one: a call
+  carrying either one comes back with the open list EMPTY and closed entries
+  only. It is an archive query, not a reading of the desk. To see both, call
+  twice. Days, not times.
 - **`query`** filters by text.
-- The list stops at **50** items and says the real total when it cuts, so a
-  truncated list never looks like a short one.
+- The list stops at **50** items — the open ones and the closed ones each — and
+  says the real total when it cuts, so a truncated list never looks like a
+  short one.
+- **Closed entries trail the list for a RECENCY window** and then stop showing
+  up. They are not gone: they are asked for by date, with `since`/`until`.
+  ⚠ That window is a SECOND one, and it is not the staleness window below —
+  two settings that agree today and are not promised to.
 - Tasks **do not expire**. One pending for more than **30** days comes out
   MARKED, and that is all: a deadline nobody set is not a deadline, and a task
   that vanished on a timer is work nobody decided to drop. Since 5.0.0 rules
@@ -352,12 +420,19 @@ So when the cap cuts, it cuts the fresh work. Recently closed ones trail.
 
 ## tasks_get(project, ids)
 
-Tasks in full — title, body, owner, sender, urgency, state, and the outcome or
-reason if it is closed.
+Entries in full — kind, title, body, owner, sender, urgency, state, and the
+outcome or reason if it is closed. Tasks and messages both: read `kind` to tell
+which one you are holding.
 
-- Up to **10** IDs, refused and not trimmed past that.
-- Up to **60000** bytes in one answer; past that the text truncates and the
-  answer says so.
+- Up to **10** IDs, refused and not trimmed past that. An EMPTY list is refused
+  too, rather than answered with nothing.
+- Up to **60000** bytes in one answer — and ⚠ **past that it drops WHOLE
+  ENTRIES, not text.** The entry that would cross the line does not arrive, and
+  neither does anything after it: what comes back is a SHORT LIST of complete
+  entries, never a body cut off mid-sentence. The first entry always arrives
+  whole however big it is, and the answer says how many of how many were read.
+- An ID that names nothing comes back in **`not_found`**. An ID that names a
+  RULE is not "not found": the answer says so and sends you to `rules_get`.
 - Citations inside the text come back EXPANDED, with the current title and the
   current state:
 
@@ -413,7 +488,14 @@ exceptional one is argued.
 
 ## tasks_amend(project, id, by, title='', body='', consumer='', consumer_key='', key='')
 
-Fix or reassign an OPEN task. Anything left empty is left alone.
+Fix or reassign an OPEN task. Anything left empty is left alone — but a call in
+which nothing ends up different is REFUSED, not answered as a harmless no-op.
+
+⚠ **Reassigning onto a person's desk EMAILS them**, and `posted` on the verdict
+says whether it went. For a human that is the only channel there is: they call
+no tool and do not go and look. Only a change of DESK posts — fixing a typo
+wakes nobody — and the desk it leaves is not written to, because the register
+never posts a subtraction.
 
 - **`consumer`** moves it to another desk. **`title`** and **`body`** rewrite
   the text; there is no `urgent` here, and that is not an oversight — urgency

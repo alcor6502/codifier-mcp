@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-6.0.1-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-6.1.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -973,11 +973,19 @@ nothing else.
 
 ## Notifications
 
-Two things are posted, and no more: a **task opened on a person's desk**, and a
-**proposal entering the queue**. Each at the moment it happens, to the address
-on that person's row — a human is the only kind of consumer that may carry one,
-and the schema refuses it on a chat or a skill. Proposals go to the project's
-**approver**, the one human marked for it on the profile page.
+Three things are posted, and no more: a **task opened on a person's desk**, a
+**task moved ONTO a person's desk**, and a **proposal entering the queue**.
+Each at the moment it happens, to the address on that person's row — a human is
+the only kind of consumer that may carry one, and the schema refuses it on a
+chat or a skill. Proposals go to the project's **approver**, the one human
+marked for it on the profile page.
+
+⚠ **The second one is an arrival and not an edit**, and it was added in 6.1.0
+because its absence was a hole with a shape: a task opened on the wrong desk
+and then handed to the right person reached them NEVER — the very gesture that
+corrects the mistake was the one that swallowed the notice. Only a change of
+DESK posts; fixing a typo wakes nobody, and the desk a task LEAVES is not
+written to, because the register never posts a subtraction.
 
 **The subject is the whole headline, and says it once.** `TK-0003 — Aprimi su
 iPad`, or `Proposed Rule VA-0007 — <title>`, because that is the line an inbox
@@ -1083,8 +1091,13 @@ not at all.
 
 **`urgent` belongs to whoever created the task** and cannot be changed by
 anyone afterwards, because the receiver is the party with an interest in
-clearing it. There are no levels; the guard against inflation is that
-`tasks_overview` counts urgent tasks by CREATOR.
+clearing it. There are no levels, and there is **no automatic guard against
+inflation**: `tasks_overview` counts the urgent per DESK, which answers *who is
+being buried* and not *who is doing the burying*. ⚠ This file used to say the
+count was BY CREATOR. It is not, it never was, and the sentence had been quoted
+as an argument — so it is corrected here rather than quietly dropped: what
+holds urgency honest is that it is permanent and visible, not a tally nobody
+keeps.
 
 **Tasks do not expire.** One open past thirty days comes back marked, and
 that is all: an automatic expiry would be a drop with no reason, written by

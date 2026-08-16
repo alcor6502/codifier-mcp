@@ -1617,7 +1617,12 @@ for _label, _cards in (("reference-guide.md", _WORK_CARDS),
 # This is the other half: outside the quoted blocks, a card may not state a
 # number that is not one of the constants it is allowed to state.
 _ALLOWED_NUMBERS = {
-    "rules_get": {_rules.GET_IDS},
+    # GET_BYTES is `rules_get`'s own ceiling exactly as it is `tasks_get`'s, and
+    # it was missing here only because the card did not state it. It states it
+    # now: the byte ceiling does not truncate TEXT, it drops whole rules, and a
+    # caller who does not know that reads a short list as a complete one.
+    "rules_get": {_rules.GET_IDS, _rules.GET_BYTES},
+    "rules_list": {_rules.RULES_LIST_CAP},
     "rules_propose": {_rules.MAX_BODY_BYTES, _rules.MAX_SEQ},
     "tasks_add": {_rules.MAX_BODY_BYTES},
     # ⚠ `mail.BODY_CAP` is here and not in `rules.py` because the ceiling on

@@ -816,12 +816,16 @@ refused("retiring that group outright, same guard",
                                  reason="done", actor="architect",
                                  auth_code=code(p2)),
         "the automatic rule")
-allowed("taking ONE member out, when the rule still reaches somebody",
+# ⚠ THE LABELS SAY "THE SET BECOMES", NOT "ADDING"/"TAKING OUT". `members`
+# REPLACES the membership — these calls pass the WHOLE list they want left
+# behind — and a case name is prose somebody reads: two of them taught the
+# incremental reading the manual had to be corrected for.
+allowed("the set BECOMES a smaller one, and the rule still reaches somebody",
         lambda: p2.amend_project("group", "automatismi", "amend",
                                  {"members": ["advisory"]}, actor="architect",
                                  auth_code=code(p2)))
 rule(p2, "targeted", groups=["deliberativi"], exceptions=["news"], title="mixed")
-allowed("ADDING a member passes even when it covers an exception",
+allowed("the set BECOMES a bigger one, and passes even when it covers an exception",
         lambda: p2.amend_project("group", "deliberativi", "amend",
                                  {"members": ["architect", "advisory", "news"]},
                                  actor="architect", auth_code=code(p2)))
@@ -1266,6 +1270,21 @@ same = allowed("the same idem_key on the same desk absorbs the repeat",
                lambda: (p.task_add("advisory", "x", "b", "architect", idem_key="k1"),
                         p.task_add("advisory", "x", "b", "architect", idem_key="k1"))[1])
 equals("it is the task that was already there", (same or {}).get("already_open"), True)
+# ⚠ THE ABSORBED REPEAT SAYS WHAT IT IS. This is the branch that hands back a
+# row the caller did not just write, and until 6.1.0 it was the one verdict of
+# the log that carried no `kind` — so the answer a retrying skill actually sees
+# was the answer that would not say whether it was holding a task or a message.
+# Injected: dropping `kind` from that return turns this case red by name.
+equals("and the absorbed repeat names its kind, like the write it stands in for",
+       (same or {}).get("kind"), "task")
+msg_same = allowed(
+    "the same absorption on a MESSAGE",
+    lambda: (p.task_add("advisory", "y", "b", "architect", idem_key="k2",
+                        kind="message"),
+             p.task_add("advisory", "y", "b", "architect", idem_key="k2",
+                        kind="message"))[1])
+equals("says message, and not the default it did not take",
+       (msg_same or {}).get("kind"), "message")
 yields("a citation in a task body expands on read",
        lambda: p.task_get([t1["id"]])["tasks"][0]["body"],
        "Against (VA-0001 — the rule a task points at).")
@@ -1291,7 +1310,7 @@ equals("and it keeps both owners in sight",
        ((moved or {}).get("reassigned_from"), (moved or {}).get("owner")),
        ("advisory", "news"))
 refused("a rule read as a task is NAMED, not reported missing",
-        lambda: p.task_get([rid]), "is a RULE, not a task")
+        lambda: p.task_get([rid]), "is a RULE, not an entry of the log")
 yields("what I opened on other desks, with its outcome",
        lambda: sorted(t["id"] for t in
                       p.task_list("architect", authored=True)["closed_recent"]),
@@ -1461,3 +1480,73 @@ refused("a kind that does not exist is refused WITH the list",
 
 # =====================================================================
 _finished = True
+
+
+# =====================================================================
+print("\n— THE EIGHT DEFECTS OF 6.0.1 —")
+# Each of these was a real answer the service gave, found by reading the source
+# against its own two manuals. They are kept as cases so the answer cannot go
+# back to what it was.
+
+p = project()
+
+# ---- a reserved domain refuses, and does not CRASH --------------------------
+# The trigger always refused this. What it raised was sqlite3.IntegrityError,
+# which is neither RulesError nor RulesFault — so the decorator converted
+# nothing, the caller got a traceback, and the log got no `refused` line. A
+# guarantee only the database can state is one the surface cannot speak.
+# ⚠ The auth_code gate comes FIRST, so only a caller who has already minted one
+# ever reached the crash — which is why this went out unseen. The case mints
+# one, exactly as the maintenance page does.
+for act in ("amend", "retire"):
+    refused(f"a reserved domain is REFUSED on {act}, not crashed into",
+            lambda a=act: p.amend_project(
+                "domain", "TK", a,
+                {"description": "x"} if a == "amend" else None,
+                reason="because it was asked", actor="architect",
+                auth_code=p.mint_auth_code()["auth_code"]),
+            "reserved")
+
+# ---- the guard at the door is the guard at the window -----------------------
+mid = p.task_add("architect", "a message", "a body", "advisory", kind="message")["id"]
+refused("a message cannot be handed BACK to its own sender",
+        lambda: p.task_amend(mid, by="architect", consumer="advisory", admin=True),
+        "somebody ELSE")
+
+# ---- the refusals name the kind, not «task» ---------------------------------
+refused("amending somebody else's MESSAGE names it a message",
+        lambda: p.task_amend(mid, by="news", title="x"),
+        "message")
+
+# ---- the full body carries the kind, like every list row does ---------------
+equals("tasks_get carries `kind`, so a message is one without parsing the ID",
+       p.task_get([mid])["tasks"][0].get("kind"), "message")
+
+# ---- a person is refused on BOTH doors, not on one ---------------------------
+refused("rules_export on a human is refused, exactly as rules_list is",
+        lambda: p.export(consumer="Alfredo"),
+        "refused rather than answered empty")
+
+# ---- a cut that is not declared is a SHORT LIST ------------------------------
+# `closed_recent` was sliced at the cap in silence while both texts promised
+# that truncation is always declared with the real total.
+for i in range(TASKS_LIST_CAP_PROBE := 52):
+    t = p.task_add("advisory", f"closed {i}", "a body", "architect")["id"]
+    p.task_close(t, by="advisory", outcome="done")
+_seen = p.task_list("advisory")
+equals("the closed list declares its real total when it cuts",
+       (_seen.get("closed_count"), len(_seen["closed_recent"]), _seen.get("truncated")),
+       (52, 50, True))
+
+# ---- a reassignment onto a person's desk IS an arrival ----------------------
+# Until 6.0.1 it reached them never: a human calls no tool and does not go and
+# look, so the post is their only channel — and the very gesture that corrects
+# a wrong desk was the one that silenced the notice.
+_t = p.task_add("advisory", "for the wrong desk", "a body", "architect")["id"]
+_moved = p.task_amend(_t, by="advisory", consumer="Alfredo")
+equals("moving a task onto a person's desk hands the surface what to post",
+       (_moved.get("reassigned_from"), bool(_moved.get("arrived"))),
+       ("advisory", True))
+_t2 = p.task_add("advisory", "a typo hree", "a body", "architect")["id"]
+equals("but fixing a title wakes nobody",
+       "arrived" in p.task_amend(_t2, by="advisory", title="a typo here"), False)
