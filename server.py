@@ -241,10 +241,16 @@ BACKUP_DIR = os.environ.get("BACKUP_DIR") or os.path.join(DB_DIR, "backup")
 ALLOWED_CIDRS = cidrs_from_env()
 
 registry = Registry(DB_DIR, auth_code_minutes=ADMIN_AUTH_CODE_DURATION)
-# HANDED THE LOGGER, and it reads the environment through one function of its
-# own: a module that reached for either itself would be a second place where
-# the configuration is decided.
-mailer = mail.from_env(log=log)
+# HANDED THE LOGGER AND THE PAGE'S OWN ADDRESS, and it reads the rest through
+# one function of its own: a module that reached for any of it itself would be
+# a second place where the configuration is decided.
+#
+# ⚠ The address is DERIVED — `BASE_URL`, which this deployment already
+# declares, on the port the UI already listens on — and not configured again.
+# It had a variable of its own for one version and that was one field too many:
+# an address written twice is an address that can disagree with itself, and
+# here disagreeing means a button in an email that opens nothing.
+mailer = mail.from_env(log=log, base_url=web.ui_base_url(BASE_URL))
 for _name, _objects in registry.repaired().items():
     log.warning("schema rebuilt at open for %s: %s — somebody had removed these objects",
                 _name, ", ".join(_objects))

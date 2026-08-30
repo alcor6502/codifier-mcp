@@ -132,11 +132,11 @@ class Mailer:
         self.sender = (sender or "").strip() or self.user
         self.security = (security or "").strip().lower() or "starttls"
         # WITHOUT A BASE URL THERE IS NO LINK, and the message is the one this
-        # service sent yesterday. That is the default on purpose: a container
-        # updated without the new variable must not start printing links to a
-        # host it guessed. Unraid does not propagate new variables to
-        # containers already installed, and a guessed address in an email is a
-        # link that goes somewhere real and wrong.
+        # service sent before there was a button. It arrives already built —
+        # `web.ui_base_url` derives it from `BASE_URL` and the UI's port — so
+        # the empty case here is the deployment declaring no public address at
+        # all, and the right answer to that is a message with no button rather
+        # than a link to a host somebody guessed.
         self.base_url = (base_url or "").strip().rstrip("/")
         self.link_days = max(1, int(link_days or LINK_DAYS))
         self.log = log
@@ -360,18 +360,24 @@ class Mailer:
             server.quit()
 
 
-def from_env(log=None) -> Mailer:
+def from_env(log=None, base_url: str = "") -> Mailer:
     """The reader, in one place. Every variable is optional with a working
     default — Unraid does not propagate new variables to containers already
     installed, so a required one would be a container that stops booting the
-    day it is updated."""
+    day it is updated.
+
+    ⚠ `base_url` is HANDED IN and not read here, and it is the one value on the
+    Mailer that is not this module's to find: the address of the admin page is
+    derived from `BASE_URL` and the UI's own port by `web.ui_base_url`, which
+    is the module that knows both. Reading it here would be a third opinion
+    about where this service answers."""
     return Mailer(host=os.environ.get("SMTP_HOST", ""),
                   port=int((os.environ.get("SMTP_PORT") or "0").strip() or 0),
                   user=os.environ.get("SMTP_USER", ""),
                   password=os.environ.get("SMTP_PASSWORD", ""),
                   sender=os.environ.get("SMTP_FROM", ""),
                   security=os.environ.get("SMTP_SECURITY", ""),
-                  base_url=os.environ.get("WEB_BASE_URL", ""),
+                  base_url=base_url,
                   link_days=int((os.environ.get("TASK_LINK_DAYS") or "0").strip()
                                 or LINK_DAYS),
                   log=log)

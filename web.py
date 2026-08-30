@@ -74,12 +74,6 @@ Configuration, all through environment variables:
   WEB_PORT          the port this server listens on (default 9443). It must be
                     one the Funnel CANNOT publish and it must not collide with
                     the MCP port — the preflight refuses both at the edge
-  WEB_BASE_URL      where this UI answers from, e.g. http://10.0.0.9:9443 —
-                    read in mail.py, and the address the closing link in a
-                    posted task is built on. Optional, and without it there is
-                    no button and the message is the one sent yesterday: a
-                    guessed address in an email is a link that goes somewhere
-                    real and wrong
   WEB_UI_PASSWORD   the password of this whole UI. Read by the preflight,
                     which refuses a missing one, a placeholder and anything
                     under 12 characters; handed to build() by server.py, never
@@ -97,6 +91,7 @@ import re
 import secrets
 import time
 from datetime import datetime
+from urllib.parse import urlsplit
 from collections import deque
 
 # ---------------------------------------------------------------------
@@ -212,6 +207,39 @@ def port_from_env() -> int:
     if not raw.isdigit() or not (1 <= int(raw) <= 65535):
         raise ValueError(f"WEB_PORT={raw!r}: a whole port number between 1 and 65535")
     return int(raw)
+
+
+def ui_base_url(base_url: str) -> str:
+    """Where this page answers, DERIVED from what the deployment already
+    declares — never configured a second time.
+
+    ⚠ IT WAS A VARIABLE OF ITS OWN FOR ONE VERSION, `WEB_BASE_URL`, born and
+    dead in v7.0.0. Alfredo, looking at the field he was about to fill in by
+    hand on Unraid: *non serve ricreare un'altra variabile, ha già BASE_URL* —
+    and he is right for a reason worth more than the field. This address is not
+    an independent fact: it is the SAME host as `BASE_URL`, on the port the UI
+    is already listening on, over http because that port carries no
+    certificate. A second place to write it is a second place to write it
+    WRONG, and wrong here means an email that links somewhere real and useless.
+
+    ⚠ THE PORT IS WHAT KEEPS IT INSIDE THE TAILNET, and that is not incidental.
+    The host is the same one the Funnel publishes — on 443, and on 443 only.
+    The UI's port is not published there and CANNOT be: the preflight refuses
+    the three ports the Funnel is able to publish. So a link built here is
+    reachable from the tailnet and not from the internet, which is the premise
+    the whole closing-ticket design rests on — and it is now enforced by a
+    check that already existed, instead of by whoever typed the variable.
+
+    Empty in, empty out: no `BASE_URL`, no link, and the message is the one
+    this service sent before there was a button."""
+    raw = (base_url or "").strip()
+    if not raw:
+        return ""
+    parts = urlsplit(raw if "//" in raw else "//" + raw)
+    host = parts.hostname or ""
+    if not host:
+        return ""
+    return f"http://{host}:{port_from_env()}"
 
 
 # =====================================================================
