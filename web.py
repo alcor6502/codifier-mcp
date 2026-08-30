@@ -91,7 +91,7 @@ import re
 import secrets
 import time
 from datetime import datetime
-from urllib.parse import urlsplit
+from urllib.parse import quote as _quote, urlsplit
 from collections import deque
 
 # ---------------------------------------------------------------------
@@ -153,6 +153,11 @@ LOG_RING_LINES = 200
 # off the front, because the one you are about to use is the one you just
 # pressed for.
 CODE_RUN_MAX = 10
+
+# WHO RULES BIND, and therefore who the rules page may be read as. A human is
+# not an audience — `rules_list` on one is refused, in the engine and in the
+# database — so the menu on that page offers these two and nothing else.
+BOUND_KINDS = ("chat", "skill")
 
 # WHAT THIS PAGE SIGNS, in one place. Every gesture made here goes into the
 # history under this name — a person's own name would have to be typed, and a
@@ -442,6 +447,47 @@ div.md table { font-size: .97rem; }
 div.md p:last-child { margin-bottom: .8rem; }
 .empty { color: var(--muted); font-style: italic; }
 
+/* THE TWO WAYS IN, on one line at the top: the button that creates, and the
+   menu that opens the one you pick. */
+.bar { display: flex; gap: .6rem 1rem; align-items: center; flex-wrap: wrap;
+       margin: 1.2rem 0; }
+.bar form { display: flex; gap: .5rem; align-items: center; margin: 0; }
+.bar select { max-width: 22rem; }
+/* ⚠ A button in a flex row wraps its label when the row runs out of width, and
+   `Open its card` came out on two lines next to a menu that had room to spare.
+   The button is the fixed thing here and the menu is the elastic one. */
+.bar button, .bar a.btn { white-space: nowrap; flex: 0 0 auto; }
+.bar select { flex: 1 1 12rem; }
+a.btn { display: inline-flex; align-items: center; font-size: 1rem;
+        font-weight: 600; padding: .6rem 1.1rem; min-height: 2.9rem;
+        border: 1px solid var(--line); border-radius: 10px;
+        background: var(--raised); color: inherit; text-decoration: none; }
+a.btn.go { background: var(--accent); color: var(--accent-fg);
+           border-color: var(--accent); }
+a.btn:hover { border-color: var(--muted); }
+p a.btn { margin-left: .5rem; }
+
+/* THE CARD, as a sheet over the register. It is not a <dialog> and carries no
+   javascript: the server already knows which one you asked for — the name is
+   in the URL — so the state survives a reload, can be bookmarked, and comes
+   back the same after a refusal. What CSS adds is only that the list behind it
+   stops competing for the eye. */
+.veil { position: fixed; inset: 0; z-index: 10; overflow-y: auto;
+        background: rgba(20, 22, 28, .55); padding: 2rem 1rem 4rem;
+        backdrop-filter: blur(2px); }
+.sheet { max-width: 46rem; margin: 0 auto; background: var(--bg);
+         border: 1px solid var(--line); border-radius: 14px;
+         padding: .2rem 1.4rem 1.4rem;
+         box-shadow: 0 12px 40px rgba(0, 0, 0, .3); }
+.sheet h2 { display: flex; align-items: baseline; gap: 1rem;
+            margin-top: 1.2rem; }
+a.shut { margin-left: auto; text-decoration: none; font-size: 1.4rem;
+         line-height: 1; color: var(--muted); padding: .2rem .5rem; }
+a.shut:hover { color: var(--fg); }
+label.check { font-weight: 500; margin-top: 1.2rem; }
+label.check .hint { margin-left: 1.6rem; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
 .note { font-size: .94rem; color: var(--muted); }
 /* ⚠ URGENT is a TAG and not a banner. It was `.bad`, which carries a left rule,
    a padded background and block spacing — an ornament designed for a sentence
@@ -450,6 +496,7 @@ div.md p:last-child { margin-bottom: .8rem; }
        letter-spacing: .04em; padding: .1rem .45rem; border-radius: 6px;
        vertical-align: .1em; margin-left: .45rem;
        background: var(--bad-bg); color: var(--bad); }
+.tag.ok-tag { background: var(--good-bg); color: var(--good); }
 /* A field and the button that acts on it belong on ONE line: stacked, three
    entries fill a screen with two boxes each and the page stops being a list. */
 form.row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap;
@@ -862,7 +909,8 @@ def build(*, registry, log, master: str, refusal, fault,
         return (f"<details open><summary>{_esc(label)}</summary>"
                 f"{_md(text)}</details>")
 
-    def _consumer_picker(name: str, prj, chosen: str, where: str) -> str:
+    def _consumer_picker(name: str, prj, chosen: str, where: str,
+                         kinds=()) -> str:
         """The consumer is a MENU and not a text field, and the list comes from
         the engine. Typed by hand it would be one more place a name can be
         spelt wrong, and the engine's refusal for an unknown consumer is not
@@ -875,14 +923,23 @@ def build(*, registry, log, master: str, refusal, fault,
         refuse."""
         opts = "".join(
             f"<option value='{_esc(n)}'{' selected' if n == chosen else ''}>"
-            f"{_esc(n)}</option>" for n in _consumers(prj))
+            f"{_esc(n)}</option>" for n in _consumers(prj, kinds))
         return (f"<form method='get' action='/p/{_esc(name)}/{where}'>"
                 f"<label for='consumer'>Consumer</label>"
                 f"<select id='consumer' name='consumer'>{opts}</select> "
                 f"<button type='submit'>show</button></form>")
 
-    def _consumers(prj) -> list[str]:
-        return [c["name"] for c in prj.project_info()["consumers"]]
+    def _consumers(prj, kinds=()) -> list[str]:
+        """The live consumer names, optionally of certain kinds only.
+
+        ⚠ The RULES page passes `("chat", "skill")`, and that is not tidiness:
+        `rules_list` on a human is REFUSED — a person is not an audience — so
+        offering one in that menu is offering a choice whose only outcome is a
+        refusal. The page still answers with the engine's sentence if somebody
+        arrives at that URL by hand; what changes is that the page stops
+        proposing it."""
+        return [c["name"] for c in prj.project_info()["consumers"]
+                if not kinds or c["kind"] in kinds]
 
     async def project_home(request):
         if not _session_ok(request):
@@ -1345,20 +1402,37 @@ def build(*, registry, log, master: str, refusal, fault,
         _issue(response)
         return response
 
-    def _pick(request, prj) -> str:
+    def _pick(request, prj, kinds=()) -> str:
         """The consumer asked for, or the first one there is. Never empty: the
         readings that want a consumer refuse without one, and a page that
-        opened on a refusal would teach that it is broken."""
+        opened on a refusal would teach that it is broken — which is exactly
+        why `kinds` exists, and why the rules page passes it: opening on a
+        human meant opening on `a person is not an audience`."""
         wanted = (request.query_params.get("consumer") or "").strip()
-        names = _consumers(prj)
+        names = _consumers(prj, kinds)
         return wanted if wanted in names else (names[0] if names else "")
 
     async def rules_page(request):
         def render(name, prj):
-            consumer = _pick(request, prj)
-            picker = _consumer_picker(name, prj, consumer, "rules")
+            consumer = _pick(request, prj, BOUND_KINDS)
+            picker = _consumer_picker(name, prj, consumer, "rules", BOUND_KINDS)
+            # ⚠ A SUBSTITUTION IS ANNOUNCED. Asked for a name this page cannot
+            # read as — a person — `_pick` falls back to one it can, which is
+            # right and would otherwise be SILENT: the reader asked about
+            # Alfredo and would be looking at somebody else's rules with
+            # nothing saying so. Falling back quietly is how a page gets
+            # believed about the wrong subject.
+            _asked = (request.query_params.get("consumer") or "").strip()
+            _swapped = (f"<p class='note'>{_esc(_asked)} is a person, and a "
+                        f"person is not an audience: rules bind chats and "
+                        f"skills, and reading them as a person is refused by "
+                        f"the engine. Showing <b>{_esc(consumer)}</b> "
+                        f"instead.</p>"
+                        if _asked and _asked != consumer else "")
             if not consumer:
-                return picker + "<p class='note'>No consumer in this project.</p>", name
+                return (picker + "<p class='note'>No chat and no skill in this "
+                        "project: rules bind those, and a person is not an "
+                        "audience.</p>", name)
             data = prj.list_rules(consumer)
             # The PROJECT leads and then the consumer, which is the order
             # `rules_list` puts them in and the order a person builds the
@@ -1366,9 +1440,28 @@ def build(*, registry, log, master: str, refusal, fault,
             # error — a project with no profile yet is a legitimate state.
             profile = data["profile"]
             who = data["consumer"]
-            head = (f"<p class='ok'>{_esc(profile['brief'])}</p>" if profile["brief"]
-                    else "<p class='note'>This project has no brief.</p>")
-            head += (f"<p class='ok'>{_esc(who['brief'])}</p>" if who["brief"]
+            # ⚠ `profile` HAS TWO SHAPES, and this page used to know only one:
+            # for a SKILL the engine withholds the project's brief and specs
+            # and returns `{withheld: "skill", note: …}` instead — no `brief`
+            # key at all. Read as `profile["brief"]` that is a KeyError, which
+            # reaches the browser as `Internal Server Error`: picking any skill
+            # on this page broke it, and had done since the day skills stopped
+            # receiving the profile. No suite saw it — they read prose — and no
+            # probe saw it either, because the probes drove the pages that were
+            # NEW and never this one.
+            #
+            # The note is shown rather than swallowed: the engine wrote it to
+            # be read, and "withheld and said so" is the whole point of that
+            # payload. A page that printed nothing here would turn a deliberate
+            # silence back into a missing one.
+            if profile.get("withheld"):
+                head = (f"<p class='note'>No project brief here: "
+                        f"{_esc(profile.get('note', ''))}</p>")
+            elif profile.get("brief"):
+                head = f"<p class='ok'>{_esc(profile['brief'])}</p>"
+            else:
+                head = "<p class='note'>This project has no brief.</p>"
+            head += (f"<p class='ok'>{_esc(who['brief'])}</p>" if who.get("brief")
                      else "<p class='note'>This consumer has no brief.</p>")
             # The rules come in SHORT form — no bodies — because that is what
             # `rules_list` serves and this page must show what a chat reads,
@@ -1390,7 +1483,7 @@ def build(*, registry, log, master: str, refusal, fault,
                 f"<span class='note'>{'URGENT · ' if t['urgent'] else ''}"
                 f"{_esc(t['age_days'])} days old</span></li>"
                 for t in desk["open"])
-            return (picker + head
+            return (picker + _swapped + head
                     + f"<p class='note'>{_esc(data['count'])} in force, widest "
                       f"first — what comes first binds everyone."
                     + (" ⚠ truncated" if data.get("truncated") else "")
@@ -1406,7 +1499,7 @@ def build(*, registry, log, master: str, refusal, fault,
     async def rule_page(request):
         def render(name, prj):
             rid = request.path_params["rule"]
-            consumer = _pick(request, prj)
+            consumer = _pick(request, prj, BOUND_KINDS)
             out = [f"<p class='note'>Read as <b>{_esc(consumer)}</b>.</p>"]
             # ONE call for the rule AND its story. `history=True` is an
             # argument and not a second method since v4.0.0 — the story of a
@@ -1525,182 +1618,273 @@ def build(*, registry, log, master: str, refusal, fault,
         return f"{head} {note}".strip() if note else (head or "Written.")
 
     def _consumers_html(name: str, prj, message: str = "", ok_msg: str = "",
-                        editing: str = "") -> str:
+                        editing: str = "", creating: bool = False) -> str:
+        """The anagrafica: a LIST you can read at a glance, and one CARD at a
+        time when you act.
+
+        ⚠ IT WAS ONE LONG PAGE, and Alfredo's verdict on it was that everything
+        was thrown there a bit at random. He was right, and the diagnosis is
+        specific rather than aesthetic: three forms that write three different
+        subjects — add somebody, write their mandate, write where the post goes
+        — were stacked one under the other with every consumer's editor open
+        underneath, so the page asked *what do you want to do* and *to whom*
+        and *with what* all at once, in whatever order they happened to fall.
+
+        Now the page answers one question — WHO IS IN THIS PROJECT — and the
+        gestures live in a dialog that names its subject in the title. Two ways
+        in: the button that creates one, and a menu that opens the one you
+        pick. Both are plain links and a GET form; there is no javascript on
+        this page, and the dialog is a section the server decides to render.
+        `:target`, a `<dialog>` and a script were all considered — the server
+        already knows which card you asked for, and a page whose state lives in
+        the URL can be reloaded, bookmarked and sent to yourself.
+
+        ⚠ AND THE POST MOVED INTO THE PERSON'S OWN CARD, which is where
+        somebody looks for it. It was a table of its own — every address on the
+        page written in one gesture, with a radio column headed *Gets the
+        proposals* — because `set_postbox` was read as needing the whole
+        picture. It does not: *a name left out is a name untouched*, in the
+        engine's own words. What the whole picture WAS needed for is the mark,
+        which is cleared and re-set in that same call — so a card that writes
+        one address carries the current mark forward, and only the card whose
+        checkbox you tick can move it."""
         data = prj.roster()
-        people = [c for c in data["consumers"]
-                  if c["kind"] == "human" and not c["retired"]]
         act = f"/p/{_esc(name)}/consumers"
-        head = (f"<p class='bad'>{_esc(message)}</p>" if message else "") + \
-               (f"<p class='ok'>{_esc(ok_msg)}</p>" if ok_msg else "")
+        head = ((f"<p class='bad'>{_esc(message)}</p>" if message else "")
+                + (f"<p class='ok'>{_esc(ok_msg)}</p>" if ok_msg else ""))
+        live = [c for c in data["consumers"] if not c["retired"]]
+        dead = [c for c in data["consumers"] if c["retired"]]
+        marked = next((c for c in live if c["approver"]), None)
 
-        def _card(c: dict) -> str:
-            tags = [c["kind"]]
-            if c["approver"]:
-                tags.append("approver")
-            if c["signed"]:
-                tags.append("signs its gestures")
-            if c["retired"]:
-                tags.append("RETIRED")
-            facts = (f"<p class='note'>{' · '.join(_esc(t) for t in tags)}"
-                     + (f" · in {', '.join(_esc(g) for g in c['groups'])}"
-                        if c["groups"] else " · in no group")
-                     + f" · reached by {_esc(c['rules_in_force'])} rules in force"
-                     + f" · {_esc(c['open_entries'])} open on its desk</p>")
-            if c["retired"]:
-                body = (f"<p class='note'>Retired {_esc(_when(c['retired_at']))} — "
-                        f"{_esc(c['reason'] or 'no reason recorded')}</p>"
-                        f"<form method='post' action='{act}'>"
-                        f"<input type='hidden' name='action' value='revive'>"
-                        f"<input type='hidden' name='who' value='{_esc(c['name'])}'>"
-                        f"<p><button type='submit'>Bring it back</button></p>"
-                        f"</form>")
-                return (f"<div class='card'><h3>{_esc(c['name'])}</h3>{facts}"
-                        f"{body}</div>")
-            if c["kind"] == "human":
-                shown = ("<p class='note'>A person receives entries and no "
-                         "rules, and carries no brief and no specs: they "
-                         "already know who they are. Their address is written "
-                         "in <i>The post</i> above, with everybody's, because "
-                         "it is one question.</p>")
-            else:
-                shown = (f"<h4>Brief</h4>{_md(c['brief'] or '')}"
-                         f"<h4>Specs</h4>{_md(c['specs'] or '')}")
-            # THE EDITOR IS A FOLD, and it is open only for the consumer just
-            # written or just asked for: a page with fifteen open editors is a
-            # page where the wrong box gets typed into, and one with none open
-            # is one where the button is not found. `editing` carries the
-            # answer from the gesture that landed here.
-            openness = " open" if _same(editing, c["name"]) else ""
-            editor = (f"<details{openness}><summary>Edit {_esc(c['name'])}"
-                      f"</summary>"
-                      f"<form method='post' action='{act}'>"
-                      f"<input type='hidden' name='action' value='amend'>"
-                      f"<input type='hidden' name='who' value='{_esc(c['name'])}'>"
-                      f"<label>Name<span class='hint'>ONE WORD. Renaming keeps "
-                      f"the row and its whole history — the spelling is data, "
-                      f"the identity is not.</span></label>"
-                      f"<input name='newname' value='{_esc(c['name'])}'>")
-            if c["kind"] != "human":
-                editor += (f"<label>Brief<span class='hint'>Who this consumer "
-                           f"is and what it is for. It leads every "
-                           f"<code>rules_list</code> this consumer makes, so "
-                           f"it is the first thing it reads about itself. "
-                           f"Markdown.</span></label>"
-                           f"<textarea name='brief' rows='16'>"
-                           f"{_esc(c['brief'] or '')}</textarea>"
-                           f"<label>Specs<span class='hint'>Its living facts — "
-                           f"true today, false tomorrow, with nobody having "
-                           f"decided anything. Markdown.</span></label>"
-                           f"<textarea name='specs' rows='16'>"
-                           f"{_esc(c['specs'] or '')}</textarea>")
-            editor += (f"<p><button class='go' type='submit'>Write it</button>"
-                       f"</p></form>"
-                       f"<form method='post' action='{act}'>"
-                       f"<input type='hidden' name='action' value='retire'>"
-                       f"<input type='hidden' name='who' value='{_esc(c['name'])}'>"
-                       f"<label>Retire it — why"
-                       f"<span class='hint'>Nothing is deleted: the row stays, "
-                       f"every pointer at it still reads, and the name stays "
-                       f"TAKEN because an ID is never reused. This sentence is "
-                       f"what whoever finds the dead row in six months will "
-                       f"read. A desk with open entries on it is refused — "
-                       f"close those first, or hand them over.</span></label>"
-                       f"<input name='reason' required>"
-                       f"<p><button type='submit'>Retire</button></p></form>"
-                       f"</details>")
-            return (f"<div class='card'><h3>{_esc(c['name'])}</h3>{facts}"
-                    f"{shown}{editor}</div>")
-
-        add = (f"<h2>Add a consumer</h2>"
-               f"<form method='post' action='{act}'>"
-               f"<input type='hidden' name='action' value='create'>"
-               f"<label for='cname'>Name"
-               f"<span class='hint'>ONE WORD, no spaces. It is quoted by hand "
-               f"in chat instructions and in scheduled prompts, and a space is "
-               f"the character nobody sees when it is wrong.</span></label>"
-               f"<input id='cname' name='who' required>"
-               f"<label for='ckind'>What it is"
-               f"<span class='hint'>A <b>chat</b> or a <b>skill</b> is "
-               f"machinery and carries a mandate; a <b>person</b> receives "
-               f"entries, carries an address, and has neither brief nor specs "
-               f"— they already know who they are.</span></label>"
-               f"<select id='ckind' name='kind'>"
-               f"<option value='chat'>chat</option>"
-               f"<option value='skill'>skill</option>"
-               f"<option value='human'>person</option></select>"
-               f"<label for='cbrief'>Brief"
-               f"<span class='hint'>Who it is and what it is for. Optional here "
-               f"— the card below writes it too, with a preview. Ignored for a "
-               f"person, who has neither. Markdown.</span></label>"
-               f"<textarea id='cbrief' name='brief' class='short'></textarea>"
-               f"<label for='cspecs'>Specs"
-               f"<span class='hint'>Its living facts. Same three sentences as "
-               f"above.</span></label>"
-               f"<textarea id='cspecs' name='specs' class='short'></textarea>"
-               f"<p><button class='go' type='submit'>Add</button></p></form>"
-               f"<p class='note'>⚠ <b>What cannot be changed afterwards, and "
-               f"where the refusal comes from.</b> The KIND is fixed at "
-               f"creation: a chat that became a skill would be a row whose "
-               f"history describes two different things. And a PERSON never "
-               f"carries a brief or specs — that one is the database's, a "
-               f"CHECK on the table, not this page being careful: they already "
-               f"know who they are, and two writable fields nobody reads are "
-               f"the same disease as an address on a chat. Everything else "
-               f"about any consumer is written from here.</p>")
-
-        if people:
-            rows = "".join(
-                f"<tr><td>{_esc(c['name'])}</td>"
-                f"<td><input name='email:{_esc(c['name'])}' "
-                f"value='{_esc(c['email'])}' "
-                f"placeholder='no address — nothing is posted to them'></td>"
-                f"<td><input type='radio' name='who' "
-                f"value='{_esc(c['name'])}'"
-                + (" checked" if c["approver"] else "")
-                + "></td></tr>" for c in people)
-            post = (f"<h2>The post</h2>"
-                    f"<form method='post' action='{act}'>"
-                    f"<input type='hidden' name='action' value='post'>"
-                    f"<table><thead><tr><th>Person</th>"
-                    f"<th>Their email address</th>"
-                    f"<th>Gets the proposals</th></tr></thead>"
-                    f"<tbody>{rows}</tbody></table>"
-                    f"<p><label><input type='radio' name='who' value=''"
-                    + ("" if any(c["approver"] for c in people) else " checked")
-                    + "> <b>Nobody</b> gets the proposals — they wait in the "
-                      "queue in silence, and are seen by opening the lot "
-                      "page.</label></p>"
-                    f"<p class='note'>Addresses and the mark are written in ONE "
-                    f"gesture, because they are one question: who gets an "
-                    f"email, and where. An address box left EMPTY clears that "
-                    f"person's address — what this page shows is what gets "
-                    f"written. The mark GRANTS NOTHING: what opens this page is "
-                    f"the password, and this only says which desk hears that a "
-                    f"proposal is waiting.</p>"
-                    f"<p><button class='go' type='submit'>Write the post"
-                    f"</button></p></form>")
+        # ---------- who the post goes to, said once, at the top ----------
+        if marked and marked["email"]:
+            post_line = (f"<p class='ok'>Proposals entering the queue are "
+                         f"announced to <b>{_esc(marked['name'])}</b> at "
+                         f"{_esc(marked['email'])}.</p>")
+        elif marked:
+            post_line = (f"<p class='bad'>{_esc(marked['name'])} is marked to "
+                         f"hear about proposals but has NO address, so nothing "
+                         f"is sent. Open their card and type one.</p>")
         else:
-            post = ("<h2>The post</h2><p class='note'>No person in this "
-                    "project yet. Proposals entering the queue notify nobody, "
-                    "and are seen by opening the lot page.</p>")
+            post_line = ("<p class='note'>Nobody is marked to hear about "
+                         "proposals: they wait in the queue in silence, and "
+                         "are seen by opening the lot page. Open a person's "
+                         "card to mark them.</p>")
 
-        live = "".join(_card(c) for c in data["consumers"] if not c["retired"])
-        dead = "".join(_card(c) for c in data["consumers"] if c["retired"])
+        # ---------- the two ways in ----------
+        pick = "".join(f"<option value='{_esc(c['name'])}'>{_esc(c['name'])}"
+                       f" — {_esc(c['kind'])}</option>" for c in live)
+        bar = (f"<div class='bar'>"
+               f"<a class='btn go' href='{act}?new=1'>+ Add a consumer</a>"
+               + (f"<form method='get' action='{act}'>"
+                  f"<select name='edit' aria-label='Consumer to open'>{pick}"
+                  f"</select><button type='submit'>Open its card</button></form>"
+                  if pick else "")
+               + "</div>")
+
+        # ---------- the dialog, when the URL asks for one ----------
+        def _shut() -> str:
+            return f"<a class='shut' href='{act}' title='Close'>✕</a>"
+
+        def _dialog(title: str, body: str) -> str:
+            return (f"<div class='veil'><div class='sheet'>"
+                    f"<h2>{_esc(title)}{_shut()}</h2>{body}</div></div>")
+
+        dialog = ""
+        if creating:
+            dialog = _dialog("Add a consumer", (
+                f"<form method='post' action='{act}'>"
+                f"<input type='hidden' name='action' value='create'>"
+                f"<label for='cname'>Name"
+                f"<span class='hint'>ONE WORD, no spaces. It is quoted by hand "
+                f"in chat instructions and in scheduled prompts, and a space is "
+                f"the character nobody sees when it is wrong.</span></label>"
+                f"<input id='cname' name='who' required autofocus>"
+                f"<label for='ckind'>What it is"
+                f"<span class='hint'>A <b>chat</b> or a <b>skill</b> is "
+                f"machinery: it reads rules and carries a mandate. A "
+                f"<b>person</b> receives entries and can carry an email "
+                f"address — and has no mandate, because they already know who "
+                f"they are.</span></label>"
+                f"<select id='ckind' name='kind'>"
+                f"<option value='chat'>chat — deliberates</option>"
+                f"<option value='skill'>skill — executes</option>"
+                f"<option value='human'>person — receives</option></select>"
+                f"<label for='cbrief'>Brief"
+                f"<span class='hint'>Optional, and written later on the card "
+                f"too. Ignored for a person. Markdown.</span></label>"
+                f"<textarea id='cbrief' name='brief' class='short'></textarea>"
+                f"<p><button class='go' type='submit'>Add</button>"
+                f"<a class='btn' href='{act}'>Cancel</a></p></form>"
+                f"<p class='note'>⚠ The KIND cannot be changed afterwards: a "
+                f"chat that became a skill would be a row whose history "
+                f"describes two different things. Everything else can.</p>"))
+        else:
+            who = next((c for c in data["consumers"] if _same(c["name"], editing)),
+                       None)
+            if who is not None:
+                dialog = _dialog(f"{who['name']} — {who['kind']}",
+                                 _card_form(act, who, marked))
+
+        # ---------- the register, readable at a glance ----------
+        def _row(c: dict) -> str:
+            if c["kind"] == "human":
+                post = (f"{_esc(c['email'])}" if c["email"]
+                        else "<span class='note'>no address</span>")
+                if c["approver"]:
+                    post += " <span class='tag ok-tag'>PROPOSALS</span>"
+            else:
+                post = "<span class='note'>—</span>"
+            return (f"<tr><td><a href='{act}?edit={_quote(c['name'])}'>"
+                    f"<b>{_esc(c['name'])}</b></a></td>"
+                    f"<td>{_esc(c['kind'])}</td>"
+                    f"<td>{post}</td>"
+                    f"<td class='note'>{_esc(', '.join(c['groups']) or '—')}</td>"
+                    f"<td class='num'>{_esc(c['rules_in_force'])}</td>"
+                    f"<td class='num'>{_esc(c['open_entries'])}</td>"
+                    f"<td><a href='{act}?edit={_quote(c['name'])}'>Open</a></td>"
+                    f"</tr>")
+
+        def _table(rows: list) -> str:
+            return ("<table><thead><tr><th>Name</th><th>Kind</th>"
+                    "<th>Post</th><th>Groups</th><th class='num'>Rules</th>"
+                    "<th class='num'>Open</th><th></th></tr></thead><tbody>"
+                    + "".join(_row(c) for c in rows) + "</tbody></table>")
+
         listing = (f"<h2>The register — {_esc(data['live'])} live</h2>"
-                   + (live or "<p class='note'>Nobody yet.</p>")
-                   + (f"<h2>Retired — {_esc(data['retired'])}</h2>"
-                      f"<p class='note'>Kept, not deleted: their names are "
-                      f"still taken, the rules and entries that name them "
-                      f"still read, and any of them can be brought back.</p>"
-                      + dead if dead else ""))
-        return head + add + post + listing
+                   + (_table(live) if live
+                      else "<p class='note'>Nobody yet.</p>")
+                   + "<p class='note'><b>Rules</b> is how many rules in force "
+                     "reach it; <b>Open</b> is how many entries are waiting on "
+                     "its desk. Both are refusals waiting to happen: a "
+                     "consumer that rules reach cannot be retired without "
+                     "emptying those rules, and a desk with open entries "
+                     "cannot be retired at all.</p>")
+        if dead:
+            listing += (f"<h2>Retired — {_esc(data['retired'])}</h2>"
+                        f"<p class='note'>Kept, not deleted: their names are "
+                        f"still taken, the rules and entries that name them "
+                        f"still read, and any of them can be brought back — "
+                        f"open the card.</p>" + _table(dead))
+        return head + bar + post_line + dialog + listing
+
+    def _card_form(act: str, c: dict, marked) -> str:
+        """One consumer's card: what it is, and the gestures that change it.
+
+        Three shapes, because three kinds are three different rows and pretending
+        otherwise is what made the old page unreadable — a person was offered a
+        brief they cannot have, and an address lived in a table three sections
+        away from the name it belongs to."""
+        facts = (f"<p class='note'>{_esc(c['kind'])}"
+                 + (f" · in {_esc(', '.join(c['groups']))}" if c["groups"]
+                    else " · in no group")
+                 + f" · reached by {_esc(c['rules_in_force'])} rules in force"
+                 + f" · {_esc(c['open_entries'])} open on its desk"
+                 + f" · created {_esc(_when(c['created_at']))}</p>")
+        if c["retired"]:
+            return (facts
+                    + f"<p class='bad'>Retired {_esc(_when(c['retired_at']))} — "
+                      f"{_esc(c['reason'] or 'no reason recorded')}</p>"
+                    + f"<form method='post' action='{act}'>"
+                      f"<input type='hidden' name='action' value='revive'>"
+                      f"<input type='hidden' name='who' value='{_esc(c['name'])}'>"
+                      f"<p><button class='go' type='submit'>Bring it back"
+                      f"</button><a class='btn' href='{act}'>Close</a></p></form>"
+                    + "<p class='note'>Nothing was deleted: the row stayed, and "
+                      "so did every pointer at it.</p>")
+
+        out = [facts, f"<form method='post' action='{act}'>",
+               "<input type='hidden' name='action' value='amend'>",
+               f"<input type='hidden' name='who' value='{_esc(c['name'])}'>",
+               "<label>Name<span class='hint'>ONE WORD. Renaming keeps the row "
+               "and its whole history — the spelling is data, the identity is "
+               "not.</span></label>",
+               f"<input name='newname' value='{_esc(c['name'])}'>"]
+
+        if c["kind"] == "human":
+            # ⚠ THE POST IS ITS OWN FORM, with its own button, inside the card
+            # of the person it belongs to. Two reasons, and neither is layout:
+            # the engine writes a name and writes the post through two
+            # different methods, and a single Save would have to call both and
+            # then explain which half failed. And a button that says what it
+            # does — `Save the post` — is the answer to `Write the post`, which
+            # was the old heading and told nobody anything.
+            out += ["<p><button class='go' type='submit'>Save the name"
+                    "</button></p></form>",
+                    f"<form method='post' action='{act}'>",
+                    "<input type='hidden' name='action' value='post'>",
+                    f"<input type='hidden' name='who' value='{_esc(c['name'])}'>",
+                    "<label>Email address<span class='hint'>Where this person "
+                    "is written to when an entry lands on their desk, and where "
+                    "the button that closes it is sent. Empty means nothing is "
+                    "ever posted to them — a legitimate state, not a "
+                    "fault.</span></label>",
+                    f"<input name='email' type='email' value='{_esc(c['email'])}' "
+                    f"placeholder='nobody@example.com'>",
+                    "<label class='check'><input type='checkbox' name='approver'"
+                    + (" checked" if c["approver"] else "")
+                    + "> Tell this person when a <b>proposal</b> is waiting"
+                      "<span class='hint'>A rule proposed by a chat is not in "
+                      "force until a human approves it on the lot page. This "
+                      "says who gets told that one is waiting. At most one "
+                      "person in the project: ticking it here takes the mark "
+                      "off whoever holds it. ⚠ It grants NOTHING — what opens "
+                      "this page is the password.</span></label>"]
+            if marked is not None and not _same(marked["name"], c["name"]):
+                out.append(f"<p class='note'>It is on "
+                           f"<b>{_esc(marked['name'])}</b> right now.</p>")
+            out.append("<p><button class='go' type='submit'>Save the post"
+                       "</button>"
+                       f"<a class='btn' href='{act}'>Close</a></p></form>")
+            out.append("<p class='note'>A person has no brief and no specs: "
+                       "that is the database's rule, not this page's — they "
+                       "already know who they are, and rules bind chats and "
+                       "skills.</p>")
+        else:
+            out += [
+                "<label>Brief<span class='hint'>Who this consumer is and what "
+                "it is for. It leads every <code>rules_list</code> this "
+                "consumer makes, so it is the first thing it reads about "
+                "itself. Markdown.</span></label>",
+                f"<textarea name='brief' rows='14'>{_esc(c['brief'] or '')}"
+                f"</textarea>",
+                _preview("Brief as it reads", c["brief"] or ""),
+                "<label>Specs<span class='hint'>Its living facts — true today, "
+                "false tomorrow, with nobody having decided anything. "
+                "Markdown.</span></label>",
+                f"<textarea name='specs' rows='14'>{_esc(c['specs'] or '')}"
+                f"</textarea>",
+                _preview("Specs as they read", c["specs"] or ""),
+            ]
+
+        if c["kind"] != "human":
+            out.append("<p><button class='go' type='submit'>Save</button>"
+                       f"<a class='btn' href='{act}'>Cancel</a></p></form>")
+        out += ["<details><summary>Retire this consumer</summary>"
+                f"<form method='post' action='{act}'>"
+                "<input type='hidden' name='action' value='retire'>"
+                f"<input type='hidden' name='who' value='{_esc(c['name'])}'>"
+                "<label>Why<span class='hint'>Nothing is deleted: the row "
+                "stays, every pointer at it still reads, and the name stays "
+                "TAKEN because an ID is never reused. This sentence is what "
+                "whoever finds the dead row in six months will read. A desk "
+                "with open entries on it is refused — close those first, or "
+                "hand them over.</span></label>"
+                "<input name='reason' required>"
+                "<p><button type='submit'>Retire</button></p></form></details>"]
+        return "".join(out)
 
     async def consumers_page(request):
         def render(name, prj):
-            return (_consumers_html(name, prj,
-                                    editing=(request.query_params.get("edit")
-                                             or "").strip()),
-                    f"{name} — consumers")
+            # WHICH CARD IS OPEN LIVES IN THE URL, and that is the whole of the
+            # dialog's machinery: no javascript, no `:target`, no <dialog>. A
+            # state the server can see is a state that survives a reload, can
+            # be bookmarked, and comes back the same after a refusal.
+            return (_consumers_html(
+                name, prj,
+                editing=(request.query_params.get("edit") or "").strip(),
+                creating=bool((request.query_params.get("new") or "").strip())),
+                f"{name} — consumers")
         return _read_page(request, render)
 
     async def consumers_action(request):
@@ -1775,18 +1959,31 @@ def build(*, registry, log, master: str, refusal, fault,
                                       actor=WEB_SIGNATURE, on_the_page=True)
                 log.info("consumer revived on the page: %s", v["name"])
                 return say(ok_msg=_said(v, "is back"), editing=v["name"])
-            # THE WHOLE PICTURE, exactly as the form showed it: every box on
-            # the page travels, so what you see is what gets written and a
-            # cleared box clears the address. A form that sent only what
-            # changed would need the page to know what changed, which is a
-            # second opinion about the state.
-            addresses = {k.split(":", 1)[1]: (v or "").strip()
-                         for k, v in form.items() if k.startswith("email:")}
-            v = prj.set_postbox(addresses, who)
+            # ONE PERSON'S POST, written from that person's own card — it was
+            # a table of everybody's addresses in a section of its own, three
+            # scrolls from the name each one belongs to.
+            #
+            # ⚠ THE MARK HAS TO BE CARRIED FORWARD EXPLICITLY. `set_postbox`
+            # clears the approver flag and re-sets it inside one transaction —
+            # that is how it can never sit on two people at once — so a call
+            # that said nothing about it would quietly take it away from
+            # whoever holds it. The card sends its own checkbox; what that
+            # means for everybody else is decided here, in one place:
+            #   ticked        -> the mark moves to this person
+            #   unticked, held by somebody else -> untouched
+            #   unticked, held by THIS person   -> cleared
+            current = prj.approver()
+            if (form.get("approver") or "").strip():
+                keep = who
+            elif current is not None and not _same(current["name"], who):
+                keep = current["name"]
+            else:
+                keep = ""
+            v = prj.set_postbox({who: (form.get("email") or "").strip()}, keep)
             said = "; ".join(v["changed"]) if v["changed"] else "no address moved"
             log.info("postbox written on %s: %s · approver %s",
                      name, said, v["approver"])
-            return say(ok_msg=f"{said}. {v['note']}")
+            return say(ok_msg=f"{said}. {v['note']}", editing=who)
         except fault:
             raise
         except refusal as e:
