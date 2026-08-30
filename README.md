@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-7.0.1-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-7.0.2-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -970,6 +970,14 @@ be written from. No tool reaches them, not even with the admin code. The brief
 is the project's identity and the specs are the facts every reading is done
 against: what is FUNDATIVE has no tool, the way what is catastrophic has none. A
 chat may suggest the wording; the change is a person's.
+
+⚠ **The rules page is read AS a consumer, and only as one that rules can
+bind**: a chat or a skill. Asked for a person it says so and shows one it can
+read — `rules_list` on a human is refused, in the engine and in the database,
+so offering one in that menu would be offering a choice whose only outcome is a
+refusal. And for a **skill** the project's own brief and specs are **withheld**
+by the engine, by design: the page prints the engine's sentence saying so,
+rather than the profile a skill must not receive.
 
 **The consumers page is the whole anagrafica** — every chat, every skill and
 every person, live and retired, on one page. It was the *people* page until

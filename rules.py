@@ -81,7 +81,7 @@ from datetime import datetime, timedelta, timezone
 # and both are alarms about the world outside this process.
 log = logging.getLogger("codifier-mcp.registry")
 
-VERSION = "7.0.1"
+VERSION = "7.0.2"
 
 # The GENERATION of the schema, and it is a number the database carries in
 # `PRAGMA user_version`. It exists because of a thing that was seen live at

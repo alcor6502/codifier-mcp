@@ -154,6 +154,11 @@ LOG_RING_LINES = 200
 # pressed for.
 CODE_RUN_MAX = 10
 
+# WHO RULES BIND, and therefore who the rules page may be read as. A human is
+# not an audience — `rules_list` on one is refused, in the engine and in the
+# database — so the menu on that page offers these two and nothing else.
+BOUND_KINDS = ("chat", "skill")
+
 # WHAT THIS PAGE SIGNS, in one place. Every gesture made here goes into the
 # history under this name — a person's own name would have to be typed, and a
 # field that types a signature is a field that types somebody else's. What the
@@ -862,7 +867,8 @@ def build(*, registry, log, master: str, refusal, fault,
         return (f"<details open><summary>{_esc(label)}</summary>"
                 f"{_md(text)}</details>")
 
-    def _consumer_picker(name: str, prj, chosen: str, where: str) -> str:
+    def _consumer_picker(name: str, prj, chosen: str, where: str,
+                         kinds=()) -> str:
         """The consumer is a MENU and not a text field, and the list comes from
         the engine. Typed by hand it would be one more place a name can be
         spelt wrong, and the engine's refusal for an unknown consumer is not
@@ -875,14 +881,23 @@ def build(*, registry, log, master: str, refusal, fault,
         refuse."""
         opts = "".join(
             f"<option value='{_esc(n)}'{' selected' if n == chosen else ''}>"
-            f"{_esc(n)}</option>" for n in _consumers(prj))
+            f"{_esc(n)}</option>" for n in _consumers(prj, kinds))
         return (f"<form method='get' action='/p/{_esc(name)}/{where}'>"
                 f"<label for='consumer'>Consumer</label>"
                 f"<select id='consumer' name='consumer'>{opts}</select> "
                 f"<button type='submit'>show</button></form>")
 
-    def _consumers(prj) -> list[str]:
-        return [c["name"] for c in prj.project_info()["consumers"]]
+    def _consumers(prj, kinds=()) -> list[str]:
+        """The live consumer names, optionally of certain kinds only.
+
+        ⚠ The RULES page passes `("chat", "skill")`, and that is not tidiness:
+        `rules_list` on a human is REFUSED — a person is not an audience — so
+        offering one in that menu is offering a choice whose only outcome is a
+        refusal. The page still answers with the engine's sentence if somebody
+        arrives at that URL by hand; what changes is that the page stops
+        proposing it."""
+        return [c["name"] for c in prj.project_info()["consumers"]
+                if not kinds or c["kind"] in kinds]
 
     async def project_home(request):
         if not _session_ok(request):
@@ -1345,20 +1360,37 @@ def build(*, registry, log, master: str, refusal, fault,
         _issue(response)
         return response
 
-    def _pick(request, prj) -> str:
+    def _pick(request, prj, kinds=()) -> str:
         """The consumer asked for, or the first one there is. Never empty: the
         readings that want a consumer refuse without one, and a page that
-        opened on a refusal would teach that it is broken."""
+        opened on a refusal would teach that it is broken — which is exactly
+        why `kinds` exists, and why the rules page passes it: opening on a
+        human meant opening on `a person is not an audience`."""
         wanted = (request.query_params.get("consumer") or "").strip()
-        names = _consumers(prj)
+        names = _consumers(prj, kinds)
         return wanted if wanted in names else (names[0] if names else "")
 
     async def rules_page(request):
         def render(name, prj):
-            consumer = _pick(request, prj)
-            picker = _consumer_picker(name, prj, consumer, "rules")
+            consumer = _pick(request, prj, BOUND_KINDS)
+            picker = _consumer_picker(name, prj, consumer, "rules", BOUND_KINDS)
+            # ⚠ A SUBSTITUTION IS ANNOUNCED. Asked for a name this page cannot
+            # read as — a person — `_pick` falls back to one it can, which is
+            # right and would otherwise be SILENT: the reader asked about
+            # Alfredo and would be looking at somebody else's rules with
+            # nothing saying so. Falling back quietly is how a page gets
+            # believed about the wrong subject.
+            _asked = (request.query_params.get("consumer") or "").strip()
+            _swapped = (f"<p class='note'>{_esc(_asked)} is a person, and a "
+                        f"person is not an audience: rules bind chats and "
+                        f"skills, and reading them as a person is refused by "
+                        f"the engine. Showing <b>{_esc(consumer)}</b> "
+                        f"instead.</p>"
+                        if _asked and _asked != consumer else "")
             if not consumer:
-                return picker + "<p class='note'>No consumer in this project.</p>", name
+                return (picker + "<p class='note'>No chat and no skill in this "
+                        "project: rules bind those, and a person is not an "
+                        "audience.</p>", name)
             data = prj.list_rules(consumer)
             # The PROJECT leads and then the consumer, which is the order
             # `rules_list` puts them in and the order a person builds the
@@ -1366,9 +1398,28 @@ def build(*, registry, log, master: str, refusal, fault,
             # error — a project with no profile yet is a legitimate state.
             profile = data["profile"]
             who = data["consumer"]
-            head = (f"<p class='ok'>{_esc(profile['brief'])}</p>" if profile["brief"]
-                    else "<p class='note'>This project has no brief.</p>")
-            head += (f"<p class='ok'>{_esc(who['brief'])}</p>" if who["brief"]
+            # ⚠ `profile` HAS TWO SHAPES, and this page used to know only one:
+            # for a SKILL the engine withholds the project's brief and specs
+            # and returns `{withheld: "skill", note: …}` instead — no `brief`
+            # key at all. Read as `profile["brief"]` that is a KeyError, which
+            # reaches the browser as `Internal Server Error`: picking any skill
+            # on this page broke it, and had done since the day skills stopped
+            # receiving the profile. No suite saw it — they read prose — and no
+            # probe saw it either, because the probes drove the pages that were
+            # NEW and never this one.
+            #
+            # The note is shown rather than swallowed: the engine wrote it to
+            # be read, and "withheld and said so" is the whole point of that
+            # payload. A page that printed nothing here would turn a deliberate
+            # silence back into a missing one.
+            if profile.get("withheld"):
+                head = (f"<p class='note'>No project brief here: "
+                        f"{_esc(profile.get('note', ''))}</p>")
+            elif profile.get("brief"):
+                head = f"<p class='ok'>{_esc(profile['brief'])}</p>"
+            else:
+                head = "<p class='note'>This project has no brief.</p>"
+            head += (f"<p class='ok'>{_esc(who['brief'])}</p>" if who.get("brief")
                      else "<p class='note'>This consumer has no brief.</p>")
             # The rules come in SHORT form — no bodies — because that is what
             # `rules_list` serves and this page must show what a chat reads,
@@ -1390,7 +1441,7 @@ def build(*, registry, log, master: str, refusal, fault,
                 f"<span class='note'>{'URGENT · ' if t['urgent'] else ''}"
                 f"{_esc(t['age_days'])} days old</span></li>"
                 for t in desk["open"])
-            return (picker + head
+            return (picker + _swapped + head
                     + f"<p class='note'>{_esc(data['count'])} in force, widest "
                       f"first — what comes first binds everyone."
                     + (" ⚠ truncated" if data.get("truncated") else "")
@@ -1406,7 +1457,7 @@ def build(*, registry, log, master: str, refusal, fault,
     async def rule_page(request):
         def render(name, prj):
             rid = request.path_params["rule"]
-            consumer = _pick(request, prj)
+            consumer = _pick(request, prj, BOUND_KINDS)
             out = [f"<p class='note'>Read as <b>{_esc(consumer)}</b>.</p>"]
             # ONE call for the rule AND its story. `history=True` is an
             # argument and not a second method since v4.0.0 — the story of a
