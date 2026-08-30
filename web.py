@@ -38,14 +38,29 @@ there is one person. The hidden username field on the form is for the password
 managers, which key an entry on a user and fill a password-only form wrong, in
 silence.
 
-WHERE THE MASTER IS RETYPED, AND WHERE IT IS NOT. Every gesture that WRITES
-asks for it again — deciding the lot, minting a one-time code, editing the
-project's profile, adding or retiring a PERSON, writing where their post goes —
-because a session alone is a browser left open on the iPad. The backup
-does not, and the log page does not: a `VACUUM INTO` changes nothing and drops
-a file on the server's disk, and the log is a ring in memory. A master retyped
-where it defends nothing does not add a guard, it teaches the hand to type it
-without looking — which is the habit the lot page was invented to prevent.
+THE ONE PAGE WITH NO DOOR, and it is written here rather than found: the
+closing link. A task posted to a person carries a button, and the ticket in
+that URL is the whole credential — no session, no password. It reaches ONE
+entry, it can only close it, and what makes that acceptable is that this port
+does not answer outside the tailnet. ⚠ A premise, not a detail: publish this
+port anywhere else and that page is a hole.
+
+WHERE THE MASTER IS TYPED: ONCE, AT THE DOOR, AND NOWHERE ELSE. Until v7.0.0
+every writing gesture asked for it again — the lot, a one-time code, the
+profile, a person, their post — on the ground that a session alone is a browser
+left open on the iPad. That guard is GONE, on purpose and by decision, and the
+reason it went is the one the file already stated against itself: a secret
+typed five times an hour is typed without looking, and a password that is typed
+without looking defends nothing while costing every gesture. What defends this
+UI is the door — the session, signed, eight hours of inactivity, dead on a
+restart — plus the fact that the port is not published outside the tailnet.
+The one-time codes are untouched: they guard the MCP surface, where the caller
+is a chat and not a person, and there the second factor is the whole design.
+
+⚠ THE CONSEQUENCE, WRITTEN WHERE IT IS DECIDED: a live session now reaches every
+gesture on this page. Signing out and closing the tab is the whole of the
+protection, and the day this port were published anywhere but the tailnet, this
+decision would have to be taken again.
 
 WHAT IS NOT HERE ANY MORE. The deployment page: it created projects, rekeyed
 them and printed their codes, and all three died with the declarative registry
@@ -59,6 +74,12 @@ Configuration, all through environment variables:
   WEB_PORT          the port this server listens on (default 9443). It must be
                     one the Funnel CANNOT publish and it must not collide with
                     the MCP port — the preflight refuses both at the edge
+  WEB_BASE_URL      where this UI answers from, e.g. http://10.0.0.9:9443 —
+                    read in mail.py, and the address the closing link in a
+                    posted task is built on. Optional, and without it there is
+                    no button and the message is the one sent yesterday: a
+                    guessed address in an email is a link that goes somewhere
+                    real and wrong
   WEB_UI_PASSWORD   the password of this whole UI. Read by the preflight,
                     which refuses a missing one, a placeholder and anything
                     under 12 characters; handed to build() by server.py, never
@@ -72,8 +93,10 @@ import hmac
 import html
 import logging
 import os
+import re
 import secrets
 import time
+from datetime import datetime
 from collections import deque
 
 # ---------------------------------------------------------------------
@@ -99,11 +122,18 @@ DEFAULT_PORT = 9443
 # same machine, and the guarantee did not have to be paid for with that.
 FUNNEL_PORTS = (443, 8443, 10000)
 
-# One hour of INACTIVITY, sliding: every authenticated request re-issues the
-# cookie. Not one hour of session — a page left open on the iPad while the
+# EIGHT HOURS of INACTIVITY, sliding: every authenticated request re-issues the
+# cookie. Not eight hours of session — a page left open on the iPad while the
 # batch is read is the normal case, and logging the person out mid-decision
 # would teach them to keep a second tab logged in.
-SESSION_MAX_IDLE = 3600
+#
+# It was one hour while every write retyped the master. When that retype went
+# (v7.0.0) this number became the ONLY thing standing between a borrowed
+# browser and the corpus, and it went UP rather than down — deliberately. An
+# hour spent nothing but the password again on a page that had just refused to
+# do anything without it; the guard that is worth having here is a working day
+# that ends, plus a port that does not leave the tailnet.
+SESSION_MAX_IDLE = 8 * 3600
 
 SESSION_COOKIE = "codifier_admin"
 
@@ -120,6 +150,21 @@ SESSION_COOKIE = "codifier_admin"
 # lives: the page renders it from here rather than spelling it out a second
 # time.
 LOG_RING_LINES = 200
+
+# How many minted codes stay on the line at once. Not a policy on minting —
+# the engine decides what a code is worth and how long it lives, and pressing
+# the button an eleventh time still mints — but a ceiling on what one page
+# prints, so that a run cannot grow without end down an iPad. The oldest fall
+# off the front, because the one you are about to use is the one you just
+# pressed for.
+CODE_RUN_MAX = 10
+
+# WHAT THIS PAGE SIGNS, in one place. Every gesture made here goes into the
+# history under this name — a person's own name would have to be typed, and a
+# field that types a signature is a field that types somebody else's. What the
+# history witnessed is that it was done at the admin page, by whoever holds
+# the password, and that is what this says.
+WEB_SIGNATURE = "web ui"
 
 
 class LogRing(logging.Handler):
@@ -187,93 +232,208 @@ def port_from_env() -> int:
 # the two blocks work on every browser that ever reached this page, and this
 # page is read from an iPad.
 #
-# The sizes are the iPad's, not the desk's. 16px on the fields because Safari
-# ZOOMS the page when it focuses anything smaller, and a page that jumps when
-# you tap the master is a page you mistype the master into; 2.75rem of height
-# on everything tappable, which is the 44 points Apple asks for and roughly
-# the width of a thumb.
+# The sizes are the iPad's, not the desk's. 16px minimum on the fields because
+# Safari ZOOMS the page when it focuses anything smaller, and a page that jumps
+# when you tap the password is a page you mistype it into; 2.9rem of height on
+# everything tappable, which clears the 44 points Apple asks for.
+#
+# ⚠ AND THE BASE IS 17px SINCE v7.0.0, up from 16 with most of the page at .85
+# and .78 OF that — twelve or thirteen real pixels for every note, every table
+# header and the whole nav. Alfredo, reading it on the iPad: the fonts are
+# extremely small. They were: what looked like restraint on a laptop at 60cm
+# was a page the owner had to lean into. The step down survives once, to
+# .94rem, and everything else that is secondary is made secondary by COLOUR
+# and by SPACE — which do not cost legibility.
 _CSS = """
 :root {
   color-scheme: light dark;
-  --bg: #fdfdfb; --fg: #1b1c1a; --muted: #62635e; --line: #dcdcd5;
-  --field: #ffffff; --raised: #f2f2ec; --accent: #2d5c86;
-  --bad: #9d2f27; --bad-bg: #fbeceb; --good: #2c6739; --good-bg: #ebf4ee;
+  --bg: #fbfaf7; --fg: #1a1c1e; --muted: #5f6470; --line: #e0ded7;
+  --field: #ffffff; --raised: #f4f2ec; --accent: #2b5f8f; --accent-fg: #ffffff;
+  --bad: #97302a; --bad-bg: #fbecea; --good: #23663a; --good-bg: #e9f4ec;
+  --shadow: 0 1px 2px rgba(20,20,25,.05), 0 6px 18px rgba(20,20,25,.05);
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #16171a; --fg: #e7e7e2; --muted: #9a9b95; --line: #33353b;
-    --field: #1e2025; --raised: #1e2025; --accent: #8fb8e2;
-    --bad: #e79088; --bad-bg: #2b1b19; --good: #85c495; --good-bg: #172318;
+    --bg: #15171b; --fg: #e9e9e4; --muted: #a0a4ad; --line: #2f333b;
+    --field: #1c1f25; --raised: #1f232a; --accent: #7fb2e0; --accent-fg: #0f1216;
+    --bad: #ea9188; --bad-bg: #2c1c1a; --good: #86c797; --good-bg: #16241a;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 18px rgba(0,0,0,.25);
   }
 }
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
-body { font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-       margin: 0 auto; padding: 1.25rem 1.25rem 4rem; max-width: 62rem;
-       background: var(--bg); color: var(--fg); }
-header { display: flex; align-items: baseline; gap: .75rem 1.25rem;
+
+/* THE BASE SIZE IS 17px AND IT IS A DECISION, not a default left alone. This
+   page was 16 with three quarters of its text at .85 and .78 of that — notes,
+   table headers, the nav — which is 12 to 13 real pixels on an iPad held at
+   arm's length. Small type is not restraint, it is a page the owner has to
+   lean into. What is secondary here is made secondary by COLOUR and SPACE;
+   size steps down once, to .94rem, and stops. */
+body { font: 17px/1.62 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+       "Helvetica Neue", sans-serif;
+       margin: 0 auto; padding: 1.5rem 1.5rem 5rem; max-width: 64rem;
+       background: var(--bg); color: var(--fg);
+       -webkit-font-smoothing: antialiased; }
+
+header { display: flex; align-items: baseline; gap: .6rem 1.5rem;
          flex-wrap: wrap; border-bottom: 1px solid var(--line);
-         padding-bottom: .7rem; margin-bottom: 1.4rem; }
-header h1 { font-size: 1.2rem; font-weight: 600; margin: 0;
-            letter-spacing: -.01em; }
+         padding-bottom: .9rem; margin-bottom: 1.8rem; }
+header h1 { font-size: 1.45rem; font-weight: 650; margin: 0;
+            letter-spacing: -.015em; }
 header nav { margin-left: auto; display: flex; align-items: center;
-             gap: .35rem; flex-wrap: wrap; font-size: .9rem; }
+             gap: .2rem; flex-wrap: wrap; }
 header nav a, header nav button {
-  display: inline-block; padding: .4rem .6rem; border-radius: 6px;
+  display: inline-block; padding: .45rem .7rem; border-radius: 8px;
   border: 1px solid transparent; background: transparent; color: var(--muted);
-  text-decoration: none; font-size: .9rem; min-height: 0; }
+  text-decoration: none; font-size: .97rem; font-weight: 500; min-height: 0;
+  cursor: pointer; }
 header nav a:hover, header nav button:hover {
-  color: var(--fg); background: var(--raised); }
-h2 { font-size: .95rem; font-weight: 600; text-transform: uppercase;
-     letter-spacing: .06em; color: var(--muted); margin: 2rem 0 .6rem; }
-p { margin: .7rem 0; }
-a { color: var(--accent); }
+  color: var(--fg); background: var(--raised); border-color: var(--line); }
+
+h2 { font-size: 1.16rem; font-weight: 650; letter-spacing: -.01em;
+     margin: 2.4rem 0 .8rem; padding-bottom: .35rem;
+     border-bottom: 1px solid var(--line); }
+h3 { font-size: 1.03rem; font-weight: 650; margin: 1.4rem 0 .5rem; }
+p { margin: .8rem 0; }
+a { color: var(--accent); text-underline-offset: .15em; }
+
 form.inline { display: inline; }
-label { display: block; margin: 1.1rem 0 .3rem; font-size: .85rem;
-        color: var(--muted); }
-/* A label that WRAPS a tick is not a field label, it is the thing being read:
-   in the lot page it carries the rule's title. Told apart with :has(), and a
-   browser that does not know :has() falls back to the small grey line this
-   page has always had — worse, never broken. */
-label:has(input[type=checkbox]) { font-size: 1rem; color: var(--fg);
-                                  margin: 0 0 .35rem; }
-input[type=password], input[type=text], select {
-  font: inherit; font-size: 1rem; padding: .55rem .7rem; min-height: 2.75rem;
-  border: 1px solid var(--line); border-radius: 8px; background: var(--field);
-  color: inherit; width: 100%; max-width: 24rem; }
-input:focus-visible, select:focus-visible, button:focus-visible {
+form { margin: 0 0 .9rem; }
+
+label { display: block; margin: 1.2rem 0 .35rem; font-size: .97rem;
+        font-weight: 600; color: var(--fg); }
+/* The sentence under a label is guidance, not a label: it wraps, it is not
+   bold, and it is the one place a step down in size is right. */
+label small, label .hint { display: block; font-weight: 400; font-size: .94rem;
+                           color: var(--muted); margin-top: .15rem; }
+label:has(input[type=checkbox]) { font-size: 1rem; font-weight: 500;
+                                  color: var(--fg); margin: 0 0 .4rem; }
+
+/* ⚠ SELECTED BY WHAT IT IS NOT, and that is the fix rather than a style. This
+   rule listed the types — [type=password], [type=text] — and an <input> with
+   NO type attribute is a text field that matches none of them: it kept the
+   browser's default width, about 140px, in the middle of a page where every
+   other box is full width. That was the "ridiculously small box": half the
+   forms here write `<input name=…>` without a type, because a text field is
+   the default. Written as an exclusion it cannot happen again. */
+input:not([type=checkbox]):not([type=radio]):not([type=submit]),
+select, textarea {
+  font: inherit; font-size: 1rem; padding: .65rem .8rem; min-height: 2.9rem;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--field);
+  color: inherit; width: 100%; max-width: 34rem; }
+/* Inside a table cell the box is the cell: a max-width there leaves a column
+   half empty next to a value that does not fit. */
+td input { max-width: none; }
+/* ⚠ A READONLY BOX MUST NOT LOOK LIKE AN EMPTY ONE WAITING FOR YOU. The login
+   carries one — the account name, there for the password managers — and drawn
+   like every other field it read as a question: "do I have to type this?".
+   Alfredo asked exactly that. Same shape, no cursor, and plainly not yours to
+   fill. */
+/* ⚠ The selector has to be as specific as the one above it, or it loses in
+   silence: `input:not(a):not(b):not(c)` counts as three classes, and a bare
+   [readonly] is one. It looked exactly like an editable box for one round of
+   screenshots. */
+input[readonly]:not([type=checkbox]):not([type=radio]) {
+  background: var(--raised); color: var(--muted); cursor: default;
+  border-style: dashed; }
+/* ⚠ PROSE GETS ROOM. brief and specs are the identity of a project and of
+   every consumer, they are read as markdown, and they were being written in a
+   box three lines tall — which is how a paragraph gets written short because
+   the box was short. Full width, tall, and resizable upwards by the person. */
+textarea { max-width: none; min-height: 16rem; line-height: 1.6;
+           resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo,
+           monospace; font-size: .97rem; }
+textarea.short { min-height: 7rem; }
+input:focus-visible, select:focus-visible, button:focus-visible,
+textarea:focus-visible {
   outline: 2px solid var(--accent); outline-offset: 2px; }
-input[type=checkbox] { width: 1.15rem; height: 1.15rem; margin-right: .35rem;
-                       vertical-align: -.15rem; accent-color: var(--accent); }
-button { font: inherit; font-size: 1rem; padding: .55rem 1rem;
-         min-height: 2.75rem; border: 1px solid var(--line); border-radius: 8px;
+input[type=checkbox] { width: 1.2rem; height: 1.2rem; margin-right: .4rem;
+                       vertical-align: -.18rem; accent-color: var(--accent); }
+
+button { font: inherit; font-size: 1rem; font-weight: 600; padding: .6rem 1.1rem;
+         min-height: 2.9rem; border: 1px solid var(--line); border-radius: 10px;
          background: var(--raised); color: inherit; cursor: pointer; }
 button:hover { border-color: var(--muted); }
-table { border-collapse: collapse; width: 100%; font-size: .92rem;
-        margin: .5rem 0; }
-th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line);
-         vertical-align: top; overflow-wrap: anywhere; }
-th { font-size: .78rem; text-transform: uppercase; letter-spacing: .05em;
-     color: var(--muted); font-weight: 600; }
+/* The one that writes the thing this form is for. One per form, or the accent
+   stops meaning anything. */
+button.go { background: var(--accent); color: var(--accent-fg);
+            border-color: var(--accent); }
+button.go:hover { filter: brightness(1.08); }
+
+table { border-collapse: collapse; width: 100%; font-size: 1rem;
+        margin: .6rem 0 1rem; }
+th, td { text-align: left; padding: .6rem .7rem;
+         border-bottom: 1px solid var(--line); vertical-align: top;
+         overflow-wrap: anywhere; }
+th { font-size: .94rem; color: var(--muted); font-weight: 600; }
 tr:last-child td { border-bottom: none; }
+
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-       font-size: .9em; background: var(--raised); border-radius: 4px;
-       padding: .1rem .3rem; }
+       font-size: .93em; background: var(--raised); border-radius: 5px;
+       padding: .12rem .35rem; }
+/* The minted codes, on one line, separated by TWO SPACES so that one drag
+   takes the lot. `pre-wrap` and not the default: HTML collapses runs of
+   whitespace, so without it the two spaces that make the run readable — and
+   that survive the paste — would arrive as one. `break-all` because the run
+   is long and an iPad is narrow. */
+code.run { white-space: pre-wrap; overflow-wrap: break-all; font-size: 1rem;
+           display: block; padding: .7rem .8rem; line-height: 1.9;
+           letter-spacing: .01em; }
 /* Rule bodies are prose, and they used to run off the side of an iPad: a
    horizontal scrollbar inside a page you read with a thumb is a paragraph you
    do not read. */
 pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: .9rem; line-height: 1.5; white-space: pre-wrap;
-      overflow-wrap: anywhere; background: var(--raised); border-radius: 8px;
-      padding: .7rem .8rem; margin: .5rem 0; }
-article { border: 1px solid var(--line); border-radius: 10px;
-          padding: .9rem 1rem; margin: .9rem 0; }
-.note { font-size: .85rem; color: var(--muted); }
+      font-size: .95rem; line-height: 1.55; white-space: pre-wrap;
+      overflow-wrap: anywhere; background: var(--raised); border-radius: 10px;
+      padding: .8rem .9rem; margin: .6rem 0; }
+
+article, div.entry, div.card {
+  border: 1px solid var(--line); border-radius: 12px;
+  padding: 1rem 1.1rem; margin: 1rem 0; background: var(--field);
+  box-shadow: var(--shadow); }
+div.entry form { margin: .4rem 0; }
+div.entry details, div.card details { margin-top: .6rem; }
+details > summary { cursor: pointer; font-weight: 600; color: var(--accent);
+                    padding: .35rem 0; }
+/* THE RENDERED MARKDOWN of a brief or a specs. It is prose being read, so it
+   is set at reading size with room around it — and boxed, so that where the
+   document ends is visible when it sits next to the box you edit it in. */
+div.md { background: var(--raised); border: 1px solid var(--line);
+         border-radius: 10px; padding: .3rem 1rem; margin: .5rem 0; }
+div.md > :first-child { margin-top: .6rem; }
+div.md h1, div.md h2, div.md h3 { border: none; padding: 0;
+                                  margin: 1.2rem 0 .4rem; }
+div.md h1 { font-size: 1.25rem; } div.md h2 { font-size: 1.12rem; }
+div.md h3 { font-size: 1.02rem; }
+div.md ul, div.md ol { margin: .6rem 0; padding-left: 1.4rem; }
+div.md li { margin: .25rem 0; }
+div.md blockquote { margin: .7rem 0; padding: .1rem 0 .1rem .9rem;
+                    border-left: 3px solid var(--line); color: var(--muted); }
+div.md hr { border: none; border-top: 1px solid var(--line); margin: 1.2rem 0; }
+div.md table { font-size: .97rem; }
+div.md p:last-child { margin-bottom: .8rem; }
+.empty { color: var(--muted); font-style: italic; }
+
+.note { font-size: .94rem; color: var(--muted); }
+/* ⚠ URGENT is a TAG and not a banner. It was `.bad`, which carries a left rule,
+   a padded background and block spacing — an ornament designed for a sentence
+   on its own line, and beside a title it read as a stray red bar. */
+.tag { display: inline-block; font-size: .82rem; font-weight: 700;
+       letter-spacing: .04em; padding: .1rem .45rem; border-radius: 6px;
+       vertical-align: .1em; margin-left: .45rem;
+       background: var(--bad-bg); color: var(--bad); }
+/* A field and the button that acts on it belong on ONE line: stacked, three
+   entries fill a screen with two boxes each and the page stops being a list. */
+form.row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap;
+           margin: .5rem 0; }
+form.row input { flex: 1 1 18rem; max-width: none; }
+form.row button { flex: 0 0 auto; }
 .bad { border-left: 3px solid var(--bad); background: var(--bad-bg);
-       color: var(--bad); padding: .6rem .8rem; border-radius: 0 8px 8px 0; }
+       color: var(--bad); padding: .75rem .9rem; border-radius: 0 10px 10px 0;
+       font-size: 1rem; }
 .ok { border-left: 3px solid var(--good); background: var(--good-bg);
-      color: var(--good); padding: .6rem .8rem; border-radius: 0 8px 8px 0; }
-.bad code, .ok code { background: #8881; }
+      color: var(--good); padding: .75rem .9rem; border-radius: 0 10px 10px 0;
+      font-size: 1rem; }
 """
 
 
@@ -284,6 +444,154 @@ def _esc(v) -> str:
     return html.escape("" if v is None else str(v), quote=True)
 
 
+def _when(stamp: str) -> str:
+    """A timestamp as a person reads one: `2026-Aug-30 11:04`.
+
+    The database keeps ISO-8601 in UTC and that is right — it sorts, it is
+    unambiguous, and every other reader of this file wants it. On a page it is
+    seventeen characters of machinery in the middle of a sentence. The format
+    is the vault's own, `%Y-%b-%d`, so a date copied off this page into a
+    document is already spelled the way that document spells dates."""
+    raw = (stamp or "").strip()
+    try:
+        return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").strftime(
+            "%Y-%b-%d %H:%M")
+    except ValueError:
+        return raw
+
+
+def _same(a: str, b: str) -> bool:
+    """Two names as a PERSON means them, for cosmetics only.
+
+    ⚠ It is deliberately not the engine's `_fold`, and this file does not
+    import it: what decides whether two names are the same consumer is the
+    engine, on every call, and a second opinion about identity living here is
+    the seam where a page starts believing something the database does not.
+    What this decides is which fold on the page is open, and being wrong about
+    that costs a click."""
+    return (a or "").strip().casefold() == (b or "").strip().casefold()
+
+
+def _md(text: str) -> str:
+    """A brief, a specs or a rule's body, RENDERED — headings, lists, tables,
+    quotes, emphasis, code, rules.
+
+    ⚠ WRITTEN HERE, in eighty lines, and not fetched. A markdown library is a
+    dependency in the page that approves rules and one more thing to keep
+    pinned; a script from a CDN is a third party in it, which this service has
+    refused since the beginning and refuses in the same words for the same
+    reason. What is rendered here is a NOTE somebody wrote about their own
+    project — it does not need footnotes, reference links or nested emphasis,
+    and the day it does, this function grows a case rather than the image
+    growing a package.
+
+    ⚠ DECLARED LIMIT, so that it is a known shape and not a surprise: a NESTED
+    list is flattened by one level. Everything else a note in this house
+    actually contains — and half of them are tables — comes out right.
+
+    ⚠ AND IT ESCAPES FIRST, ALWAYS. Every line goes through `_esc` before a
+    single tag is put around it, so a brief containing `<script>` is a brief
+    that READS `<script>`. The inline pass then only ever adds tags of its own
+    around text that can no longer carry any: there is no path here where a
+    character from the database reaches the page unescaped, and that ordering
+    is the whole of the safety."""
+    if not (text or "").strip():
+        return "<p class='empty'>Empty.</p>"
+    out, lines, i = [], (text or "").replace("\r\n", "\n").split("\n"), 0
+    para: list = []
+    listing = None          # 'ul' | 'ol' | None
+
+    def _inline(s: str) -> str:
+        s = _esc(s)
+        # Code first, and what it captures is not looked at again: a backtick
+        # span is the one place where the other markers are literal text.
+        holes: list = []
+
+        def _keep(m):
+            holes.append(m.group(1))
+            return f"\x00{len(holes) - 1}\x00"
+        s = re.sub(r"`([^`]+)`", _keep, s)
+        s = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)
+        s = re.sub(r"(?<![*\w])\*([^*]+)\*(?!\w)", r"<i>\1</i>", s)
+        s = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
+                   r'<a href="\2" rel="noreferrer">\1</a>', s)
+        return re.sub(r"\x00(\d+)\x00",
+                      lambda m: f"<code>{holes[int(m.group(1))]}</code>", s)
+
+    def _flush():
+        nonlocal para, listing
+        if para:
+            out.append("<p>" + "<br>".join(_inline(x) for x in para) + "</p>")
+            para = []
+        if listing:
+            out.append(f"</{listing}>")
+            listing = None
+
+    while i < len(lines):
+        raw = lines[i]
+        line = raw.rstrip()
+        i += 1
+        if not line.strip():
+            _flush()
+            continue
+        head = re.match(r"(#{1,4})\s+(.*)", line)
+        if head:
+            _flush()
+            lvl = min(len(head.group(1)) + 1, 4)
+            out.append(f"<h{lvl}>{_inline(head.group(2))}</h{lvl}>")
+            continue
+        if re.fullmatch(r"(-\s*){3,}|(\*\s*){3,}|(_\s*){3,}", line.strip()):
+            _flush()
+            out.append("<hr>")
+            continue
+        # A TABLE, because a brief in this house is half tables. It is taken
+        # whole — header, the dashes, then rows until a line that is not one —
+        # since a table half-rendered is worse than a table not rendered.
+        if line.lstrip().startswith("|") and i < len(lines) \
+                and re.fullmatch(r"[|\s:-]+", lines[i].strip() or "x"):
+            _flush()
+            def _cells(r):
+                return [c.strip() for c in r.strip().strip("|").split("|")]
+            head_cells = _cells(line)
+            i += 1
+            body_rows = []
+            while i < len(lines) and lines[i].lstrip().startswith("|"):
+                body_rows.append(_cells(lines[i]))
+                i += 1
+            out.append(
+                "<table><thead><tr>"
+                + "".join(f"<th>{_inline(c)}</th>" for c in head_cells)
+                + "</tr></thead><tbody>"
+                + "".join("<tr>" + "".join(f"<td>{_inline(c)}</td>" for c in r)
+                          + "</tr>" for r in body_rows)
+                + "</tbody></table>")
+            continue
+        if line.lstrip().startswith(">"):
+            _flush()
+            out.append(f"<blockquote>{_inline(line.lstrip()[1:].strip())}"
+                       f"</blockquote>")
+            continue
+        item = re.match(r"\s*([-*+]|\d+[.)])\s+(.*)", line)
+        if item:
+            kind = "ol" if item.group(1)[0].isdigit() else "ul"
+            if listing != kind:
+                if para:
+                    out.append("<p>" + "<br>".join(_inline(x) for x in para) + "</p>")
+                    para = []
+                if listing:
+                    out.append(f"</{listing}>")
+                out.append(f"<{kind}>")
+                listing = kind
+            out.append(f"<li>{_inline(item.group(2))}</li>")
+            continue
+        if listing:
+            out.append(f"</{listing}>")
+            listing = None
+        para.append(line.strip())
+    _flush()
+    return "<div class='md'>" + "".join(out) + "</div>"
+
+
 def _page(title: str, body: str, *, nav: str = "") -> str:
     return (f"<!doctype html><html lang='en'><head><meta charset='utf-8'>"
             f"<meta name='viewport' content='width=device-width, initial-scale=1'>"
@@ -292,23 +600,43 @@ def _page(title: str, body: str, *, nav: str = "") -> str:
 
 
 def _login_page(message: str = "") -> str:
-    # The hidden, CONSTANT username field is not decoration. A form with the
-    # password alone is the case where 1Password and the Apple keychain fill
-    # the wrong thing, or nothing, without saying so: they key an entry on a
-    # user. There is one user here, so the field is hidden and its value never
-    # changes.
+    """The door, written the way a password manager reads a door.
+
+    ⚠ THE USERNAME FIELD IS VISIBLE NOW, and that is the fix rather than a
+    change of taste. It carried `hidden` before, which is `display:none` — and
+    a field that is not displayed is a field 1Password and the Apple keychain
+    SKIP: they key an entry on a user, so a form whose only visible control is
+    a password reads to them as a password with no account, and they offer
+    neither to fill it nor to save it. Nothing failed, nothing was logged, the
+    autofill simply never appeared. So the field is shown, readonly, with the
+    one value it can have.
+
+    ⚠ AND THE OTHER HALF IS NOT IN THIS FILE. Safari, Chrome and 1Password all
+    treat a password typed over plain HTTP as one not worth remembering, and
+    this page is served as `http://<ip>:9443`. If the offer to save still does
+    not appear, that is why, and the cure is an https address for this port
+    from inside the tailnet — `tailscale serve` — not more markup here."""
     warn = f"<p class='bad'>{_esc(message)}</p>" if message else ""
     return _page("Sign in", f"""{warn}
 <form method="post" action="/login">
-  <input type="text" name="username" value="codifier" autocomplete="username"
-         hidden readonly>
-  <label for="master">Master</label>
+  <label for="username">Account<span class="hint">Fixed, and not something to
+  type: it is here only so a password manager has a name to file the entry
+  under. There is one user.</span></label>
+  <input id="username" type="text" name="username" value="codifier"
+         autocomplete="username" readonly tabindex="-1">
+  <label for="master">Password<span class="hint">The one from
+  <code>WEB_UI_PASSWORD</code> on the container.</span></label>
   <input id="master" type="password" name="master" autocomplete="current-password"
          required autofocus>
-  <p><button type="submit">Sign in</button></p>
+  <p><button class="go" type="submit">Sign in</button></p>
 </form>
-<p class="note">One hour of inactivity ends the session, and so does a restart
-of the service.</p>""")
+<p class="note">Typed once, here, and not again: every page behind this one
+takes the session and nothing else. Eight hours of inactivity end it, and so
+does a restart of the service.</p>
+<p class="note">⚠ If your password manager still does not offer to save this,
+the reason is the plain <code>http://</code> address: browsers do not keep
+passwords typed over one. The cure is an https address for this port from
+inside the tailnet, not anything on this page.</p>""")
 
 
 # =====================================================================
@@ -485,12 +813,26 @@ def build(*, registry, log, master: str, refusal, fault,
     def _project_nav(name: str) -> str:
         n = _esc(name)
         return (f"<a href='/p/{n}/batch'>lot</a><a href='/p/{n}/rules'>rules</a>"
+                f"<a href='/p/{n}/tasks'>log</a>"
                 f"<a href='/p/{n}/profile'>profile</a>"
-                f"<a href='/p/{n}/people'>people</a>"
+                f"<a href='/p/{n}/consumers'>consumers</a>"
                 f"<a href='/p/{n}/codes'>codes</a>"
                 f"<a href='/p/{n}/status'>state</a><a href='/'>projects</a>"
                 "<form class='inline' method='post' action='/logout'>"
                 "<button type='submit'>sign out</button></form>")
+
+    def _preview(label: str, text: str) -> str:
+        """The rendered half of a markdown field, in a fold under its box.
+
+        Folded and not beside it, because this page is read on an iPad as often
+        as at the desk and two columns there is two narrow columns. Open by
+        DEFAULT when there is something to show: a preview nobody opens is a
+        preview nobody has, and the whole point is to notice that the table did
+        not come out as a table."""
+        if not (text or "").strip():
+            return ""
+        return (f"<details open><summary>{_esc(label)}</summary>"
+                f"{_md(text)}</details>")
 
     def _consumer_picker(name: str, prj, chosen: str, where: str) -> str:
         """The consumer is a MENU and not a text field, and the list comes from
@@ -641,10 +983,6 @@ def build(*, registry, log, master: str, refusal, fault,
                 f"you read again.</p>"
                 f"{ceiling}"
                 f"<p class='note'>{_esc(current['contract'])}</p>"
-                f"<label for='master'>Master — once for this action, never once "
-                f"per rule</label>"
-                f"<input id='master' type='password' name='master' "
-                f"autocomplete='current-password' required>"
                 f"<p><button type='submit'>Approve the ticked, deny the rest</button></p>"
                 f"</form>")
         return HTMLResponse(_page(f"{name} — the lot", body, nav=_project_nav(name)),
@@ -669,14 +1007,11 @@ def build(*, registry, log, master: str, refusal, fault,
         if prj is None:
             return _no_project(name)
         form = await request.form()
-        # The master, ONCE for the action and never once per rule: four rules
-        # are not four passwords, and a password typed four times is typed
-        # without looking — which is the very defect the lot was invented to
-        # avoid.
-        if not secrets.compare_digest((form.get("master") or "").strip(), master):
-            log.warning("refused web approval: wrong master, from %s", _client(request))
-            return _lot_page(name, prj, status=401,
-                             message="Wrong master. Nothing was changed.")
+        # NO MASTER HERE any more, and what took its place is not nothing: the
+        # DIGEST. The guard this page needs is not "is this the right person" —
+        # the session answered that at the door — it is "is this the queue you
+        # read", and a password never answered that. It travels in the hidden
+        # field and `decide()` compares it inside the transaction.
         seen = (form.get("digest") or "").strip()
         ticked = [i.strip() for i in form.getlist("approve") if i.strip()]
         # One reason per proposal, carried on a field named after the ID it
@@ -746,48 +1081,68 @@ def build(*, registry, log, master: str, refusal, fault,
     # MODIFICATION of something that already exists asks for, on top of the
     # admin code. It sits on the PROJECT because that is what it is — a row in
     # that project's database, so a code belongs to its project by
-    # construction rather than by a check — and behind the master retyped,
-    # because a browser left open on the iPad must not be able to mint the
-    # second factor of every structural gesture.
+    # construction rather than by a check — and behind the session, which since
+    # v7.0.0 is the whole of what this page asks. What keeps a minted code
+    # small is not a password in front of it: it is that it lives minutes and
+    # buys ONE gesture.
     #
     # It is copied by hand from here into the chat that needs it. That is not
     # a limitation to route around: the point of a code somebody has to go and
     # fetch is the breath it forces — it guards against haste, not malice.
 
-    def _codes_html(name: str, prj, *, minted=None, message: str = "") -> str:
+    def _codes_html(name: str, prj, *, run=(), minted=None,
+                    message: str = "") -> str:
+        """`run` is what has been minted SINCE THIS PAGE WAS OPENED, in order,
+        the newest last. Three codes is the button pressed three times, and
+        they stay on the page together so that one drag takes all three —
+        which is the gesture this page exists for: a chat that needs three
+        modifications needs three codes, and fetching them one page-load at a
+        time was the whole of the tedium.
+
+        It is carried in a HIDDEN FIELD and in no other state: no server-side
+        basket that would outlive the tab and hold cleartext codes for
+        whoever asks next, and no cookie. The field holds exactly what is
+        already printed on the page in front of the person — so it adds no
+        exposure — and it dies when the page is left, which is why the GET
+        starts an empty run rather than restoring one."""
         data = prj.auth_codes()
         head = f"<p class='bad'>{_esc(message)}</p>" if message else ""
-        if minted:
-            # SHOWN ONCE, and once is all it is good for. What the database
-            # keeps is a hash, so this is not a value that can be read back
-            # from anywhere — leaving the page without copying it costs
+        if run:
+            # SHOWN ONCE, and once is all they are good for. What the database
+            # keeps is a hash, so these are not values that can be read back
+            # from anywhere — leaving the page without copying them costs
             # another minting, which is cheap and is the whole reason this is
             # not treated as a secret to store.
-            head += (f"<p class='ok'>Copy it now — it is not shown again and "
-                     f"it cannot be read back:</p>"
-                     f"<p><code>{_esc(minted['auth_code'])}</code></p>"
-                     f"<p class='note'>Good until {_esc(minted['expires_at'])} "
+            head += (f"<p class='ok'>{'Copy it now' if len(run) == 1 else f'All {len(run)} of them, in one drag'}"
+                     f" — not shown again, and they cannot be read back:</p>"
+                     f"<p><code class='run'>{_esc('  '.join(run))}</code></p>")
+        if minted:
+            head += (f"<p class='note'>The last one is good until "
+                     f"{_esc(_when(minted['expires_at']))} "
                      f"({_esc(minted['minutes'])} minutes), for ONE gesture on "
                      f"<b>{_esc(minted['project'])}</b>. A refused gesture rolls "
-                     f"it back and does not spend it.</p>")
+                     f"it back and does not spend it. Press the button again for "
+                     f"another, and it joins the line above.</p>")
         live = "".join(f"<tr><td>#{_esc(r['code_id'])}</td>"
-                       f"<td class='note'>minted {_esc(r['minted_at'])}</td>"
-                       f"<td>expires {_esc(r['expires_at'])}</td></tr>"
+                       f"<td class='note'>minted {_esc(_when(r['minted_at']))}</td>"
+                       f"<td>expires {_esc(_when(r['expires_at']))}</td></tr>"
                        for r in data["live"])
         spent = "".join(f"<tr><td>#{_esc(r['code_id'])}</td>"
-                        f"<td class='note'>minted {_esc(r['minted_at'])}</td>"
-                        f"<td class='note'>spent {_esc(r['spent_at'])}</td>"
+                        f"<td class='note'>minted {_esc(_when(r['minted_at']))}</td>"
+                        f"<td class='note'>spent {_esc(_when(r['spent_at']))}</td>"
                         f"<td>{_esc(r['spent_action'])}</td></tr>"
                         for r in data["spent"])
         return (head
                 + "<form method='post' action='/p/" + _esc(name) + "/codes'>"
+                  "<input type='hidden' name='run' value='"
+                + _esc(" ".join(run)) + "'>"
                   "<label for='minutes'>Minutes it lives (blank = "
                 + _esc(data["default_minutes"]) + ")</label>"
                   "<input id='minutes' type='text' name='minutes' inputmode='numeric'>"
-                  "<label for='cmaster'>Master — once for this action</label>"
-                  "<input id='cmaster' type='password' name='master' "
-                  "autocomplete='current-password' required>"
-                  "<p><button type='submit'>Mint a one-time code</button></p></form>"
+                  "<p><button class='go' type='submit'>Mint"
+                + (" another" if run else " a one-time code") + "</button>"
+                + ("&nbsp;&nbsp;<a href='/p/" + _esc(name) + "/codes'>start a "
+                   "fresh line</a>" if run else "") + "</p></form>"
                 + f"<h2>Live — {_esc(data['count_live'])}</h2>"
                 + (f"<table><tbody>{live}</tbody></table>" if live
                    else "<p class='note'>None. A gesture that needs one is "
@@ -822,21 +1177,24 @@ def build(*, registry, log, master: str, refusal, fault,
         if prj is None:
             return _no_project(name)
         form = await request.form()
-        # The master, RETYPED for the action, compared in constant time —
-        # inline, not delegated: the guard is pinned as written, and a session
-        # alone is a browser left open on the iPad.
-        if not secrets.compare_digest((form.get("master") or "").strip(), master):
-            log.warning("refused web minting: wrong master, from %s", _client(request))
-            return HTMLResponse(
-                _page(f"{name} — one-time codes",
-                      _codes_html(name, prj,
-                                  message="Wrong master. Nothing was minted."),
-                      nav=_project_nav(name)), status_code=401)
+        # NO MASTER HERE any more (v7.0.0). Minting is a gesture with a
+        # ceiling of its own — the code lives minutes and buys ONE gesture —
+        # and the password in front of it bought nothing that the session and
+        # the expiry did not already buy. What it cost was real: a code was
+        # never minted without typing the master, and three codes meant typing
+        # it three times.
+        # WHAT THE PAGE ALREADY SHOWS, handed back so the next one can join it.
+        # It is split on whitespace and filtered, and it is never parsed for
+        # meaning: this field decides what gets PRINTED and nothing else, so
+        # the worst a doctored one can do is print rubbish to the person who
+        # doctored it. A code is spent against the hash in the database, which
+        # is not reachable from here.
+        run = [c for c in (form.get("run") or "").split() if c][-CODE_RUN_MAX:]
         raw = (form.get("minutes") or "").strip()
         if raw and not raw.isdigit():
             return HTMLResponse(
                 _page(f"{name} — one-time codes",
-                      _codes_html(name, prj, message=(
+                      _codes_html(name, prj, run=run, message=(
                           f"{raw!r} is not a whole number of minutes. Nothing "
                           f"was minted.")),
                       nav=_project_nav(name)), status_code=400)
@@ -848,14 +1206,15 @@ def build(*, registry, log, master: str, refusal, fault,
             log.info("refused web minting: %s", e)
             return HTMLResponse(
                 _page(f"{name} — one-time codes",
-                      _codes_html(name, prj, message=str(e)),
+                      _codes_html(name, prj, run=run, message=str(e)),
                       nav=_project_nav(name)), status_code=400)
         # The MINTING is logged and the code is not: what a log is for here is
         # answering "who let that gesture through", and the answer is the row,
         # not the secret.
         log.info("one-time code minted for %s, %s minutes", name, minted["minutes"])
+        run = (run + [minted["auth_code"]])[-CODE_RUN_MAX:]
         return HTMLResponse(_page(f"{name} — one-time codes",
-                                  _codes_html(name, prj, minted=minted),
+                                  _codes_html(name, prj, run=run, minted=minted),
                                   nav=_project_nav(name)))
 
     async def project_backup(request):
@@ -1089,18 +1448,30 @@ def build(*, registry, log, master: str, refusal, fault,
     # because that tool was insecure — it asked for the admin code — but
     # because these three are what everything else is read against: the brief
     # is the project's identity and the specs are the facts of the day. A chat
-    # may SUGGEST the wording; the change is a person's, behind this password.
+    # may SUGGEST the wording; the change is a person's, made at this page.
     #
     # It is the same shape as the lot and the minting, and deliberately not a
-    # new one: session, master retyped for the action, refusals as sentences.
+    # new one: session, then refusals as sentences.
 
-    # ---------- the people: because they are people ----------
+    # ---------- the anagrafica: every consumer, and the whole of one --------
     #
-    # A chat and a skill are machinery and a tool manages them. A person is
-    # not, and the whole of their row lives here: created, given an address,
-    # marked as the one who hears about the proposals, retired. Alfredo,
-    # naming it: "i consumer human si gestiscono tutti sulla UI, perché sono
-    # human."
+    # WHAT THIS PAGE IS FOR. Until v7.0.0 it was `people`, and it held the
+    # humans only: a chat and a skill are machinery, a tool manages them, and
+    # so the person who owns the project could see every consumer EXCEPT
+    # through a chat — and could not read a brief at all without asking one.
+    # The mandate of every chat and every skill in the register was writable
+    # only by the machinery it governs.
+    #
+    # So it is the anagrafica now, all three kinds on it, and it answers the
+    # three questions a person actually arrives with: who is in this project,
+    # what does this one's mandate SAY, and get this one out of my way.
+    #
+    # ⚠ NOTHING IS DELETED, and the page says so where the button is. A
+    # consumer is RETIRED: the row stays, every pointer at it still reads, the
+    # name stays taken, and the gesture is undone with `revive` rather than by
+    # creating the name again. That is not this page being careful — it is the
+    # schema, which keeps history as whole snapshots and would have nothing to
+    # point at if rows went away.
     #
     # It calls `prj.amend_project(..., on_the_page=True)` — the SAME method the
     # tool calls, with the flag that lifts the refusal keeping chats away from
@@ -1109,107 +1480,205 @@ def build(*, registry, log, master: str, refusal, fault,
     # unduplicated. A page with its own copy of those rules would be a page
     # with one of them out of step.
 
-    def _people_html(name: str, prj, message: str = "", ok_msg: str = "") -> str:
-        people = [c for c in prj.project_info()["consumers"] if c["kind"] == "human"]
-        now = prj.approver()
+    def _said(verdict: dict, did: str = "") -> str:
+        """What the engine answered, turned into the page's one green line.
+
+        ⚠ `note` is OPTIONAL on that verdict and always was: it is written only
+        where the engine has something to add that the gesture does not say by
+        itself — creating a PERSON, who is now on the page with no address yet.
+        Read as `verdict["note"]` this raised a KeyError on every other gesture
+        — a 500 on a write that had already SUCCEEDED, which is the worst shape
+        a bug can have: the database moved and the page said the server broke.
+        Caught by the live probe on the first chat ever created here."""
+        head = verdict.get("name", "")
+        if did:
+            head = f"{head} {did}."
+        note = (verdict.get("note") or "").strip()
+        return f"{head} {note}".strip() if note else (head or "Written.")
+
+    def _consumers_html(name: str, prj, message: str = "", ok_msg: str = "",
+                        editing: str = "") -> str:
+        data = prj.roster()
+        people = [c for c in data["consumers"]
+                  if c["kind"] == "human" and not c["retired"]]
+        act = f"/p/{_esc(name)}/consumers"
         head = (f"<p class='bad'>{_esc(message)}</p>" if message else "") + \
                (f"<p class='ok'>{_esc(ok_msg)}</p>" if ok_msg else "")
-        act = f"/p/{_esc(name)}/people"
 
-        add = (f"<h2>Add a person</h2>"
+        def _card(c: dict) -> str:
+            tags = [c["kind"]]
+            if c["approver"]:
+                tags.append("approver")
+            if c["signed"]:
+                tags.append("signs its gestures")
+            if c["retired"]:
+                tags.append("RETIRED")
+            facts = (f"<p class='note'>{' · '.join(_esc(t) for t in tags)}"
+                     + (f" · in {', '.join(_esc(g) for g in c['groups'])}"
+                        if c["groups"] else " · in no group")
+                     + f" · reached by {_esc(c['rules_in_force'])} rules in force"
+                     + f" · {_esc(c['open_entries'])} open on its desk</p>")
+            if c["retired"]:
+                body = (f"<p class='note'>Retired {_esc(_when(c['retired_at']))} — "
+                        f"{_esc(c['reason'] or 'no reason recorded')}</p>"
+                        f"<form method='post' action='{act}'>"
+                        f"<input type='hidden' name='action' value='revive'>"
+                        f"<input type='hidden' name='who' value='{_esc(c['name'])}'>"
+                        f"<p><button type='submit'>Bring it back</button></p>"
+                        f"</form>")
+                return (f"<div class='card'><h3>{_esc(c['name'])}</h3>{facts}"
+                        f"{body}</div>")
+            if c["kind"] == "human":
+                shown = ("<p class='note'>A person receives entries and no "
+                         "rules, and carries no brief and no specs: they "
+                         "already know who they are. Their address is written "
+                         "in <i>The post</i> above, with everybody's, because "
+                         "it is one question.</p>")
+            else:
+                shown = (f"<h4>Brief</h4>{_md(c['brief'] or '')}"
+                         f"<h4>Specs</h4>{_md(c['specs'] or '')}")
+            # THE EDITOR IS A FOLD, and it is open only for the consumer just
+            # written or just asked for: a page with fifteen open editors is a
+            # page where the wrong box gets typed into, and one with none open
+            # is one where the button is not found. `editing` carries the
+            # answer from the gesture that landed here.
+            openness = " open" if _same(editing, c["name"]) else ""
+            editor = (f"<details{openness}><summary>Edit {_esc(c['name'])}"
+                      f"</summary>"
+                      f"<form method='post' action='{act}'>"
+                      f"<input type='hidden' name='action' value='amend'>"
+                      f"<input type='hidden' name='who' value='{_esc(c['name'])}'>"
+                      f"<label>Name<span class='hint'>ONE WORD. Renaming keeps "
+                      f"the row and its whole history — the spelling is data, "
+                      f"the identity is not.</span></label>"
+                      f"<input name='newname' value='{_esc(c['name'])}'>")
+            if c["kind"] != "human":
+                editor += (f"<label>Brief<span class='hint'>Who this consumer "
+                           f"is and what it is for. It leads every "
+                           f"<code>rules_list</code> this consumer makes, so "
+                           f"it is the first thing it reads about itself. "
+                           f"Markdown.</span></label>"
+                           f"<textarea name='brief' rows='16'>"
+                           f"{_esc(c['brief'] or '')}</textarea>"
+                           f"<label>Specs<span class='hint'>Its living facts — "
+                           f"true today, false tomorrow, with nobody having "
+                           f"decided anything. Markdown.</span></label>"
+                           f"<textarea name='specs' rows='16'>"
+                           f"{_esc(c['specs'] or '')}</textarea>")
+            editor += (f"<p><button class='go' type='submit'>Write it</button>"
+                       f"</p></form>"
+                       f"<form method='post' action='{act}'>"
+                       f"<input type='hidden' name='action' value='retire'>"
+                       f"<input type='hidden' name='who' value='{_esc(c['name'])}'>"
+                       f"<label>Retire it — why"
+                       f"<span class='hint'>Nothing is deleted: the row stays, "
+                       f"every pointer at it still reads, and the name stays "
+                       f"TAKEN because an ID is never reused. This sentence is "
+                       f"what whoever finds the dead row in six months will "
+                       f"read. A desk with open entries on it is refused — "
+                       f"close those first, or hand them over.</span></label>"
+                       f"<input name='reason' required>"
+                       f"<p><button type='submit'>Retire</button></p></form>"
+                       f"</details>")
+            return (f"<div class='card'><h3>{_esc(c['name'])}</h3>{facts}"
+                    f"{shown}{editor}</div>")
+
+        add = (f"<h2>Add a consumer</h2>"
                f"<form method='post' action='{act}'>"
-               f"<input type='hidden' name='action' value='add'>"
-               f"<label for='pname'>Their name — ONE WORD, no spaces. It is "
-               f"quoted by hand in chat instructions and in scheduled prompts, "
-               f"and a space is the character nobody sees when it is "
-               f"wrong.</label>"
-               f"<input id='pname' name='who' required>"
-               f"<label for='amaster'>Master — once for this action</label>"
-               f"<input id='amaster' type='password' name='master' "
-               f"autocomplete='current-password' required>"
-               f"<p><button type='submit'>Add</button></p></form>"
-               f"<p class='note'>A person receives tasks and no rules, and has "
-               f"no brief and no specs: they already know who they are and "
-               f"what they have to do. Give them an address below, or their "
-               f"desk stays silent.</p>")
+               f"<input type='hidden' name='action' value='create'>"
+               f"<label for='cname'>Name"
+               f"<span class='hint'>ONE WORD, no spaces. It is quoted by hand "
+               f"in chat instructions and in scheduled prompts, and a space is "
+               f"the character nobody sees when it is wrong.</span></label>"
+               f"<input id='cname' name='who' required>"
+               f"<label for='ckind'>What it is"
+               f"<span class='hint'>A <b>chat</b> or a <b>skill</b> is "
+               f"machinery and carries a mandate; a <b>person</b> receives "
+               f"entries, carries an address, and has neither brief nor specs "
+               f"— they already know who they are.</span></label>"
+               f"<select id='ckind' name='kind'>"
+               f"<option value='chat'>chat</option>"
+               f"<option value='skill'>skill</option>"
+               f"<option value='human'>person</option></select>"
+               f"<label for='cbrief'>Brief"
+               f"<span class='hint'>Who it is and what it is for. Optional here "
+               f"— the card below writes it too, with a preview. Ignored for a "
+               f"person, who has neither. Markdown.</span></label>"
+               f"<textarea id='cbrief' name='brief' class='short'></textarea>"
+               f"<label for='cspecs'>Specs"
+               f"<span class='hint'>Its living facts. Same three sentences as "
+               f"above.</span></label>"
+               f"<textarea id='cspecs' name='specs' class='short'></textarea>"
+               f"<p><button class='go' type='submit'>Add</button></p></form>"
+               f"<p class='note'>⚠ <b>What cannot be changed afterwards, and "
+               f"where the refusal comes from.</b> The KIND is fixed at "
+               f"creation: a chat that became a skill would be a row whose "
+               f"history describes two different things. And a PERSON never "
+               f"carries a brief or specs — that one is the database's, a "
+               f"CHECK on the table, not this page being careful: they already "
+               f"know who they are, and two writable fields nobody reads are "
+               f"the same disease as an address on a chat. Everything else "
+               f"about any consumer is written from here.</p>")
 
-        if not people:
-            return head + add + ("<h2>The post</h2><p class='note'>Nobody yet. "
-                                 "Proposals entering the queue notify no one, "
-                                 "and are seen by opening the lot page.</p>")
+        if people:
+            rows = "".join(
+                f"<tr><td>{_esc(c['name'])}</td>"
+                f"<td><input name='email:{_esc(c['name'])}' "
+                f"value='{_esc(c['email'])}' "
+                f"placeholder='no address — nothing is posted to them'></td>"
+                f"<td><input type='radio' name='who' "
+                f"value='{_esc(c['name'])}'"
+                + (" checked" if c["approver"] else "")
+                + "></td></tr>" for c in people)
+            post = (f"<h2>The post</h2>"
+                    f"<form method='post' action='{act}'>"
+                    f"<input type='hidden' name='action' value='post'>"
+                    f"<table><thead><tr><th>Person</th>"
+                    f"<th>Their email address</th>"
+                    f"<th>Gets the proposals</th></tr></thead>"
+                    f"<tbody>{rows}</tbody></table>"
+                    f"<p><label><input type='radio' name='who' value=''"
+                    + ("" if any(c["approver"] for c in people) else " checked")
+                    + "> <b>Nobody</b> gets the proposals — they wait in the "
+                      "queue in silence, and are seen by opening the lot "
+                      "page.</label></p>"
+                    f"<p class='note'>Addresses and the mark are written in ONE "
+                    f"gesture, because they are one question: who gets an "
+                    f"email, and where. An address box left EMPTY clears that "
+                    f"person's address — what this page shows is what gets "
+                    f"written. The mark GRANTS NOTHING: what opens this page is "
+                    f"the password, and this only says which desk hears that a "
+                    f"proposal is waiting.</p>"
+                    f"<p><button class='go' type='submit'>Write the post"
+                    f"</button></p></form>")
+        else:
+            post = ("<h2>The post</h2><p class='note'>No person in this "
+                    "project yet. Proposals entering the queue notify nobody, "
+                    "and are seen by opening the lot page.</p>")
 
-        # A HEADER ROW, and the "nobody" option OUT of the table. The first
-        # version had neither: the hint about clearing an address sat in the
-        # email column of a fake row whose name was an em dash, so it read as a
-        # label belonging to a person called "—", and the third column had no
-        # title at all — a bare radio next to the word "proposals", which says
-        # what it is only to somebody who already knows.
-        #
-        # Alfredo, looking at it: "non è chiarissimo". A page nobody can read
-        # at a glance is a page where the wrong box gets filled in a hurry, and
-        # this one writes addresses.
-        rows = "".join(
-            f"<tr><td>{_esc(c['name'])}</td>"
-            f"<td><input name='email:{_esc(c['name'])}' "
-            f"value='{_esc(prj.postbox(c['name'])['email'] if c.get('posted_to') else '')}' "
-            f"placeholder='no address — nothing is posted to them'></td>"
-            f"<td><input type='radio' name='who' "
-            f"value='{_esc(c['name'])}'"
-            + (" checked" if now and now["name"] == c["name"] else "")
-            + "></td></tr>" for c in people)
+        live = "".join(_card(c) for c in data["consumers"] if not c["retired"])
+        dead = "".join(_card(c) for c in data["consumers"] if c["retired"])
+        listing = (f"<h2>The register — {_esc(data['live'])} live</h2>"
+                   + (live or "<p class='note'>Nobody yet.</p>")
+                   + (f"<h2>Retired — {_esc(data['retired'])}</h2>"
+                      f"<p class='note'>Kept, not deleted: their names are "
+                      f"still taken, the rules and entries that name them "
+                      f"still read, and any of them can be brought back.</p>"
+                      + dead if dead else ""))
+        return head + add + post + listing
 
-        post = (f"<h2>The post</h2>"
-                f"<form method='post' action='{act}'>"
-                f"<input type='hidden' name='action' value='post'>"
-                f"<table><thead><tr><th>Person</th><th>Their email address</th>"
-                f"<th>Gets the proposals</th></tr></thead>"
-                f"<tbody>{rows}</tbody></table>"
-                f"<p><label><input type='radio' name='who' value=''"
-                + ("" if now else " checked")
-                + "> <b>Nobody</b> gets the proposals — they wait in the queue "
-                  "in silence, and are seen by opening the lot page.</label></p>"
-                f"<p class='note'>Addresses and the mark are written in ONE "
-                f"gesture, because they are one question: who gets an email, "
-                f"and where. An address box left EMPTY clears that person's "
-                f"address — what this page shows is what gets written. The mark "
-                f"GRANTS NOTHING: what opens this page is the password, and "
-                f"this only says which desk hears that a proposal is "
-                f"waiting.</p>"
-                f"<label for='pmaster'>Master — once for this action</label>"
-                f"<input id='pmaster' type='password' name='master' "
-                f"autocomplete='current-password' required>"
-                f"<p><button type='submit'>Write</button></p></form>")
-
-        opts = "".join(f"<option value='{_esc(c['name'])}'>{_esc(c['name'])}"
-                       "</option>" for c in people)
-        gone = (f"<h2>Retire a person</h2>"
-                f"<form method='post' action='{act}'>"
-                f"<input type='hidden' name='action' value='retire'>"
-                f"<select name='who'>{opts}</select>"
-                f"<label for='why'>Why — it is the sentence whoever finds the "
-                f"dead row in six months will read</label>"
-                f"<input id='why' name='reason' required>"
-                f"<label for='rmaster'>Master — once for this action</label>"
-                f"<input id='rmaster' type='password' name='master' "
-                f"autocomplete='current-password' required>"
-                f"<p><button type='submit'>Retire</button></p></form>"
-                f"<p class='note'>The row stays and so does every pointer at "
-                f"it: the history reads. A desk with open post on it is "
-                f"refused — close those first, or hand them over. And the name "
-                f"stays TAKEN, because an ID is never reused.</p>")
-
-        return head + add + post + gone
-
-    async def people_page(request):
+    async def consumers_page(request):
         def render(name, prj):
-            return _people_html(name, prj), f"{name} — people"
+            return (_consumers_html(name, prj,
+                                    editing=(request.query_params.get("edit")
+                                             or "").strip()),
+                    f"{name} — consumers")
         return _read_page(request, render)
 
-    async def people_action(request):
-        """The three gestures of this page, told apart by a hidden field —
-        add, post, retire. One route, because they are one subject, and one
-        shape each: session, master retyped for the action, refusals as
-        sentences."""
+    async def consumers_action(request):
+        """The five gestures of the anagrafica, told apart by a hidden field —
+        create, amend, post, retire, revive. One route, because they are one
+        subject, and one shape each: session, then refusals as sentences."""
         if not _session_ok(request):
             return _guest(request)
         name = request.path_params["project"]
@@ -1217,30 +1686,67 @@ def build(*, registry, log, master: str, refusal, fault,
         if prj is None:
             return _no_project(name)
         form = await request.form()
+        who = (form.get("who") or "").strip()
 
-        def say(message="", ok_msg="", status=200):
+        def say(message="", ok_msg="", status=200, editing=""):
             return HTMLResponse(
-                _page(f"{name} — people", _people_html(name, prj, message, ok_msg),
+                _page(f"{name} — consumers",
+                      _consumers_html(name, prj, message, ok_msg,
+                                      editing=editing),
                       nav=_project_nav(name)), status_code=status)
 
-        if not secrets.compare_digest((form.get("master") or "").strip(), master):
-            log.warning("refused web people: wrong master, from %s", _client(request))
-            return say(message="Wrong master. Nothing was written.", status=401)
         what = (form.get("action") or "").strip()
-        if what not in ("add", "post", "retire"):
+        if what not in ("create", "amend", "post", "retire", "revive"):
             return say(message="Unknown action. Nothing was written.", status=400)
         try:
-            if what == "add":
-                v = prj.amend_project(
-                    "consumer", (form.get("who") or "").strip(), "create",
-                    {"kind": "human"}, actor="web ui", on_the_page=True)
-                return say(ok_msg=f"{v['name']} — {v['note']}")
+            if what == "create":
+                kind = (form.get("kind") or "chat").strip()
+                fields = {"kind": kind}
+                if kind != "human":
+                    for f in ("brief", "specs"):
+                        if (form.get(f) or "").strip():
+                            fields[f] = (form.get(f) or "").strip()
+                v = prj.amend_project("consumer", who, "create", fields,
+                                      actor=WEB_SIGNATURE, on_the_page=True)
+                return say(ok_msg=_said(v), editing=v["name"])
+            if what == "amend":
+                # ONLY WHAT DIFFERS TRAVELS, and the engine refuses a call in
+                # which nothing does. The form always carries every box, so
+                # sending them all would make "I opened the editor and pressed
+                # Write" a refusal — which reads like a fault and is not one.
+                current = next((c for c in prj.roster()["consumers"]
+                                if _same(c["name"], who)), None)
+                if current is None:
+                    return say(message=f"No consumer called {who}.", status=400)
+                fields = {}
+                new_name = (form.get("newname") or "").strip()
+                if new_name and new_name != current["name"]:
+                    fields["name"] = new_name
+                if current["kind"] != "human":
+                    for f in ("brief", "specs"):
+                        if f in form and (form.get(f) or "") != (current[f] or ""):
+                            fields[f] = (form.get(f) or "").strip()
+                if not fields:
+                    return say(message="Nothing to write: every box is what it "
+                                       "already was.", status=400,
+                               editing=current["name"])
+                v = prj.amend_project("consumer", who, "amend", fields,
+                                      actor=WEB_SIGNATURE, on_the_page=True)
+                log.info("consumer amended on the page: %s — %s",
+                         v["name"], ", ".join(sorted(fields)))
+                return say(ok_msg=_said(v), editing=v["name"])
             if what == "retire":
                 v = prj.amend_project(
-                    "consumer", (form.get("who") or "").strip(), "retire", {},
-                    reason=(form.get("reason") or "").strip(), actor="web ui",
-                    on_the_page=True)
-                return say(ok_msg=f"{v['name']} is retired. {v['note']}")
+                    "consumer", who, "retire", {},
+                    reason=(form.get("reason") or "").strip(),
+                    actor=WEB_SIGNATURE, on_the_page=True)
+                log.info("consumer retired on the page: %s", v["name"])
+                return say(ok_msg=_said(v, "is retired"))
+            if what == "revive":
+                v = prj.amend_project("consumer", who, "revive", {},
+                                      actor=WEB_SIGNATURE, on_the_page=True)
+                log.info("consumer revived on the page: %s", v["name"])
+                return say(ok_msg=_said(v, "is back"), editing=v["name"])
             # THE WHOLE PICTURE, exactly as the form showed it: every box on
             # the page travels, so what you see is what gets written and a
             # cleared box clears the address. A form that sent only what
@@ -1248,7 +1754,7 @@ def build(*, registry, log, master: str, refusal, fault,
             # second opinion about the state.
             addresses = {k.split(":", 1)[1]: (v or "").strip()
                          for k, v in form.items() if k.startswith("email:")}
-            v = prj.set_postbox(addresses, (form.get("who") or "").strip())
+            v = prj.set_postbox(addresses, who)
             said = "; ".join(v["changed"]) if v["changed"] else "no address moved"
             log.info("postbox written on %s: %s · approver %s",
                      name, said, v["approver"])
@@ -1256,45 +1762,400 @@ def build(*, registry, log, master: str, refusal, fault,
         except fault:
             raise
         except refusal as e:
-            log.info("refused web people: %s", e)
+            log.info("refused web consumers: %s", e)
+            return say(message=str(e), status=400, editing=who)
+
+    # ---------- the log: every entry, both ends, and the two gestures --------
+    #
+    # WHY THIS PAGE EXISTS, and it is not convenience. Until v7.0.0 the only
+    # cross view of the log was `tasks_overview` on the MCP surface: one desk
+    # per block, pending only, capped, and behind the admin code — so the
+    # person who owns the project read their own log through a chat, one desk
+    # at a time, and could close an entry only by asking a chat to do it. The
+    # two gestures a log needs — close it, correct it — were reachable from
+    # everywhere except the page where the person actually is.
+    #
+    # THE ENTRIES CARRY THEIR BODIES, and nothing here is capped. A page that
+    # showed nine of eleven and said so is a page you cannot work from, and an
+    # entry you must open to read is an entry you answer from its title.
+    #
+    # ⚠ WHAT THE PAGE SIGNS. Every gesture from here is signed `web ui`, the
+    # same signature the other pages write, and it goes into the history where
+    # it stays. It is the honest one: what the history witnessed is that
+    # somebody closed this at the admin page, and the project has one person
+    # who can be there. A menu of names would let the page write somebody
+    # else's signature, which is the one thing a signature must not allow.
+    #
+    # ⚠ AND IT PASSES `admin=True`, like every other gesture on this page: the
+    # engine's own guard is "closing somebody else's task takes the admin
+    # code", and the code is what a CHAT presents to prove it is allowed. The
+    # person at this page has already presented the password at the door.
+
+    def _tasks_html(name: str, prj, *, by: str = "owner", show: str = "open",
+                    query: str = "", message: str = "", ok_msg: str = "") -> str:
+        board = prj.task_board(by, show, query)
+        act = f"/p/{_esc(name)}/tasks"
+        head = ((f"<p class='bad'>{_esc(message)}</p>" if message else "")
+                + (f"<p class='ok'>{_esc(ok_msg)}</p>" if ok_msg else ""))
+        # The view is a GET form, so a view is a URL: it can be bookmarked, it
+        # survives a reload, and the POST that follows carries the same three
+        # values back so that acting on an entry leaves you where you were
+        # rather than at the top of everything.
+        def _opt(val, cur, label):
+            return (f"<option value='{_esc(val)}'{' selected' if val == cur else ''}>"
+                    f"{_esc(label)}</option>")
+        controls = (
+            f"<form method='get' action='{act}'>"
+            f"<label for='by'>Group by</label>"
+            f"<select id='by' name='by'>{_opt('owner', by, 'whose desk it is on')}"
+            f"{_opt('sender', by, 'who sent it')}</select>"
+            f"<label for='show'>Show</label>"
+            f"<select id='show' name='show'>{_opt('open', show, 'open only')}"
+            f"{_opt('all', show, 'open and closed')}</select>"
+            f"<label for='q'>Containing (blank = everything)</label>"
+            f"<input id='q' name='q' value='{_esc(query)}'>"
+            f"<p><button type='submit'>Show</button></p></form>")
+
+        def _carry() -> str:
+            return (f"<input type='hidden' name='by' value='{_esc(by)}'>"
+                    f"<input type='hidden' name='show' value='{_esc(show)}'>"
+                    f"<input type='hidden' name='q' value='{_esc(query)}'>")
+
+        people = _consumers(prj)
+
+        def _entry(d: dict) -> str:
+            flags = ("<span class='tag'>URGENT</span>" if d.get("urgent") else "") \
+                + (f"<span class='note'> · {_esc(d['stale'])}</span>"
+                   if d.get("stale") else "")
+            who = (f"<p class='note'>{_esc(d['kind'])} · from "
+                   f"{_esc(d['created_by'])} · on {_esc(d['owner'])}'s desk · "
+                   f"opened {_esc(_when(d['created_at']))}</p>")
+            body = f"<p>{_esc(d['body'])}</p>"
+            if d["status"] != "pending":
+                said = d.get("outcome") or d.get("reason_dropped") or ""
+                return (f"<div class='entry'><b>{_esc(d['id'])}</b> "
+                        f"{_esc(d['title'])}{flags}{who}{body}"
+                        f"<p class='note'>{_esc(d['status'])} on "
+                        f"{_esc(_when(d['closed_at']))} — {_esc(said)}</p></div>")
+            opts = "".join(
+                f"<option value='{_esc(n)}'"
+                f"{' selected' if n == d['owner'] else ''}>{_esc(n)}</option>"
+                for n in people)
+            # TWO FORMS AND NOT ONE WITH TWO BUTTONS, because each needs its own
+            # required field: `outcome` completes it and `reason` drops it, the
+            # engine takes exactly one of the two, and a single form could not
+            # demand the right one. ⚠ There is no undo — closed is closed — so
+            # the field that must be filled IS the confirmation, and it is
+            # meant to be: a bare button next to an entry is a mis-tap that
+            # writes history.
+            close = (f"<form class='row' method='post' action='{act}'>{_carry()}"
+                     f"<input type='hidden' name='id' value='{_esc(d['id'])}'>"
+                     f"<input type='hidden' name='action' value='complete'>"
+                     f"<input name='outcome' required "
+                     f"placeholder='what came of it — this is the closure'>"
+                     f"<button class='go' type='submit'>Complete</button></form>"
+                     f"<form class='row' method='post' action='{act}'>{_carry()}"
+                     f"<input type='hidden' name='id' value='{_esc(d['id'])}'>"
+                     f"<input type='hidden' name='action' value='drop'>"
+                     f"<input name='reason' required "
+                     f"placeholder='why it will not be done'>"
+                     f"<button type='submit'>Drop</button></form>")
+            amend = (f"<details><summary>Correct it, or hand it to another "
+                     f"desk</summary>"
+                     f"<form method='post' action='{act}'>{_carry()}"
+                     f"<input type='hidden' name='id' value='{_esc(d['id'])}'>"
+                     f"<input type='hidden' name='action' value='amend'>"
+                     f"<label>Title</label>"
+                     f"<input name='title' value='{_esc(d['title'])}'>"
+                     f"<label>Body</label>"
+                     f"<textarea name='body' rows='4'>{_esc(d['body'])}</textarea>"
+                     f"<label>Desk</label>"
+                     f"<select name='consumer'>{opts}</select>"
+                     f"<p><button type='submit'>Write the correction</button></p>"
+                     f"</form>"
+                     f"<p class='note'>Only what differs is written, and the "
+                     f"hand-over is named in the history, which keeps both "
+                     f"desks. Urgency is not here on purpose: it belongs to "
+                     f"whoever opened the entry.</p></details>")
+            return (f"<div class='entry'><b>{_esc(d['id'])}</b> "
+                    f"{_esc(d['title'])}{flags}{who}{body}{close}{amend}</div>")
+
+        blocks = "".join(
+            f"<h2>{_esc(g['group'])} — {_esc(g['open'])} open"
+            + (f", {_esc(g['closed'])} closed" if g["closed"] else "") + "</h2>"
+            + "".join(_entry(d) for d in g["entries"])
+            for g in board["groups"])
+        if not board["groups"]:
+            blocks = ("<p class='note'>Nothing to show. With <i>open only</i> "
+                      "that is the good outcome: no desk owes anything.</p>")
+        tally = (f"<p class='note'>{_esc(board['count'])} shown — "
+                 f"{_esc(board['open'])} open, {_esc(board['closed'])} closed — "
+                 f"grouped by {_esc(board['group_by'])}. Nothing here is "
+                 f"capped: this is the whole log, minus what the prune "
+                 f"archived.</p>")
+        return head + controls + tally + blocks
+
+    async def tasks_page(request):
+        if not _session_ok(request):
+            return _guest(request)
+        name = request.path_params["project"]
+        prj = _open(name)
+        if prj is None:
+            return _no_project(name)
+        q = request.query_params
+        by = (q.get("by") or "owner").strip()
+        show = (q.get("show") or "open").strip()
+        query = (q.get("q") or "").strip()
+        try:
+            body = _tasks_html(name, prj, by=by, show=show, query=query)
+        except fault:
+            raise
+        except refusal as e:
+            log.info("refused web tasks: %s", e)
+            body = _tasks_html(name, prj, message=str(e))
+        response = HTMLResponse(_page(f"{name} — the log", body,
+                                      nav=_project_nav(name)))
+        _issue(response)
+        return response
+
+    async def tasks_action(request):
+        """Close an entry, drop it, or correct it — the three gestures of a
+        log, told apart by a hidden field, all three landing back on the view
+        they were made from."""
+        if not _session_ok(request):
+            return _guest(request)
+        name = request.path_params["project"]
+        prj = _open(name)
+        if prj is None:
+            return _no_project(name)
+        form = await request.form()
+        by = (form.get("by") or "owner").strip()
+        show = (form.get("show") or "open").strip()
+        query = (form.get("q") or "").strip()
+        tid = (form.get("id") or "").strip()
+
+        def say(message="", ok_msg="", status=200):
+            return HTMLResponse(
+                _page(f"{name} — the log",
+                      _tasks_html(name, prj, by=by, show=show, query=query,
+                                  message=message, ok_msg=ok_msg),
+                      nav=_project_nav(name)), status_code=status)
+
+        what = (form.get("action") or "").strip()
+        if what not in ("complete", "drop", "amend"):
+            return say(message="Unknown action. Nothing was written.", status=400)
+        try:
+            if what == "amend":
+                v = prj.task_amend(tid, WEB_SIGNATURE,
+                                   title=(form.get("title") or "").strip(),
+                                   body=(form.get("body") or "").strip(),
+                                   consumer=(form.get("consumer") or "").strip(),
+                                   admin=True)
+                moved = (f" — handed over from {v['reassigned_from']}"
+                         if v.get("reassigned_from") else "")
+                log.info("task amended on the page: %s%s", v["id"], moved)
+                return say(ok_msg=f"{v['id']} corrected, on {v['owner']}'s "
+                                  f"desk{moved}.")
+            v = prj.task_close(
+                tid, WEB_SIGNATURE,
+                outcome=(form.get("outcome") or "").strip() if what == "complete" else "",
+                reason=(form.get("reason") or "").strip() if what == "drop" else "",
+                admin=True)
+            log.info("task closed on the page: %s — %s", v["id"], v["status"])
+            return say(ok_msg=f"{v['id']} is {v['status']}: "
+                              f"{v['outcome'] or v['reason']}")
+        except fault:
+            raise
+        except refusal as e:
+            log.info("refused web tasks: %s", e)
             return say(message=str(e), status=400)
+
+    # ---------- the closing link: the one page that has no session ----------
+    #
+    # WHAT IT IS. The mail that says a task landed on a person's desk carries a
+    # button; this is where it lands. It asks for no password — the ticket in
+    # the URL is the credential — and it can close exactly the one entry it
+    # names, with the words the person types here.
+    #
+    # ⚠ WHY THAT IS ACCEPTABLE, and it is a PREMISE rather than a detail. The
+    # ticket travels in cleartext through a mail relay run by somebody else, so
+    # it is worth precisely as much as reaching this port is: the UI does not
+    # answer outside the tailnet, and the Funnel cannot publish this port —
+    # the preflight refuses the three it could. The day that changes, this page
+    # is a hole and has to be taken out or given a second factor.
+    #
+    # ⚠ AND IT IS SINGLE-USE WITHOUT BEING SINGLE-USE. Nothing here spends a
+    # ticket, because nothing has to: `closed is closed`, so the second visit
+    # finds the entry closed and gets the refusal the engine already has. A
+    # reusable ticket for an object that accepts one gesture is single-use in
+    # fact — which is what let this be built with no table, and therefore with
+    # no schema generation, on a register that is loaded.
+    #
+    # The GET is a form and not a gesture: a link that closed something by
+    # being FETCHED would be closed by the first mail client that prefetches
+    # links, and nobody would ever know which one.
+
+    def _ticket_html(name: str, prj, tid: str, token: str, seen: dict, *,
+                     message: str = "") -> str:
+        act = f"/p/{_esc(name)}/t/{_esc(tid)}"
+        head = f"<p class='bad'>{_esc(message)}</p>" if message else ""
+        if seen["status"] != "pending":
+            return (head + f"<p class='ok'>{_esc(seen['id'])} — "
+                    f"{_esc(seen['title'])}</p>"
+                    f"<p class='note'>Already closed. Closed is closed: it is "
+                    f"not reopened and not amended. If the work came back, open "
+                    f"a new entry and cite this one.</p>")
+        return (head
+                + f"<div class='entry'><b>{_esc(seen['id'])}</b> "
+                  f"{_esc(seen['title'])}"
+                  f"<p class='note'>{_esc(seen['kind'])} · on "
+                  f"{_esc(seen['owner'])}'s desk</p>"
+                  f"<p>{_esc(seen['body'])}</p></div>"
+                + f"<form method='post' action='{act}'>"
+                  f"<input type='hidden' name='k' value='{_esc(token)}'>"
+                  f"<input type='hidden' name='action' value='complete'>"
+                  f"<label for='out'>What came of it</label>"
+                  f"<input id='out' name='outcome' required autofocus>"
+                  f"<p><button type='submit'>Complete it</button></p></form>"
+                + f"<form method='post' action='{act}'>"
+                  f"<input type='hidden' name='k' value='{_esc(token)}'>"
+                  f"<input type='hidden' name='action' value='drop'>"
+                  f"<label for='why'>Or why it will not be done</label>"
+                  f"<input id='why' name='reason' required>"
+                  f"<p><button type='submit'>Drop it</button></p></form>"
+                + f"<p class='note'>There is no undo — the words you type ARE "
+                  f"the confirmation. It is signed {_esc(seen['owner'])}, "
+                  f"because this link was sent to that desk.</p>")
+
+    def _ticket(request, prj, name: str, token: str):
+        """Resolve the ticket or answer with the refusal, as a page. Returns
+        (seen, None) or (None, response), so the two callers cannot each grow
+        their own idea of what a bad ticket looks like."""
+        tid = request.path_params["task"]
+        try:
+            return prj.check_task_link(tid, token), None
+        except fault:
+            raise
+        except refusal as e:
+            log.info("refused a task link on %s: %s", name, e)
+            return None, HTMLResponse(
+                _page(f"{name} — the entry",
+                      f"<p class='bad'>{_esc(e)}</p>", nav=""),
+                status_code=403)
+
+    async def ticket_page(request):
+        # NO SESSION HERE, ON PURPOSE — see the block above. `test_surface`
+        # pins this exception by name, so removing the guard from a page is a
+        # decision somebody takes rather than a line that drifts.
+        name = request.path_params["project"]
+        prj = _open(name)
+        if prj is None:
+            return _no_project(name)
+        token = (request.query_params.get("k") or "").strip()
+        seen, refused = _ticket(request, prj, name, token)
+        if refused is not None:
+            return refused
+        # NAV EMPTY, and it is not a decoration missing. Whoever arrives here
+        # arrived from an inbox with a ticket for ONE entry; a menu would offer
+        # them the rules, the people and the lot, every one of which would then
+        # answer with the login page. A door that shows doors it will not open
+        # is a door that looks broken.
+        return HTMLResponse(_page(f"{name} — {seen['id']}",
+                                  _ticket_html(name, prj, seen["id"], token, seen),
+                                  nav=""))
+
+    async def ticket_action(request):
+        name = request.path_params["project"]
+        prj = _open(name)
+        if prj is None:
+            return _no_project(name)
+        form = await request.form()
+        token = (form.get("k") or "").strip()
+        seen, refused = _ticket(request, prj, name, token)
+        if refused is not None:
+            return refused
+        what = (form.get("action") or "").strip()
+        if what not in ("complete", "drop"):
+            return HTMLResponse(
+                _page(f"{name} — {seen['id']}",
+                      _ticket_html(name, prj, seen["id"], token, seen,
+                                   message="Unknown action. Nothing was written."),
+                      nav=""), status_code=400)
+        try:
+            # SIGNED WITH THE DESK'S OWN NAME, and that is what the link is:
+            # it was posted to that desk and to no other, so the closure is
+            # theirs. It also means the engine's ordinary guard passes on its
+            # own merits — the owner may always close their own entry — rather
+            # than this page reaching for `admin=True`, which would make a
+            # ticket in an inbox worth an administrator.
+            v = prj.task_close(
+                seen["id"], seen["owner"],
+                outcome=(form.get("outcome") or "").strip() if what == "complete" else "",
+                reason=(form.get("reason") or "").strip() if what == "drop" else "")
+        except fault:
+            raise
+        except refusal as e:
+            log.info("refused a task link closure on %s: %s", name, e)
+            return HTMLResponse(
+                _page(f"{name} — {seen['id']}",
+                      _ticket_html(name, prj, seen["id"], token, seen,
+                                   message=str(e)), nav=""), status_code=400)
+        log.info("task closed from a link: %s — %s", v["id"], v["status"])
+        return HTMLResponse(_page(
+            f"{name} — {v['id']}",
+            f"<p class='ok'>{_esc(v['id'])} is {_esc(v['status'])}.</p>"
+            f"<p>{_esc(v['outcome'] or v['reason'])}</p>"
+            f"<p class='note'>Signed {_esc(v['by'])}. Nothing else on this "
+            f"register is reachable from here, and this link is now spent: "
+            f"closed is closed.</p>", nav=""))
 
     def _profile_html(name: str, prj, message: str = "", ok_msg: str = "") -> str:
         prof = prj.profile()
         cap = prof["queue_cap"]
         head = (f"<p class='bad'>{_esc(message)}</p>" if message else "") + \
                (f"<p class='ok'>{_esc(ok_msg)}</p>" if ok_msg else "")
+        # WHAT IS WRITTEN AND WHAT IT WILL LOOK LIKE, side by side on the same
+        # page. These two fields are markdown — they are read as markdown by
+        # every chat that opens this project — and they were being written
+        # into a box ten lines tall with no way to see the result. A preview
+        # under the box, rendered by the server on the text that is actually
+        # stored, costs a fold and answers the only question the box cannot:
+        # did the table come out as a table.
         return (head
                 + f"<form method='post' action='/p/{_esc(name)}/profile'>"
-                  "<label for='brief'>Brief — the project's identity: whose it "
-                  "is, how it works, what it is for. It leads every "
+                  "<label for='brief'>Brief"
+                  "<span class='hint'>The project's identity: whose it is, how "
+                  "it works, what it is for. It leads every "
                   "<code>rules_list</code>, so it is read at the top of every "
-                  "chat of this project.</label>"
-                  f"<textarea id='brief' name='brief' rows='10'>"
+                  "chat of this project. Markdown.</span></label>"
+                  f"<textarea id='brief' name='brief' rows='18'>"
                   f"{_esc(prof['brief'] or '')}</textarea>"
-                  "<label for='specs'>Specs — the living facts. True today and "
-                  "false tomorrow without anybody having decided anything, "
-                  "which is why they are a second field and not more of the "
-                  "brief.</label>"
-                  f"<textarea id='specs' name='specs' rows='10'>"
+                + _preview("Brief as it reads", prof["brief"] or "")
+                + "<label for='specs'>Specs"
+                  "<span class='hint'>The living facts. True today and false "
+                  "tomorrow without anybody having decided anything, which is "
+                  "why they are a second field and not more of the brief. "
+                  "Markdown.</span></label>"
+                  f"<textarea id='specs' name='specs' rows='18'>"
                   f"{_esc(prof['specs'] or '')}</textarea>"
-                  "<label for='cap'>Queue ceiling — blank is unlimited, 0 "
-                  "closes the queue to new proposals, N is N. It is also the "
-                  "ceiling on one turn of the lot page: at the twelfth "
-                  "signature in a row a person signs without reading.</label>"
+                + _preview("Specs as they read", prof["specs"] or "")
+                + "<label for='cap'>Queue ceiling"
+                  "<span class='hint'>Blank is unlimited, 0 closes the queue to "
+                  "new proposals, N is N. It is also the ceiling on one turn of "
+                  "the lot page: at the twelfth signature in a row a person "
+                  "signs without reading.</span></label>"
                   f"<input id='cap' name='queue_cap' value="
                   f"'{_esc('' if cap is None else cap)}'>"
-                  "<label for='pmaster'>Master — once for this action</label>"
-                  "<input id='pmaster' type='password' name='master' "
-                  "autocomplete='current-password' required>"
-                  "<p><button type='submit'>Write the profile</button></p>"
+                  "<p><button class='go' type='submit'>Write the profile"
+                  "</button></p>"
                   "</form>"
                   "<p class='note'>Citations are checked here like everywhere "
                   "else: an ID in round brackets has to resolve to a rule in "
                   "force, or nothing is written. There is no tool for this "
                   "page, and that is the decision — what is fundative has "
                   "none, the way what is catastrophic has none.</p>"
-                + (f"<p class='note'>Last written {_esc(prof['updated_at'])}.</p>"
+                + (f"<p class='note'>Last written "
+                   f"{_esc(_when(prof['updated_at']))}.</p>"
                    if prof["updated_at"] else
                    "<p class='note'>Never written: this project has no profile "
                    "yet, which is a legitimate state and not a fault.</p>"))
@@ -1316,13 +2177,6 @@ def build(*, registry, log, master: str, refusal, fault,
         if prj is None:
             return _no_project(name)
         form = await request.form()
-        if not secrets.compare_digest((form.get("master") or "").strip(), master):
-            log.warning("refused web profile: wrong master, from %s", _client(request))
-            return HTMLResponse(
-                _page(f"{name} — profile",
-                      _profile_html(name, prj,
-                                    message="Wrong master. Nothing was written."),
-                      nav=_project_nav(name)), status_code=401)
         raw = (form.get("queue_cap") or "").strip()
         if raw and not raw.isdigit():
             return HTMLResponse(
@@ -1413,10 +2267,14 @@ def build(*, registry, log, master: str, refusal, fault,
         Route("/p/{project}/codes", codes_mint, methods=["POST"]),
         Route("/p/{project}/profile", profile_page, methods=["GET"]),
         Route("/p/{project}/profile", profile_action, methods=["POST"]),
-        Route("/p/{project}/people", people_page, methods=["GET"]),
-        Route("/p/{project}/people", people_action, methods=["POST"]),
+        Route("/p/{project}/consumers", consumers_page, methods=["GET"]),
+        Route("/p/{project}/consumers", consumers_action, methods=["POST"]),
         Route("/p/{project}/rules", rules_page, methods=["GET"]),
         Route("/p/{project}/rule/{rule}", rule_page, methods=["GET"]),
         Route("/p/{project}/status", status_page, methods=["GET"]),
+        Route("/p/{project}/tasks", tasks_page, methods=["GET"]),
+        Route("/p/{project}/tasks", tasks_action, methods=["POST"]),
+        Route("/p/{project}/t/{task}", ticket_page, methods=["GET"]),
+        Route("/p/{project}/t/{task}", ticket_action, methods=["POST"]),
     ]
     return Starlette(routes=routes)

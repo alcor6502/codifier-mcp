@@ -303,10 +303,28 @@ is the point of the log, and it is free. ⚠ A RETIRED name is refused, not
 queued: a desk that has ended is a desk nothing reaches, and a task filed there
 would be work nobody is going to see.
 
+**TASK OR MESSAGE? ASK WHO WILL CLOSE IT, AND WHY.** It is the one question
+that tells them apart, and it is worth more than any list of properties:
+
+| | a **task** | a **message** |
+|---|---|---|
+| what it is | work that must happen | a condition that can pass |
+| who closes it | the desk that DID it | its desk **or the one who sent it** |
+| what closing means | somebody acted, and the outcome says what came of it | the condition is gone — possibly with nothing done |
+| when the reason is owed | dropping it | dropping it (⚠ closing needs no words: the engine writes `closed by <who> on <date>`) |
+| if nobody ever looks | it stays on the desk, and comes back marked stale | it may be opened and closed unseen, and that is correct |
+
+Work that must happen is a **task**, even when it reads like news. A condition
+that can stop mattering on its own is a **message**, even when it asks for
+attention. Both sit on the same desk and arrive in the same list; `kind` tells
+them apart.
+
 **A task is a channel with two readers**, the desk it sits on and the hand that
-opened it, and that makes the log two things: a message between chats (*look at
-this proposal and tell me what you think* is a task), and a way to find out
-whether another chat did the work — read it back with `tasks_list(authored=True)`.
+opened it, and that makes the log two things: a REQUEST from one chat to
+another (*look at this proposal and tell me what you think* is a task — it is a
+request and not a `kind='message'`, and what makes it a task is that somebody
+has to answer it), and a way to find out whether another chat did the work —
+read it back with `tasks_list(authored=True)`.
 
 - **`consumer`** is the owner, the desk it lands on. **`created_by`** is the
   signature, and it is required: a task whose sender is unknown is a task the
@@ -408,7 +426,14 @@ it too, but the field is the one to branch on.
   the project, `Sender:` with who opened it, **the task's own text** and a
   footnote saying where it is answered. ⚠ The text arrives VERBATIM: markdown
   is not rendered, so asterisks and hashes are read as characters. Over 4000
-  characters it is cut at the end, visibly. A
+  characters it is cut at the end, visibly.
+  ⚠ **And the message carries a BUTTON that closes the task**, when the
+  container knows its own address: it opens one page, shows that entry, and
+  takes the outcome or the reason — no password, because the ticket in the
+  link is the credential and the page does not answer outside the tailnet. So
+  a person may close a task without a chat and without the register: read
+  `kind` and the outcome, and do not assume that a task you opened for a human
+  is still open because nobody spoke to you. A
   human without an address is not written to, and neither is anybody if the
   container has no mail configured: there is no on/off switch, and both ways to
   be quiet are absences. The verdict carries `posted`, true or false, because a
@@ -505,6 +530,8 @@ never posts a subtraction.
   the text; there is no `urgent` here, and that is not an oversight — urgency
   belongs to whoever created the task.
 - Closed is closed: a closed task is refused, not amended.
-- Amending somebody else's task takes the admin code in `key`, the same as
-  closing one; the refusal names the owner.
+- **Two ends may amend it: the desk it sits on, and whoever SENT it.** An entry
+  belongs to the one who wrote it as much as to the one who owes it, so fixing
+  your own wrong words costs nothing. Anybody else takes the admin code in
+  `key`, and the refusal names both ends.
 - The citation door runs here too, on the new title and the new body.

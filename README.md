@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-6.2.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-7.0.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -508,9 +508,17 @@ summary.
 | `ALLOWED_CIDRS` | `160.79.104.0/21 # documented egress of the model provider` |
 | `BACKUP_DIR` | `/db/backup` |
 
+`WEB_BASE_URL` (`http://<server-ip>:9443`, no trailing slash) is what the
+**closing button** in a posted task is built on — leave it empty and there is
+no button, because an address the container guessed would be a link that goes
+somewhere real and wrong. ⚠ Never put an address here that answers from
+outside the tailnet: the link travels in clear through a mail relay, and what
+makes that acceptable is that the page cannot be reached from the internet.
+
 Under **Show more settings**: `DB_DIR` (`/db` — move the mount, not this),
 `WEB_PORT` (empty means 9443), `ADMIN_AUTH_CODE_DURATION` (minutes a one-time
-code stays good), the six `SMTP_*` fields (leave them empty and nothing is ever
+code stays good), `TASK_LINK_DAYS` (days a closing button keeps working,
+default 14), the six `SMTP_*` fields (leave them empty and nothing is ever
 posted, and nothing complains about it — see *Notifications* below),
 `LOG_LEVEL` (`INFO` or `WARNING`, nothing else),
 `HTTP_MODE` (`stateless` on a new install; the code's fallback stays `stateful`
@@ -850,7 +858,7 @@ In this order:
 3. **The password.** There is no recovery: set a new `WEB_UI_PASSWORD` and Apply.
 4. **A session that ended.** Every restart of the service invalidates every
    session, deliberately — the session secret is generated at boot and stored
-   nowhere. So does an hour of inactivity.
+   nowhere. So do eight hours of inactivity.
 
 </details>
 
@@ -939,8 +947,19 @@ it now is — the same digest contract the MCP tool used to carry.
 Beside it, readings that write nothing: the rules in force for a chosen
 consumer, exactly as that consumer's chat reads them, brief first; a rule's
 detail with its history and the diff between two versions; and the state of the
-project. And two pages that write without touching a rule: **codes**, where a
-one-time authorisation code is minted, and **profile**.
+project. And four pages that write without touching a rule: **codes**, where
+one-time authorisation codes are minted — press the button again and the new
+one joins the ones already on the page, two spaces apart, so three codes are
+one drag — **profile**, **consumers**, and **log**.
+
+**Markdown is rendered, and the boxes are big.** A brief and a specs are read
+as markdown by every chat that opens the project, and they were being written
+into a box ten lines tall with no way to see the result. Every one of them now
+has a full-width box that grows, and a preview under it rendered by the server
+from the text that is actually stored — which answers the one question the box
+cannot: did the table come out as a table. The renderer is eighty lines in
+`web.py`, not a package and not a script from a CDN: a third party in the page
+that approves rules is what this service has refused from the beginning.
 
 **The profile page is where the project talks about itself** — its `brief`, its
 `specs` and its `queue_cap` — and since v5.0.0 that is the only place they can
@@ -949,20 +968,53 @@ is the project's identity and the specs are the facts every reading is done
 against: what is FUNDATIVE has no tool, the way what is catastrophic has none. A
 chat may suggest the wording; the change is a person's.
 
-**The people page is where the project's PEOPLE are** — added, addressed,
-marked, retired. Same sentence, said about the anagrafica: a chat and a skill
-are machinery and a tool manages them, a person is not. The mark that says whose
-desk hears about a proposal grants nothing at all: what opens this UI is the
-password, and this only says where an email goes.
+**The consumers page is the whole anagrafica** — every chat, every skill and
+every person, live and retired, on one page. It was the *people* page until
+v7.0.0 and it held the humans only, which meant the person who owns the project
+could see every consumer EXCEPT through a chat, and could not read a mandate at
+all without asking one. Each card carries what the register knows — its kind,
+its groups, how many rules in force reach it, how many entries are open on its
+desk — and, for a chat or a skill, its **brief and specs rendered as markdown**,
+with an editor under them.
 
-The password is asked for again on every gesture that WRITES — deciding the lot,
-minting a code, writing the profile, adding or retiring a person, writing where
-their post goes — because a session alone is a browser left open on the iPad. It is *not* asked again for the backup or the log: a
-`VACUUM INTO` changes nothing and the log is a ring in memory, and a password
-retyped where it defends nothing only teaches the hand to type it without
-looking. One password, from the template, and one hour of inactivity. A restart
-of the service invalidates every session, deliberately: the session secret is
-generated at boot and stored nowhere.
+⚠ **Nothing is deleted, and the page says so where the button is.** A consumer
+is RETIRED: the row stays, every pointer at it still reads, the name stays
+taken because an ID is never reused, and the gesture is undone with *bring it
+back* rather than by creating the name a second time. A desk with open entries
+on it is refused — close those first, or hand them over.
+
+⚠ **The page writes any consumer's brief and specs, and that is this rule's one
+exception.** From a tool, `specs` under a name that is not your own is refused
+with no exception at all — a chat writing another chat's mandate is exactly
+what that guard is for. On the page there is no chat: there is the person
+holding the UI password, the same one who writes the PROJECT's brief and specs,
+which no tool may touch. The alternative — letting the page sign with the
+consumer's own name — passes the guard by writing a signature that is not true,
+and a history that lies is not repairable.
+
+The mark that says whose desk hears about a proposal grants nothing at all:
+what opens this UI is the password, and this only says where an email goes.
+
+**The log page is the whole task log at once** — every entry in the project,
+grouped by the desk it sits on or by who sent it, open only or open and closed,
+with the two gestures a log needs under each one: close it, or correct it and
+hand it to another desk. Nothing on it is capped and every entry carries its
+body, because a page that showed you nine of eleven is a page you cannot work
+from. Gestures made there are signed `web ui` in the history — what it
+witnessed is that somebody closed this at the admin page, and a field that
+typed a name would be a field that typed somebody else's.
+
+**The password is typed once, at the door, and nowhere else.** Until v7.0.0
+every writing gesture asked for it again, on the ground that a session alone is
+a browser left open on the iPad; that guard is gone, for the reason the design
+had already written against it — a secret typed five times an hour is typed
+without looking, and a password typed without looking defends nothing while
+costing every gesture. What is left is one password from the template, a signed
+cookie, **eight hours of inactivity**, and a port that does not leave the
+tailnet. A restart of the service invalidates every session, deliberately: the
+session secret is generated at boot and stored nowhere. The one-time codes are
+untouched — they guard the MCP surface, where the caller is a chat and not a
+person.
 
 **What is not here any more, since v4.0.0: the deployment page.** It created
 projects, rekeyed them and printed their codes, and all three died with the
@@ -987,6 +1039,38 @@ corrects the mistake was the one that swallowed the notice. Only a change of
 DESK posts; fixing a typo wakes nobody, and the desk a task LEAVES is not
 written to, because the register never posts a subtraction.
 
+### Closing a task from the button in its email
+
+A task posted to a person carries a **Close it** button. It opens a page
+showing that one entry — its text, whose desk it is on — with two boxes: what
+came of it, or why it will not be done. Writing one and pressing is the whole
+gesture, and it asks for **no password**.
+
+- **The ticket in the link is the credential**, and it is a signature rather
+  than a row: HMAC over the project, the entry and an expiry, keyed on the
+  project's admin code. ⚠ **No table, and that is the design**: a table is a
+  column is a schema generation, and this register is loaded — a generation
+  costs the corpus by hand and every open entry outright. Rotating the admin
+  code voids every link already sent, which is the revocation this would
+  otherwise not have.
+- **It is single-use without being single-use.** Nothing spends the ticket,
+  because `closed is closed`: the second press finds the entry closed and gets
+  the refusal that already exists.
+- **The GET never closes anything.** It renders a form. A link that acted on
+  being fetched would be pressed by the first mail client that prefetches
+  links, and nobody would ever know which one.
+- ⚠ **What makes this acceptable is a PREMISE, not a detail**: the ticket
+  travels in clear through somebody else's mail relay, and it is worth exactly
+  as much as reaching that port is — the UI does not answer outside the
+  tailnet, and the Funnel cannot publish it. Publish that port anywhere else
+  and this is a hole.
+- **It expires** — `TASK_LINK_DAYS`, 14 by default. Days and not minutes: a
+  one-time code is minted for a gesture about to happen, a task on a desk
+  waits. An expired link says so and leaves the entry untouched.
+- **It closes signed by the desk it was sent to**, which is what the link is:
+  it went to that desk and to no other. The page does not reach for
+  administrator powers to do it.
+
 **The subject is the whole headline, and says it once.** `TK-0003 — Aprimi su
 iPad`, or `Proposed Rule VA-0007 — <title>`, because that is the line an inbox
 list shows, and a reply, and a search. It is not printed again inside. `TK-`
@@ -994,12 +1078,13 @@ already says *task*, which is why the word is not in a task's subject; `VA-`
 does not say *proposed*, which is why a proposal's spells it out. ⚠ The title
 is CUT at 70 characters there.
 
-**And the message is four things:** the **project's name**, the one word that
-changes between messages and tells you which register just spoke; **`Sender:`**
-and who spoke, in the size between that name and the prose, because it is the
-one thing the subject cannot carry; **the task's own text**, at the size prose
-is read at; and a **footnote at 9px** saying where it is answered. Nothing
-else, no disclaimer, and no picture — the sender's card in the address book
+**And the message is four things** — five when there is a button: the
+**project's name**, the one word that changes between messages and tells you
+which register just spoke; **`Sender:`** and who spoke, in the size between
+that name and the prose, because it is the one thing the subject cannot carry;
+**the task's own text**, at the size prose is read at; **a button that closes
+it**, when `WEB_BASE_URL` is set; and a **small footnote** saying where it is
+answered. Nothing else, no disclaimer, and no picture — the sender's card in the address book
 draws that better than anything sent from here, and in the message list too.
 
 ⚠ **The text travels, and that reverses a rule this file carried for an
@@ -1038,8 +1123,8 @@ still taken, a retirement that would leave a rule binding nobody is refused. A
 page with its own copy of those rules would be a page with one of them out of
 step. The flag also stands in for the one-time code, and for the reason that
 code exists: it is there so a chat holding the admin code cannot modify alone,
-and on the page there is no chat — there is a person who has just retyped a
-password no tool carries.
+and on the page there is no chat — there is a person who came through a door no
+tool can open.
 
 **There is no on/off switch, anywhere.** The two ways to be quiet are both
 ABSENCES: no `SMTP_HOST` on the container, so nothing is ever sent; no address
@@ -1086,8 +1171,37 @@ a **human who carries an address** emails them — see *Notifications* below.
 **Closing costs a sentence**: `tasks_close`
 takes an `outcome` that completes it or a `reason` that drops it, exactly one of
 the two, and the refusal is in the schema as well as at the door. **Closed is
-closed** — an open task is amended freely, its owner included, and a closed one
-not at all.
+closed** — an open entry is amended, a closed one not at all. **Both ends may
+amend an open one**: the desk it sits on and whoever SENT it; anybody else
+takes the admin code. Until v7.0.0 only the desk could, and the sender who had
+written the wrong thing had no way back except opening a second entry or
+reaching for a credential to fix their own typo.
+
+### A task and a message: ask who will close it, and why
+
+The log has two kinds of entry, and they are told apart by one question rather
+than by a list of properties.
+
+| | a **task** | a **message** |
+|---|---|---|
+| what it is | work that must happen | a condition that can pass |
+| who closes it | the desk that DID it | its desk **or the one who sent it** |
+| what closing means | somebody acted, and the outcome says what came of it | the condition is gone — possibly with nothing done |
+| closing words | always owed | may be omitted: the engine writes `closed by <who> on <date>` |
+| if nobody ever looks | it stays on the desk, and comes back marked stale | it may be opened and closed unseen, and that is correct |
+
+Work that must happen is a **task**, even when it reads like news. A condition
+that can stop mattering on its own is a **message**, even when it asks for
+attention — the tax monitor says a statement is missing, the statement
+arrives, and the same skill closes its own message on the next round.
+
+⚠ A **task** is also how one chat asks another for something (*look at this
+proposal and tell me what you think*). That is a request, not a
+`kind='message'`, and the two words are worth keeping apart: what makes it a
+task is that somebody has to answer it. ⚠ And a **message is not a push
+notification** — a chat sees its desk when it starts, so one opened and closed
+between two starts is one nobody will ever see. For something that has to be
+read regardless, open a task.
 
 **`urgent` belongs to whoever created the task** and cannot be changed by
 anyone afterwards, because the receiver is the party with an interest in

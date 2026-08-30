@@ -31,7 +31,9 @@ project's database, so it is good for that project and for no other. It is shown
 once and copied by hand into the chat, lives minutes, and is burned in the same
 transaction as the SUCCEEDED gesture — a refusal rolls back and does not consume
 it. Spent or expired it is nothing; alone it elevates nobody. Chained gestures
-mint one code per gesture, one at a time.
+mint one code per gesture — and since v7.0.0 the page mints them in a line:
+press the button once per code and they come back two spaces apart, so three
+gestures cost one visit and one copy.
 
 **One declared exception**, downward: closing or amending someone else's task
 takes the admin code ALONE. A task closed wrong reopens as a new task; a rule
@@ -149,9 +151,13 @@ The project's STRUCTURE — the one door for all of it.
   it means is what lets you ask for the right number — writing it is still not
   yours.
 - **A CONSUMER'S `specs` ARE THAT CONSUMER'S.** `specs` in the call under a
-  different name is refused, and the rule has NO exception — not with the admin
-  code, not with a one-time code, whatever else rides along in `fields`. The
-  refusal carries the road:
+  different name is refused: not with the admin code, not with a one-time code,
+  whatever else rides along in `fields`. ⚠ **One exception since v7.0.0, and it
+  is not a tool**: the administration page writes any consumer's brief and
+  specs, because there is no chat there — there is the person holding the UI
+  password, the same one who writes the PROJECT's brief and specs, which no
+  tool may touch at all. From a tool the rule is unchanged. The refusal carries
+  the road:
 
       the specs of advisory are changed by advisory. If you need them changed,
       open a task: tasks_add(project, consumer='advisory', title=…, body=…,

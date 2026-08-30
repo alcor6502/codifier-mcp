@@ -2388,7 +2388,7 @@ ok("<PostArgs/>" in TEMPLATE,
 # variable introduced later means editing every existing install by hand. These
 # go in now, inert or not.
 for var in ("WEB_PORT", "WEB_UI_PASSWORD",
-            "ADMIN_AUTH_CODE_DURATION",
+            "ADMIN_AUTH_CODE_DURATION", "WEB_BASE_URL", "TASK_LINK_DAYS",
             "LOG_LEVEL", "ALLOWED_CIDRS", "DB_DIR", "BACKUP_DIR"):
     ok(f'Target="{var}"' in TEMPLATE, f"template declares {var}")
 
@@ -2998,7 +2998,7 @@ ok(_DEFINED == _LISTED,
 # added here too, and that second gesture is the whole point — it is where
 # somebody notices that the mailer has started asking the engine for something
 # new. `mail_cap` arrived with the per-kind ceiling and this line saw it.
-ok(_MAIL_ASKS == ["approver", "mail_cap", "postbox"],
+ok(_MAIL_ASKS == ["approver", "mail_cap", "postbox", "task_link"],
    f"and the doors it uses are exactly these: {_MAIL_ASKS}", _MAIL_ASKS)
 
 # AND THE OTHER DIRECTION, on the DOCUMENTS this image serves. The check above
@@ -3688,18 +3688,35 @@ ok(any(ast.unparse(n.func).startswith("hmac.") for n in ast.walk(WEB_TREE)
        if isinstance(n, ast.Call)),
    "the session cookie is signed with hmac")
 
-# One hour of INACTIVITY, and the number is a named constant so the check and
-# the code cannot say different things.
-ok(getattr(__import__("web"), "SESSION_MAX_IDLE", None) == 3600,
-   "the session expires after one hour of inactivity",
+# EIGHT HOURS of INACTIVITY, and the number is a named constant so the check
+# and the code cannot say different things. It went UP in v7.0.0, in the same
+# grain that took the master out of every writing gesture: from then on this
+# number is the only thing between a borrowed browser and the corpus, so it is
+# pinned here rather than left to drift by an edit that reads like a comfort.
+ok(getattr(__import__("web"), "SESSION_MAX_IDLE", None) == 8 * 3600,
+   "the session expires after eight hours of inactivity",
    getattr(__import__("web"), "SESSION_MAX_IDLE", None))
 
 # A form with the password alone is the case where automatic filling goes
 # wrong, and goes wrong in SILENCE — 1Password and the Apple keychain both
-# want a username field to key the entry on. It is hidden and constant: there
-# is only one user.
-ok('autocomplete="username"' in WEB_SRC,
-   "the login form carries a hidden username field, for the password managers")
+# want a username field to key the entry on.
+#
+# ⚠ AND IT MUST BE VISIBLE. It carried `hidden` until v7.0.0, which is
+# `display:none`, and a field that is not displayed is one those managers SKIP:
+# the offer to fill and the offer to save never appeared, with nothing failing
+# anywhere. So this pins BOTH halves — the field is there, and it is not
+# hidden — because the first alone is what was true while it did not work.
+_LOGIN = WEB_SRC[WEB_SRC.index("def _login_page"):]
+_LOGIN = _LOGIN[:_LOGIN.index("def build(")]
+ok('autocomplete="username"' in _LOGIN,
+   "the login form carries a username field, for the password managers")
+_UFIELD = next((ln for ln in _LOGIN.splitlines()
+                if 'name="username"' in ln), "")
+ok(bool(_UFIELD) and "hidden" not in _UFIELD
+   and "hidden" not in _LOGIN[_LOGIN.index(_UFIELD):
+                              _LOGIN.index(_UFIELD) + 220],
+   "and it is VISIBLE: a display:none field is one 1Password and the keychain "
+   "walk straight past, in silence", _UFIELD.strip())
 ok('autocomplete="current-password"' in WEB_SRC,
    "and marks the password as the current one")
 
@@ -3981,7 +3998,7 @@ ok(any(n.func.attr == "projects" for n in ROUTER_WEB),
 # refusal that keeps chats away from people, and the one-time code — so a
 # second caller acquiring it would be a second caller with neither. It is
 # passed in exactly one handler, and that handler is the one whose whole
-# subject is people.
+# subject is the anagrafica.
 # Walked from the TREE and not from `_WEB_FUNCS`, which is built further down:
 # a check that depends on where it happens to sit in the file is a check that
 # moves badly.
@@ -3994,9 +4011,9 @@ _FLAGGED = sorted({fn.name for fn in ast.walk(WEB_TREE)
                    and fn.name != "build"
                    for n in ast.walk(fn)
                    if isinstance(n, ast.keyword) and n.arg == "on_the_page"})
-ok(_FLAGGED == ["people_action"],
-   f"`on_the_page` is passed by one handler and it is the people's: {_FLAGGED}",
-   _FLAGGED)
+ok(_FLAGGED == ["consumers_action"],
+   f"`on_the_page` is passed by one handler and it is the anagrafica's: "
+   f"{_FLAGGED}", _FLAGGED)
 
 _CAP_KEYS = [n for n in ast.walk(WEB_TREE) if isinstance(n, ast.Subscript)
              and isinstance(n.slice, ast.Constant) and n.slice.value == "queue_cap"]
@@ -4045,14 +4062,17 @@ ok([(r[0], r[2]) for r in _POSTS] == [("/login", "login"), ("/logout", "logout")
                                       ("/p/{project}/backup", "project_backup"),
                                       ("/p/{project}/batch", "batch_action"),
                                       ("/p/{project}/codes", "codes_mint"),
-                                      ("/p/{project}/people", "people_action"),
-                                      ("/p/{project}/profile", "profile_action")],
-   "and exactly seven of them take POST: the door, the exit, and the five "
+                                      ("/p/{project}/consumers", "consumers_action"),
+                                      ("/p/{project}/profile", "profile_action"),
+                                      ("/p/{project}/t/{task}", "ticket_action"),
+                                      ("/p/{project}/tasks", "tasks_action")],
+   "and exactly nine of them take POST: the door, the exit, and the seven "
    "gestures — the lot, minting a one-time code, writing the project's own "
-   "profile, looking after its PEOPLE, and the backup, which asks for no "
-   "master because it handles no secret. Renewal left with the expiry in "
-   "5.0.0; creating a project and rekeying it are not here either, because a "
-   "project is a line in a file",
+   "profile, the ANAGRAFICA (every consumer, not only the people), working the "
+   "LOG, closing ONE entry from the link in its email, and the backup, which "
+   "handles no secret. Renewal left with the expiry in 5.0.0; creating a "
+   "project and rekeying it are not here either, because a project is a line "
+   "in a file",
    [(r[0], r[2]) for r in _POSTS])
 # Every writing route is UNDER a project, and that is the shape of "a project
 # is a database": a gesture that named no project would be a gesture on all of
@@ -4066,12 +4086,64 @@ ok(all(r[1] in (("GET",), ("POST",)) for r in _ROUTES),
    "a page whose method is the only thing between the two",
    [r for r in _ROUTES if r[1] not in (("GET",), ("POST",))])
 
-print("\n== every page is behind the session, every write behind the master too ==")
+print("\n== the run of one-time codes: three presses, one drag ==")
+
+# The ceiling on what the codes page prints at once lives in a NAMED constant,
+# and the page slices with that name — not with a number typed twice, which is
+# the copy this repo pays for every time it is written.
+_RUN_MAX = getattr(__import__("web"), "CODE_RUN_MAX", None)
+ok(isinstance(_RUN_MAX, int) and _RUN_MAX >= 1,
+   f"web.py names the ceiling of the printed run: CODE_RUN_MAX = {_RUN_MAX}",
+   _RUN_MAX)
+_SLICES = [ast.unparse(n) for n in ast.walk(WEB_TREE) if isinstance(n, ast.Subscript)
+           and "CODE_RUN_MAX" in ast.unparse(n)]
+ok(len(_SLICES) == 2,
+   "and both cuts of the run read that constant — the one that comes in from "
+   "the field and the one that goes back out", _SLICES)
+# A blunter "the number appears once in the file" was written here and taken
+# out: `rows='10'` on the two textareas is the same integer with nothing to do
+# with this ceiling, and a check that goes red for a coincidence teaches the
+# reader to ignore it. What is worth pinning is that the CUTS read the name,
+# which is the line above.
+
+# ⚠ TWO SPACES, and the CSS that makes them survive. HTML collapses a run of
+# whitespace, so `'  '.join` alone would reach the browser as single spaces
+# and the person would copy a line they cannot tell apart — a defect that
+# renders, looks fine, and is only found by pasting. The separator and the
+# declaration that preserves it are pinned TOGETHER, because either alone is
+# the bug.
+ok("'  '.join(run)" in WEB_SRC,
+   "the minted codes are joined by two spaces, so one drag takes the lot",
+   [x.strip()[:60] for x in WEB_SRC.splitlines() if ".join(run)" in x])
+_CSSC = getattr(__import__("web"), "_CSS", "")
+ok("code.run" in _CSSC and "white-space: pre-wrap" in _CSSC,
+   "and `code.run` declares white-space: pre-wrap, without which HTML "
+   "collapses those two spaces into one and nothing looks wrong",
+   [ln.strip() for ln in _CSSC.splitlines() if "code.run" in ln
+    or "white-space" in ln])
+
+# The run is carried in the FORM and in nothing else: a basket on the server
+# would outlive the tab and hold cleartext codes for whoever loads the page
+# next. The hidden field is the whole of the state, and this says so by name.
+ok("name='run' value='" in WEB_SRC,
+   "the run travels in a hidden field on the page that prints it")
+# `_BUILD_FUNCS` is built further down, so the handler is found here on the
+# tree — a name borrowed from below is how this file dies half way instead of
+# going red, and a suite that dies prints hundreds of greens first.
+_MINT = next((n for n in ast.walk(WEB_TREE)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name == "codes_mint"), None)
+ok(_MINT is not None and "form.get('run')" in ast.unparse(_MINT),
+   "and the handler reads it back from the form, never from a module-level "
+   "basket", ast.unparse(_MINT)[:80] if _MINT else "(no handler)")
+
+print("\n== every page is behind the session, and the master is typed at the door ==")
 
 # The same law as `_admin` on the MCP side, moved to the door a PERSON comes
-# through — and it needs both halves, because they fail differently. Without
-# the session anybody on the LAN reads the corpus; without the master retyped,
-# a browser left open on the iPad approves rules by being borrowed. The set of
+# through — and since v7.0.0 there is ONE door and not two. The master used to
+# be retyped by every writing gesture; it is now typed at `login` and nowhere
+# else, so what this block owes is both halves of that decision: every writer
+# behind the session, and NO writer asking for the password again. The set of
 # writing methods is DERIVED from rules.py, as it is for the tools: a list
 # copied into a second file drifts, and this one would drift towards
 # "unguarded".
@@ -4109,6 +4181,13 @@ NO_SESSION_ON_PURPOSE = {
     "login": "it is the door: asking for a session to get one is a locked room",
     "logout": "throwing a cookie away can harm nobody, and refusing to do it "
               "for want of a valid session would leave a stale one in place",
+    "ticket_page": "the ticket in the URL is the credential, and the person "
+                   "holding it came from their own inbox — a password here "
+                   "would be a button that cannot be pressed from the sofa, "
+                   "which is the entire point of the button",
+    "ticket_action": "same ticket, same reason, and it can close exactly the "
+                     "one entry that ticket names — see TICKETED below, which "
+                     "is what replaces the session for these two",
 }
 _ENDPOINTS = [r[2] for r in _ROUTES]
 ok(bool(_ENDPOINTS), "the routes name their endpoints")
@@ -4124,7 +4203,7 @@ ok(set(NO_SESSION_ON_PURPOSE) <= set(_ENDPOINTS),
    "every documented exception names an endpoint that exists",
    sorted(set(NO_SESSION_ON_PURPOSE) - set(_ENDPOINTS)))
 
-# And the writing ones behind the master as well, retyped for the action.
+# And NONE of them behind a retyped master, which is the new half of the rule.
 #
 # ⚠ The receiver is `prj` and not `registry`, and that one word is the whole
 # check: since v4.0.0 every write happens on a Project, so a set derived from
@@ -4150,50 +4229,88 @@ for _name, _fn in _BUILD_FUNCS.items():
     if not _writes:
         continue
     _GUARDED.append(_name)
+    if _name in NO_SESSION_ON_PURPOSE:
+        # ⚠ A WRITER WITHOUT A SESSION IS ALLOWED EXACTLY ONCE, and never on
+        # its own word: it must VERIFY A SIGNED TICKET, and verify it BEFORE it
+        # writes. Both halves are needed and they fail differently — a handler
+        # that never checks is an open door, and one that checks after the
+        # write has already written. The order is read off the line numbers,
+        # which is crude and is the point: it cannot be satisfied by a call
+        # that merely appears somewhere in the function.
+        _checks = [n.lineno for n in ast.walk(_fn) if isinstance(n, ast.Call)
+                   and ast.unparse(n.func) in ("_ticket", "prj.check_task_link")]
+        _writes_at = [n.lineno for n in ast.walk(_fn) if isinstance(n, ast.Call)
+                      and isinstance(n.func, ast.Attribute)
+                      and isinstance(n.func.value, ast.Name)
+                      and n.func.value.id == "prj" and n.func.attr in MUTATING]
+        ok(bool(_checks),
+           f"{_name} writes ({', '.join(sorted(_writes))}) with NO session, so "
+           f"it verifies a signed ticket instead", _checks)
+        ok(bool(_checks) and bool(_writes_at) and min(_checks) < min(_writes_at),
+           f"and it verifies BEFORE it writes — a check after the write is a "
+           f"check on something already done",
+           (_checks, _writes_at))
+        continue
     ok(_reaches(_name, "_session_ok"),
        f"{_name} writes ({', '.join(sorted(_writes))}) and is behind the session")
-    ok(any(ast.unparse(n.func) == "secrets.compare_digest" for n in ast.walk(_fn)
-           if isinstance(n, ast.Call)),
-       f"{_name} writes and retypes the master — a session alone is a browser "
-       f"left open on the iPad")
+    # ⚠ THE ASSERTION IS INVERTED SINCE v7.0.0, and inverting it was the
+    # decision, not a relaxation. It used to demand the comparison; it now
+    # forbids it, so that the password cannot come back one handler at a time
+    # — which is exactly how it spread in the first place.
+    ok(not [n for n in ast.walk(_fn) if isinstance(n, ast.Call)
+            and ast.unparse(n.func) == "secrets.compare_digest"],
+       f"{_name} writes and does NOT retype the master: the session is the "
+       f"door, and a secret typed five times an hour is typed without looking",
+       "it compares one again: if that is the new decision, this line moves")
 # And the block NAMES what it guarded, in both directions. A count with a
 # floor — it read `>= 3` — catches a guard that vanishes and says nothing
 # about a writer that arrives unguarded, and it goes stale in silence the day
 # a handler leaves: the renewals action left in 5.0.0 and the floor would have
 # stayed at three. The equality fails on either mistake, and it fails saying
 # which name moved.
-ok(sorted(_GUARDED) == ["batch_action", "codes_mint", "people_action",
-                        "profile_action"],
+ok(sorted(_GUARDED) == ["batch_action", "codes_mint", "consumers_action",
+                        "profile_action", "tasks_action", "ticket_action"],
    f"the writing handlers are exactly these, guarded: {sorted(_GUARDED)}",
    sorted(_GUARDED))
 
-# And the mirror image, because the interesting half of a rule is its
-# exceptions. `backup` is NOT in MUTATING — VACUUM INTO produces a file and
-# changes nothing in the database — so the loop above never looks at the
-# handler that runs it, and dropping the master from it left no red line
-# anywhere. That silence is what this block ends: the decision is named here,
-# with its reason, and the day somebody puts the master back the suite says so
-# and the decision gets taken again instead of drifting.
-NO_MASTER_ON_PURPOSE = {
-    "project_backup": "VACUUM INTO is a reading: it changes nothing and the "
-                      "copy lands on the server's disk, not in the browser, "
-                      "so the master would have defended against one extra "
-                      "file in a directory — and a master typed where it "
-                      "guards nothing is a master typed without looking",
+# THE MASTER IS COMPARED IN EXACTLY ONE PLACE, and the check says which — in
+# both directions, because "nowhere else" is the half that decays. The loop
+# above only looks at handlers that WRITE; a page that asked for the password
+# while writing nothing would slip past it, and a password asked where it
+# guards nothing is the habit this grain was meant to end.
+#
+# `_session_ok` also calls compare_digest, on the cookie's MAC, and that one
+# must stay: it is told apart by what it compares rather than by its name, so
+# a handler cannot hide a master check behind a variable called `mac`.
+def _master_cmps(fn) -> list:
+    return [ast.unparse(n) for n in ast.walk(fn) if isinstance(n, ast.Call)
+            and ast.unparse(n.func) == "secrets.compare_digest"
+            and "master" in ast.unparse(n).lower()]
+
+
+MASTER_COMPARED_IN = {
+    "login": "it is the door, and the whole of what the UI asks: one password, "
+             "typed once, for a session that dies with a restart",
 }
-ok(set(NO_MASTER_ON_PURPOSE) <= set(_ENDPOINTS),
-   "every master-free endpoint named here exists",
-   sorted(set(NO_MASTER_ON_PURPOSE) - set(_ENDPOINTS)))
-for _name, _why in NO_MASTER_ON_PURPOSE.items():
-    _fn = _BUILD_FUNCS.get(_name)
-    ok(_fn is not None and not [n for n in ast.walk(_fn) if isinstance(n, ast.Call)
-                                and ast.unparse(n.func) == "secrets.compare_digest"],
-       f"{_name} asks for no master ON PURPOSE — {_why[:56]}...",
-       "it now compares one: if that is the new decision, drop the exception")
-    _reached = _engine_reached(_fn or ast.Module(body=[], type_ignores=[]))
-    ok(not (_reached & MUTATING),
-       f"and the exception holds only while {_name} writes nothing",
-       sorted(_reached & MUTATING))
+ok(set(MASTER_COMPARED_IN) <= set(_BUILD_FUNCS),
+   "every place named as comparing the master exists",
+   sorted(set(MASTER_COMPARED_IN) - set(_BUILD_FUNCS)))
+for _name, _why in MASTER_COMPARED_IN.items():
+    ok(len(_master_cmps(_BUILD_FUNCS[_name])) == 1,
+       f"{_name} compares the master, once — {_why[:52]}...",
+       _master_cmps(_BUILD_FUNCS[_name]))
+_STRAY = sorted(n for n, f in _BUILD_FUNCS.items()
+                if n not in MASTER_COMPARED_IN and n != "build" and _master_cmps(f))
+ok(not _STRAY,
+   "and NOBODY else compares it: the password came out of every gesture in "
+   "v7.0.0 and cannot come back one handler at a time", _STRAY)
+# And the cookie's own comparison is still constant-time, told apart by what it
+# compares: this is the guard the master's departure leaned the whole UI on.
+ok(_BUILD_FUNCS.get("_session_ok") is not None
+   and [n for n in ast.walk(_BUILD_FUNCS["_session_ok"]) if isinstance(n, ast.Call)
+        and ast.unparse(n.func) == "secrets.compare_digest"],
+   "the session cookie's MAC is compared in constant time, and that check is "
+   "now the whole door")
 
 # The session check is the FIRST statement of the handler, and not conditional.
 # `if request.query_params.get("preview"): ...` in front of it reads like a
@@ -4202,6 +4319,9 @@ for _name, _why in NO_MASTER_ON_PURPOSE.items():
 for _e in _ENDPOINTS:
     if _e in NO_SESSION_ON_PURPOSE or _e not in _BUILD_FUNCS:
         continue
+    # The ticketed pair is exempt from the SHAPE of this rule and not from the
+    # rule: what they must do first is verified above, against their own
+    # credential, and in the order that matters.
     _body = [x for x in _BUILD_FUNCS[_e].body
              if not (isinstance(x, ast.Expr) and isinstance(x.value, ast.Constant))]
     _first = ast.unparse(_body[0]) if _body else "(empty)"
@@ -4218,10 +4338,13 @@ for _e in _ENDPOINTS:
 # came back, the ceiling shifted by one.
 if _ACT is not None:
     _TESTS = [ast.unparse(n.test) for n in ast.walk(_ACT) if isinstance(n, ast.If)]
-    ok("not secrets.compare_digest((form.get('master') or '').strip(), master)"
-       in _TESTS,
-       "the lot action's master check is the constant-time comparison, as written",
-       [t[:60] for t in _TESTS])
+    # ⚠ The master check that stood here is GONE with v7.0.0, and its absence
+    # is pinned rather than merely deleted: what guards this page is the
+    # DIGEST, which answers the question the password never answered — is this
+    # the queue you read.
+    ok(not [t for t in _TESTS if "master" in t],
+       "the lot action asks for no master: the digest is what guards it",
+       [t[:60] for t in _TESTS if "master" in t])
     # The digest is no longer COMPARED here — `decide()` does that, in the
     # transaction — so what this file owes is that the one the browser sent
     # travels in untouched. A page that passed the batch's own digest instead

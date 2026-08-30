@@ -407,6 +407,26 @@ refused("and the admin code with a one-time code does NOT open it either",
         lambda: p2.amend_project("consumer", "advisory", "amend",
                                  {"specs": "x", "brief": "y"}, actor="tax",
                                  auth_code=code(p2)), "changed by advisory")
+# ⚠ AND THE ONE EXCEPTION, WHICH IS NOT A TOOL — v7.0.0. The page writes any
+# consumer's specs, because on the page there is no chat: there is the person
+# with the UI password, the same one who writes the PROJECT's brief and specs,
+# which no tool may touch at all. The alternative was to let the page sign with
+# the consumer's own name, which passes the guard above by writing a signature
+# that is NOT TRUE — a rule with one declared exception stays checkable, a
+# history that lies does not.
+allowed("the PAGE writes somebody else's specs, signing as itself",
+        lambda: p2.amend_project("consumer", "advisory", "amend",
+                                 {"specs": "written from the page"},
+                                 actor="web ui", on_the_page=True))
+yields("and the history says the page did it, under its own name",
+       lambda: p2.cx.execute("SELECT specs, actor FROM consumer "
+                             "WHERE name='advisory'").fetchone()["actor"],
+       "web ui")
+refused("while the same call WITHOUT that flag is refused as before",
+        lambda: p2.amend_project("consumer", "advisory", "amend",
+                                 {"specs": "from a chat"}, actor="tax"),
+        "changed by advisory")
+
 allowed("while a consumer changes its OWN, on the reference code",
         lambda: p2.amend_project("consumer", "advisory", "amend",
                                  {"specs": "cash 50k"}, actor="advisory"))
@@ -414,6 +434,48 @@ yields("and the spelling of the name is not the identity: casefolded, like "
        "everywhere else in this registry",
        lambda: bool(p2.amend_project("consumer", "advisory", "amend",
                                      {"specs": "cash 60k"}, actor="ADVISORY")), True)
+# THE ROSTER: everybody, live and retired — the anagrafica the page is built
+# on. What each case pins is the difference from `project_info`, which is the
+# only reason there are two.
+p3 = project()
+p3.amend_project("consumer", "coach", "create", {"kind": "chat", "brief": "b"},
+                 actor="architect")
+p3.amend_project("consumer", "runner", "create", {"kind": "skill"},
+                 actor="architect")
+p3.amend_project("consumer", "runner", "retire", {}, reason="the gym closed",
+                 actor="architect", auth_code=code(p3))
+yields("the roster carries the RETIRED, which project_info does not — the "
+       "difference is measured on the name that was retired, not on the whole "
+       "list, because `project()` seeds an anagrafica of its own",
+       lambda: ("runner" in [c["name"] for c in p3.roster()["consumers"]],
+                "runner" in [c["name"] for c in p3.project_info()["consumers"]]),
+       (True, False))
+yields("and says which is which, with the reason somebody wrote",
+       lambda: [(c["retired"], c["reason"]) for c in p3.roster()["consumers"]
+                if c["name"] == "runner"], [(True, "the gym closed")])
+yields("the live and retired counts are counted from the rows, and they add "
+       "up to the whole list",
+       lambda: (lambda r: (r["live"] + r["retired"] == len(r["consumers"]),
+                           r["retired"]))(p3.roster()), (True, 1))
+yields("every row carries the two numbers a retirement is refused for",
+       lambda: all({"rules_in_force", "open_entries"} <= set(c)
+                   for c in p3.roster()["consumers"]), True)
+# ⚠ TWO ENTRIES AND ONE CLOSED, because a case with one open entry cannot tell
+# "the open ones on this desk" from "every entry this desk ever had" — and the
+# count is read beside a Retire button whose refusal depends on exactly that
+# difference. Injecting the wrong query left this case green until it counted
+# a closed one too.
+p3.task_add("coach", "a thing", "b", "architect")
+_done = p3.task_add("coach", "a finished thing", "b", "architect")["id"]
+p3.task_close(_done, "coach", outcome="done")
+yields("and the open entries are the ones still OPEN on that desk, not every "
+       "entry it ever had",
+       lambda: [c["open_entries"] for c in p3.roster()["consumers"]
+                if c["name"] == "coach"], [1])
+yields("a brief written from the page comes back on the roster",
+       lambda: [c["brief"] for c in p3.roster()["consumers"]
+                if c["name"] == "coach"], ["b"])
+
 # AND THE HAND IS RECORDED. Until 5.0.0 the surface passed a fixed 'admin' into
 # `actor`, so every write through this door read as the administrator's — on a
 # door reachable with the reference code alone, which is what made it a lie.
@@ -1303,6 +1365,66 @@ refused("closing with neither", lambda: p.task_close(t2, "advisory"),
         "exactly one of the two")
 allowed("dropping costs a reason, and that is the whole gesture",
         lambda: p.task_close(t2, "advisory", reason="the desk that owns it changed"))
+# THE CLOSING TICKET: signed, stateless, and worth exactly one entry. What
+# each case pins is a property the page leans on and cannot check for itself.
+_tl = p.task_add("advisory", "to close from a link", "b", "architect")["id"]
+_tk = allowed("an entry can be given a signed ticket",
+              lambda: p.task_link(_tl, 14))
+equals("which names the entry it is for", (_tk or {}).get("id"), _tl)
+yields("and carries its own expiry, so nothing has to be stored",
+       lambda: len((_tk or {"token": ""})["token"].split(".")) == 2, True)
+allowed("the ticket opens that entry",
+        lambda: p.check_task_link(_tl, _tk["token"]))
+yields("and what comes back is enough to render it: the desk, the words, the "
+       "state", lambda: sorted(p.check_task_link(_tl, _tk["token"])),
+       ["body", "id", "kind", "owner", "status", "title"])
+_other = p.task_add("advisory", "another one entirely", "b", "architect")["id"]
+refused("a ticket does not travel to another entry",
+        lambda: p.check_task_link(_other, _tk["token"]), "not valid")
+refused("a doctored signature is refused",
+        lambda: p.check_task_link(_tl, _tk["token"][:-1] + "0"), "not valid")
+refused("and so is a token of the wrong shape",
+        lambda: p.check_task_link(_tl, "not-a-ticket"), "not valid")
+yields("the refusal for a forgery says NOTHING about what would have worked",
+       lambda: (lambda s: "expire" not in s and str(_tk["token"])[:8] not in s)(
+           _refusal(lambda: p.check_task_link(_tl, "aaa.bbb"))), True)
+_stale = p._task_ticket(_tl, int(rules.time.time()) - 60)
+refused("an expired ticket is told apart, in words",
+        lambda: p.check_task_link(_tl, _stale), "expired")
+yields("and the expiry cannot be moved without breaking the signature: it is "
+       "signed, not carried beside the signature",
+       lambda: "not valid" in _refusal(
+           lambda: p.check_task_link(_tl, f"{int(rules.time.time()) + 99999}."
+                                          f"{_stale.split('.', 1)[1]}")), True)
+yields("a ticket for an entry that does not exist is a missing entry, not a "
+       "bad signature",
+       lambda: "no such task" in _refusal(lambda: p.task_link("TK-9999", 14)),
+       True)
+
+# BOTH ENDS MAY AMEND IT, and the sender's end is the one that was missing:
+# until v7.0.0 whoever had written the wrong thing could only open a SECOND
+# entry — which leaves the first standing on somebody's desk — or reach for the
+# admin code to fix their own typo.
+_ta = p.task_add("advisory", "wrong from the start", "and wrongly worded",
+                 "architect")["id"]
+allowed("the SENDER amends what they sent, with no admin code",
+        lambda: p.task_amend(_ta, "architect", title="right from now on"))
+yields("and the correction is really on the entry",
+       lambda: p.task_get([_ta])["tasks"][0]["title"], "right from now on")
+allowed("the desk it sits on still amends it too",
+        lambda: p.task_amend(_ta, "advisory", body="reworded by the desk"))
+refused("a third party amends nothing without the admin code",
+        lambda: p.task_amend(_ta, "news", title="not mine to touch"),
+        "amended by its desk or by the one who sent it")
+yields("and the refusal names BOTH ends, or it is a wall",
+       lambda: (lambda s: "architect" in s and "advisory" in s)(
+           _refusal(lambda: p.task_amend(_ta, "news", title="x"))), True)
+allowed("the sender may hand it to another desk as well",
+        lambda: p.task_amend(_ta, "architect", consumer="news"))
+allowed("and the admin code still opens it for anybody",
+        lambda: p.task_amend(_ta, "nobody at all", title="by the admin code",
+                             admin=True))
+
 t3 = p.task_add("advisory", "to reassign", "b", "architect")["id"]
 moved = allowed("a reassignment is named",
                 lambda: p.task_amend(t3, "advisory", consumer="news"))
@@ -1319,6 +1441,45 @@ yields("and the outcome is on it, which is why the sender stops re-sending",
        lambda: [t["outcome"] for t in
                 p.task_list("architect", authored=True)["closed_recent"]
                 if t["id"] == t1["id"]], ["done"])
+# THE BOARD: the whole log at once, and it is a DIFFERENT reading from the
+# overview — not pending-only, not capped per desk, and groupable by either end
+# of an entry. What each case here pins is the half a page cannot be written
+# against otherwise: that `sender` really groups on `created_by` and not on the
+# desk, that `all` really carries the closed ones, and that the entries carry
+# their BODIES, because a console that made you open each entry to read it is a
+# console you answer from the title.
+yields("the board groups by desk, and every desk with an entry is there — "
+       "the human's among them, which is the desk a chat cannot read",
+       lambda: sorted(g["group"] for g in p.task_board()["groups"]),
+       ["Alfredo", "advisory", "news"])
+yields("by SENDER it groups on who signed it, which is the other end",
+       lambda: sorted(g["group"] for g in
+                      p.task_board(group_by="sender")["groups"]),
+       ["architect"])
+yields("open is the default, and the closed ones are not in it",
+       lambda: all(d["status"] == "pending"
+                   for g in p.task_board()["groups"] for d in g["entries"]),
+       True)
+yields("`all` brings them back, closed ones included",
+       lambda: p.task_board(show="all")["closed"] > 0, True)
+yields("and every entry carries its body, which is what a console is for",
+       lambda: all("body" in d for g in p.task_board(show="all")["groups"]
+                   for d in g["entries"]), True)
+yields("the tally counts what it shows, and is not a second arithmetic",
+       lambda: (lambda b: b["count"] == sum(len(g["entries"]) for g in b["groups"])
+                and b["count"] == b["open"] + b["closed"])(
+                    p.task_board(show="all")), True)
+yields("a query filters on title, body and ID alike",
+       lambda: [d["id"] for g in p.task_board(show="all", query="to reassign")
+                ["groups"] for d in g["entries"]], [t3])
+refused("a group_by that is neither end of an entry",
+        lambda: p.task_board(group_by="colour"), "'owner' or 'sender'")
+refused("and a show that is neither state",
+        lambda: p.task_board(show="archived"), "'open' or 'all'")
+yields("the refusal NAMES what was asked for, or it is a wall",
+       lambda: "colour" in _refusal(lambda: p.task_board(group_by="colour")),
+       True)
+
 yields("the overview sees every desk, humans included",
        lambda: sorted(d["consumer"] for d in p.task_overview()["desks"]),
        ["Alfredo", "advisory", "architect", "news"])

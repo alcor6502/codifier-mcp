@@ -65,12 +65,14 @@ import contextlib
 import difflib
 import functools
 import hashlib
+import hmac
 import logging
 import os
 import re
 import secrets
 import sqlite3
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 # A CHILD of the service's logger, so it inherits LOG_LEVEL and is caught by
@@ -79,7 +81,7 @@ from datetime import datetime, timedelta, timezone
 # and both are alarms about the world outside this process.
 log = logging.getLogger("codifier-mcp.registry")
 
-VERSION = "6.2.0"
+VERSION = "7.0.0"
 
 # The GENERATION of the schema, and it is a number the database carries in
 # `PRAGMA user_version`. It exists because of a thing that was seen live at
@@ -3789,17 +3791,25 @@ class Project:
 
     @classmethod
     def refuse_not_yours(cls, entity: str, action: str, name: str, by: str) -> None:
-        """A consumer's `specs` travel under that consumer's OWN name, and this
-        is the whole of the rule: one sentence, no exceptions, not even for the
-        administrator. `specs` in the call and a different name on it is
-        refused — with or without the admin code, with or without a one-time
-        code, whatever else rides along in `fields`.
+        """A consumer's `specs` travel under that consumer's OWN name. `specs`
+        in the call and a different name on it is refused — with or without the
+        admin code, with or without a one-time code, whatever else rides along
+        in `fields`.
 
-        WITHOUT EXCEPTIONS ON PURPOSE. The permissive version — the rule holds
-        on the low door and the admin may write anybody's — is two rules, and
-        the day somebody asks which one applies the answer is "it depends what
-        else was in the call". An administrator who needs a consumer's specs
-        changed asks that consumer, in the same way anyone else does.
+        ONE EXCEPTION, AND IT IS NOT A TOOL. The administration page writes any
+        consumer's brief and specs (v7.0.0), and the caller decides that by
+        passing `on_the_page` — this method is not reached at all in that case.
+        It is the same exception `NO_TOOL_FOR_PEOPLE` already has and it has the
+        same reason: on the page there is no chat, there is the person with the
+        UI password, who already writes the PROJECT's brief and specs that no
+        tool may touch. What this guard is FOR is a chat writing another chat's
+        mandate, and that is refused exactly as before.
+
+        NO OTHER EXCEPTION, ON PURPOSE. The permissive version — the rule holds
+        on the low door and the ADMIN CODE may write anybody's — is two rules,
+        and the day somebody asks which one applies the answer is "it depends
+        what else was in the call". An administrator who needs a consumer's
+        specs changed asks that consumer, in the same way anyone else does.
 
         THE REFUSAL CARRIES THE ROAD, and that is not politeness: a refusal
         that says only `no` makes a chat try something worse. It says to open a
@@ -3940,7 +3950,23 @@ class Project:
         # call and before the credentials, because it compares two arguments
         # and reads nothing. A refusal on it must not cost a one-time code, and
         # it must not need one either.
-        if "specs" in fields:
+        # ⚠ NOT ON THE PAGE, and this is a rule gaining its first exception —
+        # written here rather than discovered. `refuse_not_yours` says "no
+        # exceptions, not even for the administrator", and the reason it gives
+        # is exactly why the page is not one of them: an administrator there is
+        # a CHAT holding a code, and a chat writing another chat's mandate is
+        # the thing that must not happen. On the page there is no chat. There
+        # is a person with the UI password — the same person who already writes
+        # the PROJECT's brief and specs, which no tool can touch at all,
+        # because what is fundative is written by a person.
+        #
+        # Alfredo, asking for it: "il brief e le specs li voglio modificare".
+        # The alternative was worse and was rejected: let the page sign with
+        # the consumer's own name, which passes this guard by writing a
+        # SIGNATURE THAT IS NOT TRUE — the history would say the skill amended
+        # itself. A rule with one declared exception is still checkable; a
+        # history that lies is not repairable.
+        if "specs" in fields and not on_the_page:
             self.refuse_not_yours(entity, action, name, actor)
         # The order of these two matters: on a retirement EVERY field is
         # unknown, and "not a field" would send the caller looking for the
@@ -5312,11 +5338,105 @@ class Project:
                 "status": "completed" if has_out else "dropped",
                 "by": who, "outcome": outcome, "reason": reason}
 
+    def task_link(self, tid: str, days: int) -> dict:
+        """A SIGNED, STATELESS ticket that lets one entry be closed from the
+        page without a password — the thing a link in an email needs.
+
+        ⚠ NO TABLE, and that is the whole design rather than a shortcut. The
+        obvious shape for one-use tickets is a row; a row is a column is a
+        schema generation, and this register is LOADED — a generation costs the
+        corpus by hand and the open entries outright, since the log has no
+        source outside the database. So the ticket carries its own expiry and
+        proves itself with an HMAC, and the file is not touched.
+
+        THE ONE-USE PROPERTY IS ALREADY IN THE DOMAIN and is not rebuilt here:
+        `closed is closed`. A second click on the same link finds the entry
+        closed and gets the refusal that already exists. A reusable ticket for
+        an object that accepts one gesture is single-use in fact.
+
+        THE KEY IS THE PROJECT'S ADMIN CODE, and never leaves: HMAC does not
+        hand back what it was keyed with. It is the one secret that is already
+        per-project and already survives a restart — the session's own secret
+        is generated at boot precisely so it does NOT, which would kill every
+        link in every inbox at each Apply. ⚠ Rotating the admin code voids the
+        links already sent, and that is the correct behaviour rather than a
+        side effect: it is the revocation this design would otherwise not have.
+
+        ⚠ AND IT IS NOT A SECOND FACTOR ON ITS OWN. The ticket travels in
+        cleartext through a mail relay run by somebody else. What makes that
+        acceptable is that the page it opens does not answer outside the
+        tailnet — so it is written here as a PREMISE, not a detail: the day
+        that port is published anywhere else, this stops being safe."""
+        row = self._task_row(tid)
+        if row is None:
+            raise RulesError(f"{self._norm_task_id(tid)}: no such task in this project.")
+        if not self.admin_code:
+            raise RulesFault(
+                f"{self.name} has no admin code in the registry, so no link can be "
+                "signed: the key of the signature is that code.")
+        exp = int(time.time()) + max(1, int(days)) * 86400
+        return {"id": row["display_id"], "token": self._task_ticket(row["display_id"], exp),
+                "expires_at": datetime.fromtimestamp(exp, timezone.utc)
+                .strftime("%Y-%b-%d")}
+
+    def _task_ticket(self, display_id: str, exp: int) -> str:
+        mac = hmac.new(self.admin_code.encode(),
+                       f"close-task|{self.name}|{display_id}|{exp}".encode(),
+                       "sha256").hexdigest()
+        return f"{exp}.{mac}"
+
+    def check_task_link(self, tid: str, token: str) -> dict:
+        """The other half. Refuses a forged ticket and an expired one
+        DIFFERENTLY, on purpose: expired is a fact the reader can act on — ask
+        for it again — while a bad signature must say nothing at all about what
+        would have been right.
+
+        ⚠ The signature is compared in constant time, and the expiry is read
+        from INSIDE the signed string. A ticket that carried its expiry beside
+        the signature instead of under it would be a ticket anybody can
+        extend."""
+        row = self._task_row(tid)
+        if row is None:
+            raise RulesError(f"{self._norm_task_id(tid)}: no such task in this project.")
+        raw, _, mac = (token or "").strip().partition(".")
+        try:
+            exp = int(raw)
+        except ValueError:
+            raise RulesError("that link is not valid for this entry.") from None
+        if not hmac.compare_digest(mac, self._task_ticket(row["display_id"],
+                                                          exp).split(".", 1)[1]):
+            raise RulesError("that link is not valid for this entry.")
+        if exp < int(time.time()):
+            raise RulesError(
+                "that link has expired. The entry is untouched — it is closed from the "
+                "project's log page, or with tasks_close.")
+        return {"id": row["display_id"],
+                "owner": self.cx.execute(
+                    "SELECT name FROM consumer WHERE consumer_id=?",
+                    (row["consumer_id"],)).fetchone()[0],
+                "title": row["title"], "body": row["body"],
+                "status": row["status"], "kind": self._kind_of(row)["label"]}
+
     def task_amend(self, tid: str, by: str, title: str = "", body: str = "",
                    consumer: str = "", consumer_key: str = "",
                    admin: bool = False) -> dict:
         """Amend an OPEN task: title, body, or `consumer` to reassign — the
         reassignment is named in the story, which keeps both owners.
+
+        TWO ENDS MAY AMEND IT: the desk it sits on, and WHOEVER SENT IT. Until
+        v7.0.0 only the desk could, and the sender who had written the wrong
+        thing had no way back — they could open a second entry, which leaves
+        the first one standing, or ask for the admin code, which is the
+        credential a chat should not be reaching for to fix its own typo. The
+        entry belongs to both ends: the one who wrote it and the one who owes
+        it. This is the same doctrine `task_close` already carries for a
+        message, said about the other gesture.
+
+        ⚠ `created_by` is a SIGNATURE and not a pointer — on a task anyone may
+        sign anything — so this door is worth exactly what a signature is
+        worth, which is what it was already worth for closing a message. What
+        it is NOT is a way past the admin code for a THIRD party: a name that
+        is neither end is refused, and the refusal names both.
 
         `urgent` has no parameter here, and that is not an oversight: urgency
         belongs to whoever created the task, and a door that let the receiver
@@ -5333,10 +5453,13 @@ class Project:
             raise RulesError("`by` is required: an amendment is signed.")
         if row["status"] != "pending":
             raise RulesError(f"{row['display_id']} is {row['status']}: closed is closed.")
-        if not admin and _fold(who) != _fold(owner["name"]):
+        if not admin and _fold(who) not in (_fold(owner["name"]),
+                                            _fold(row["created_by"] or "")):
             raise RulesError(
-                f"{row['display_id']} belongs to {owner['name']}: amending somebody "
-                f"else's {self._kind_of(row)['label']} takes the admin code in `key`.")
+                f"{row['display_id']} is between {row['created_by']} and "
+                f"{owner['name']}: a {self._kind_of(row)['label']} is amended by its "
+                "desk or by the one who sent it, and anybody else takes the admin "
+                "code in `key`.")
         signer = self.cx.execute("SELECT * FROM consumer WHERE lower(name)=?",
                                  (_fold(who),)).fetchone()
         if signer is not None:
@@ -5422,6 +5545,122 @@ class Project:
                         "composes no digest — it posts one task at a time, as it is "
                         "opened — so a roll-up is somebody else's job, and this payload "
                         "is what it is made of."}
+
+    def roster(self) -> dict:
+        """EVERY consumer of the project, live and RETIRED, with what a person
+        needs in order to decide anything about one.
+
+        It is not `project_info` with more fields, and the difference is the
+        retired ones. That payload is what a working chat reads, and it carries
+        only the live on purpose — `my name is in the list` means `my role is
+        alive`, and a retired row put back in front of a chat by the side door
+        would undo that. But a PERSON at the administration page has the
+        opposite need: a name that is taken and not visible is a name they will
+        try to reuse, and a retirement they want to undo is invisible until it
+        is listed. So the two payloads differ by audience, which is the only
+        honest reason for two.
+
+        The three counts are here because each one is a REFUSAL somebody would
+        otherwise meet by surprise: a consumer that rules reach cannot be
+        retired without emptying those rules' audience, and a desk with open
+        entries on it cannot be retired at all. Reading them beside the button
+        is how the refusal stops being a surprise."""
+        now = _now()
+        out = []
+        for c in self.cx.execute("SELECT * FROM consumer ORDER BY "
+                                 "retired_at IS NOT NULL, name"):
+            d = {"name": c["name"], "kind": c["kind"],
+                 "brief": c["brief"], "specs": c["specs"],
+                 "signed": bool(c["secret"]),
+                 "email": c["email"] or "",
+                 "approver": bool(c["approver"]),
+                 "retired": bool(c["retired_at"]),
+                 "retired_at": c["retired_at"], "reason": c["retired_reason"],
+                 "created_at": c["created_at"],
+                 "groups": [r[0] for r in self.cx.execute(
+                     "SELECT g.name FROM consumer_group_member m "
+                     "JOIN consumer_group g ON g.group_id = m.group_id "
+                     "WHERE m.consumer_id=? AND g.retired_at IS NULL "
+                     "ORDER BY g.name", (c["consumer_id"],))],
+                 "rules_in_force": len(self._reaching(c["consumer_id"])),
+                 "open_entries": self.cx.execute(
+                     "SELECT COUNT(*) FROM task WHERE consumer_id=? AND "
+                     "status='pending' AND archived_at IS NULL",
+                     (c["consumer_id"],)).fetchone()[0]}
+            out.append(d)
+        return {"project": self.name, "consumers": out,
+                "live": sum(1 for d in out if not d["retired"]),
+                "retired": sum(1 for d in out if d["retired"]),
+                "kinds": sorted({d["kind"] for d in out}),
+                "read_at": now}
+
+    def task_board(self, group_by: str = "owner", show: str = "open",
+                   query: str = "") -> dict:
+        """EVERY log entry in the project at once, grouped — the cross view the
+        admin page is built on, and the one reading in this engine that answers
+        "where is all of it" instead of "what does this desk owe".
+
+        `task_overview` does not replace it and is not replaced by it: that one
+        is a DESK census — pending only, capped per desk, with the addresses a
+        digest is composed from. This one carries the closed ones when asked,
+        groups by either END of an entry, and caps nothing, because a page that
+        showed you nine of eleven and said so is a page you cannot work from.
+
+        `group_by` is `owner` — the desk it sits on — or `sender`, which is
+        `created_by`, a SIGNATURE and not a pointer: two spellings of the same
+        person are two groups here, and that is honest rather than tidy. The
+        engine folds case and nothing else.
+
+        `show` is `open` or `all`. Reading moves nothing: no counter, no
+        timestamp, no archive."""
+        by = (group_by or "owner").strip().lower()
+        if by not in ("owner", "sender"):
+            raise RulesError(
+                f"group_by is 'owner' or 'sender', not {group_by!r}: the two ends of "
+                "an entry are the two ways a log can be read.")
+        what = (show or "open").strip().lower()
+        if what not in ("open", "all"):
+            raise RulesError(
+                f"show is 'open' or 'all', not {show!r}: an entry is pending or it is "
+                "closed, and there is no third state to ask for.")
+        now = _now()
+        rows = list(self.cx.execute(
+            "SELECT * FROM v_task WHERE archived_at IS NULL"
+            + ("" if what == "all" else " AND status='pending'")))
+        q = (query or "").strip().lower()
+        if q:
+            rows = [r for r in rows
+                    if q in (r["title"] or "").lower()
+                    or q in (r["body"] or "").lower()
+                    or q in (r["display_id"] or "").lower()]
+        names = {c["consumer_id"]: c["name"] for c in
+                 self.cx.execute("SELECT consumer_id, name FROM consumer")}
+        groups: dict = {}
+        for r in rows:
+            head = (names.get(r["consumer_id"], "?") if by == "owner"
+                    else (r["created_by"] or "").strip() or "(unsigned)")
+            groups.setdefault(_fold(head), {"group": head, "entries": []})
+            # THE BODY TRAVELS, and it is the difference between a list and a
+            # console. Deciding what to do with an entry means reading it, and
+            # a page that made you open each one to see the text would be a
+            # page you answer by guessing from the title.
+            d = self._task_brief(r, now)
+            d["body"] = r["body"]
+            groups[_fold(head)]["entries"].append(d)
+        out = []
+        for g in sorted(groups.values(), key=lambda g: _fold(g["group"])):
+            g["entries"].sort(key=lambda d: (d["status"] != "pending",
+                                             0 if d["urgent"] else 1,
+                                             d["created_at"]))
+            g["open"] = sum(1 for d in g["entries"] if d["status"] == "pending")
+            g["closed"] = len(g["entries"]) - g["open"]
+            out.append(g)
+        return {"project": self.name, "group_by": by, "show": what,
+                "groups": out,
+                "open": sum(g["open"] for g in out),
+                "closed": sum(g["closed"] for g in out),
+                "count": sum(len(g["entries"]) for g in out),
+                "query": q}
 
     def prune_tasks(self, before: str, actor: str = "web ui") -> dict:
         """ARCHIVE what is finished and older than a date. It marks, it does

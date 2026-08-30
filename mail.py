@@ -49,10 +49,18 @@ import os
 import smtplib
 import ssl
 import threading
+from urllib.parse import quote as _quote
 from datetime import datetime, timezone
 from email.message import EmailMessage
 
 DAILY_CAP = 10
+
+# HOW LONG A CLOSING LINK LIVES, in days, when the container does not say.
+# Days and not minutes: a one-time code is minted for a gesture about to
+# happen, while an entry on a person's desk waits — five minutes would be a
+# button that is dead by the time it is read on the sofa. Two weeks is a
+# fortnight's inbox, after which the link says so and the entry is untouched.
+LINK_DAYS = 14
 
 # NO ICON, and it is not an omission. The message carried one embedded, and two
 # rounds of shrinking it taught the same thing twice: Apple Mail was not obeying
@@ -115,6 +123,7 @@ class Mailer:
 
     def __init__(self, *, host: str = "", port: int = 0, user: str = "",
                  password: str = "", sender: str = "", security: str = "",
+                 base_url: str = "", link_days: int = LINK_DAYS,
                  log=None) -> None:
         self.host = (host or "").strip()
         self.port = int(port or 0)
@@ -122,6 +131,14 @@ class Mailer:
         self.password = password or ""
         self.sender = (sender or "").strip() or self.user
         self.security = (security or "").strip().lower() or "starttls"
+        # WITHOUT A BASE URL THERE IS NO LINK, and the message is the one this
+        # service sent yesterday. That is the default on purpose: a container
+        # updated without the new variable must not start printing links to a
+        # host it guessed. Unraid does not propagate new variables to
+        # containers already installed, and a guessed address in an email is a
+        # link that goes somewhere real and wrong.
+        self.base_url = (base_url or "").strip().rstrip("/")
+        self.link_days = max(1, int(link_days or LINK_DAYS))
         self.log = log
         self._lock = threading.Lock()
         # project -> [day, sent]. The day is a UTC date string: a counter that
@@ -174,7 +191,7 @@ class Mailer:
     # ---------- the one way out ----------
 
     def _compose(self, project: str, subject: str, sender: str, lines,
-                 note: str = "") -> EmailMessage:
+                 note: str = "", link: str = "", link_label: str = "") -> EmailMessage:
         """ONE source for both halves. The plain text and the HTML are built
         from the SAME arguments, so they cannot drift — which is the failure a
         multipart message invites: two versions of a sentence, and the one
@@ -207,7 +224,9 @@ class Mailer:
         # says it can take.
         msg.set_content(
             "\n".join([project, f"Sender: {sender}"]) + "\n\n"
-            + "\n\n".join(list(lines) + ([note] if note else [])) + "\n",
+            + "\n\n".join(list(lines)
+                          + ([f"{link_label}: {link}"] if link else [])
+                          + ([note] if note else [])) + "\n",
             cte="quoted-printable")
 
         # THE PROSE IS PROSE, at the size prose is read at. It carries the
@@ -221,10 +240,32 @@ class Mailer:
             f'{_html.escape(t).replace(chr(10), "<br>")}</p>' for t in lines)
         # AND THE POINTER IS THE ONLY SMALL THING. It is the one line that is
         # identical in every message ever sent, which is exactly what makes it
-        # a footnote: 9px, because at the body's size it competed with the body.
+        # a footnote: smaller than the body, because at the body's size it
+        # competed with it. ⚠ It was 9px until v7.0.0 and that was too far —
+        # a note that can only be read by bringing the face closer is not
+        # discreet, it is unreadable, and a footnote nobody can read is a
+        # footnote that is not there.
+        # THE BUTTON, and it is a LINK dressed as one: a table-cell with a
+        # background, which is the shape every mail client has agreed on for
+        # twenty years. No image, no `<button>` — one is blocked by default and
+        # the other does nothing outside a form.
+        #
+        # ⚠ It sits AFTER the text and BEFORE the footnote, and that order is
+        # the argument: a person reads what happened and then acts. A button at
+        # the top is a button pressed before the paragraph under it was read,
+        # and this one closes something that cannot be reopened.
+        if link:
+            paragraphs += (
+                f'<table cellpadding="0" cellspacing="0" border="0" '
+                f'style="margin:1.4rem 0 .2rem"><tr><td '
+                f'style="background:#2d5c86;border-radius:6px">'
+                f'<a href="{_html.escape(link, quote=True)}" '
+                f'style="display:inline-block;padding:.7rem 1.15rem;color:#ffffff;'
+                f'font-size:15px;font-weight:600;text-decoration:none">'
+                f'{_html.escape(link_label)}</a></td></tr></table>')
         if note:
             paragraphs += (
-                f'<p style="margin:1.3rem 0 0;font-size:9px;font-style:italic;'
+                f'<p style="margin:1.3rem 0 0;font-size:11px;font-style:italic;'
                 f'color:#6b7280">{_html.escape(note)}</p>')
         body_html = (
             '<div style="font-family:-apple-system,BlinkMacSystemFont,'
@@ -238,7 +279,11 @@ class Mailer:
             # sentence, which is why it is `Sender:` in bold and then a name.
             f'<div style="font-size:1.18rem;font-weight:600;color:#111827;'
             f'margin:0 0 .2rem">{_html.escape(project)}</div>'
-            f'<div style="font-size:17px;color:#374151;margin:0 0 1.15rem">'
+            # 15px and not 17: seventeen was a size this message uses nowhere
+            # else, invented for one line. The step down from the project's
+            # name is already made by the weight — `Sender:` is bold — so the
+            # extra two pixels bought a third size and no distinction.
+            f'<div style="font-size:15px;color:#374151;margin:0 0 1.15rem">'
             f'<span style="font-weight:700">Sender:</span> '
             f'{_html.escape(sender)}</div>'
             f'{paragraphs}</div>')
@@ -246,7 +291,8 @@ class Mailer:
         return msg
 
     def send(self, project: str, to: str, subject: str, sender: str, lines,
-             note: str = "", kind: str = "task", cap: int = DAILY_CAP) -> bool:
+             note: str = "", kind: str = "task", cap: int = DAILY_CAP,
+             link: str = "", link_label: str = "") -> bool:
         """True if it went. NEVER raises: a notification that can make a write
         fail is worse than no notification, and every caller of this is a
         caller whose transaction has already committed.
@@ -277,7 +323,8 @@ class Mailer:
                 f"until tomorrow. The work itself is unaffected — tasks are opened "
                 f"and proposals are queued as usual — but you will not hear about "
                 f"them by mail. If this arrived out of nowhere, something is looping.")
-        msg = self._compose(project, subject, sender, lines, note)
+        msg = self._compose(project, subject, sender, lines, note,
+                            link=link, link_label=link_label)
         msg["To"] = to
         try:
             self._deliver(msg)
@@ -324,6 +371,9 @@ def from_env(log=None) -> Mailer:
                   password=os.environ.get("SMTP_PASSWORD", ""),
                   sender=os.environ.get("SMTP_FROM", ""),
                   security=os.environ.get("SMTP_SECURITY", ""),
+                  base_url=os.environ.get("WEB_BASE_URL", ""),
+                  link_days=int((os.environ.get("TASK_LINK_DAYS") or "0").strip()
+                                or LINK_DAYS),
                   log=log)
 
 
@@ -360,6 +410,26 @@ def task_opened(mailer: Mailer, prj, tid: str, owner: str, sender: str,
     row = prj.postbox(owner)
     if row is None:
         return False
+    # THE CLOSING LINK, and it is asked of the ENGINE by method — like the cap
+    # and the postbox, and for the same reason: the lock that makes one
+    # connection safe lives inside those methods.
+    #
+    # ⚠ A failure to sign one must not stop the message. The notification is
+    # what this function owes; the button is a convenience on top of it, and a
+    # project without an admin code in the registry — or any other refusal
+    # here — would otherwise turn "your task did not get posted" into the
+    # consequence of a missing knob.
+    link, label = "", ""
+    if mailer.base_url:
+        try:
+            tick = prj.task_link(tid, mailer.link_days)
+            link = (f"{mailer.base_url}/p/{_quote(prj.name)}/t/"
+                    f"{_quote(tick['id'])}?k={_quote(tick['token'])}")
+            label = "Close it"
+        except Exception as exc:                       # noqa: BLE001
+            link, label = "", ""
+            if mailer.log:
+                mailer.log.warning("no closing link on %s: %s", tid, exc)
     mark = "URGENT · " if urgent else ""
     # THE SUBJECT IS THE WHOLE HEADLINE: the ID and the task, in the line an
     # inbox list shows. It said `TK-0001 is on your desk` once, which spent that
@@ -386,8 +456,11 @@ def task_opened(mailer: Mailer, prj, tid: str, owner: str, sender: str,
         prj.name, row["email"],
         f"{mark}{tid} — {_short(title)}",
         sender, _paragraphs(body),
-        "Read it with tasks_get, or on the project's page.",
-        kind=kind, cap=prj.mail_cap(kind))
+        "Read it with tasks_get, or on the project's page."
+        + (" The button closes it from inside the tailnet and asks for no "
+           "password; it stops working once the entry is closed, because "
+           "closed is closed." if link else ""),
+        kind=kind, cap=prj.mail_cap(kind), link=link, link_label=label)
 
 
 def proposal_queued(mailer: Mailer, prj, rid: str, title: str,
