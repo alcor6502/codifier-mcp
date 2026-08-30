@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-7.0.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-7.0.1-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -508,12 +508,15 @@ summary.
 | `ALLOWED_CIDRS` | `160.79.104.0/21 # documented egress of the model provider` |
 | `BACKUP_DIR` | `/db/backup` |
 
-`WEB_BASE_URL` (`http://<server-ip>:9443`, no trailing slash) is what the
-**closing button** in a posted task is built on — leave it empty and there is
-no button, because an address the container guessed would be a link that goes
-somewhere real and wrong. ⚠ Never put an address here that answers from
-outside the tailnet: the link travels in clear through a mail relay, and what
-makes that acceptable is that the page cannot be reached from the internet.
+⚠ **There is no variable for the address of the admin page, and that is a
+decision.** The **closing button** in a posted task is built from what this
+table already declares: the host of `BASE_URL`, on `WEB_PORT`, over http —
+`http://<host>.<tailnet>.ts.net:9443`. An address written twice is an address
+that can disagree with itself, and here disagreeing means a button that opens
+nothing. `WEB_BASE_URL` existed for exactly one version, v7.0.0, and was
+removed in v7.0.1. ⚠ And the PORT is what keeps that link inside the tailnet:
+the host is the one the Funnel publishes, but on 443 and only there, and the
+preflight refuses to run the UI on any port the Funnel could publish.
 
 Under **Show more settings**: `DB_DIR` (`/db` — move the mount, not this),
 `WEB_PORT` (empty means 9443), `ADMIN_AUTH_CODE_DURATION` (minutes a one-time
@@ -1064,6 +1067,10 @@ gesture, and it asks for **no password**.
   as much as reaching that port is — the UI does not answer outside the
   tailnet, and the Funnel cannot publish it. Publish that port anywhere else
   and this is a hole.
+- **The address is DERIVED, not configured**: the host of `BASE_URL` on
+  `WEB_PORT`, over http, and no `BASE_URL` means no button. It had a variable
+  of its own in v7.0.0 and lost it in v7.0.1 — one field fewer to fill in, and
+  one fewer to fill in wrong.
 - **It expires** — `TASK_LINK_DAYS`, 14 by default. Days and not minutes: a
   one-time code is minted for a gesture about to happen, a task on a desk
   waits. An expired link says so and leaves the entry untouched.
@@ -1083,7 +1090,8 @@ is CUT at 70 characters there.
 which register just spoke; **`Sender:`** and who spoke, in the size between
 that name and the prose, because it is the one thing the subject cannot carry;
 **the task's own text**, at the size prose is read at; **a button that closes
-it**, when `WEB_BASE_URL` is set; and a **small footnote** saying where it is
+it**, when the deployment declares a `BASE_URL`; and a **small footnote**
+saying where it is
 answered. Nothing else, no disclaimer, and no picture — the sender's card in the address book
 draws that better than anything sent from here, and in the message list too.
 

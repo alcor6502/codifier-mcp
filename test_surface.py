@@ -2388,7 +2388,7 @@ ok("<PostArgs/>" in TEMPLATE,
 # variable introduced later means editing every existing install by hand. These
 # go in now, inert or not.
 for var in ("WEB_PORT", "WEB_UI_PASSWORD",
-            "ADMIN_AUTH_CODE_DURATION", "WEB_BASE_URL", "TASK_LINK_DAYS",
+            "ADMIN_AUTH_CODE_DURATION", "TASK_LINK_DAYS",
             "LOG_LEVEL", "ALLOWED_CIDRS", "DB_DIR", "BACKUP_DIR"):
     ok(f'Target="{var}"' in TEMPLATE, f"template declares {var}")
 
@@ -2438,6 +2438,29 @@ for _dead_var in ("DB_PATH", "WEB_MASTER_CODE", "PENDING_CAP", "WEB_ACTION_CAP",
                   "PROVISIONAL_DAYS"):
     ok(f'Target="{_dead_var}"' not in TEMPLATE,
        f"and {_dead_var} is not declared: it has had no reader since v4.0.0")
+# ⚠ BORN AND DEAD IN v7.0.0, which is why it is named here and not lumped in
+# with the four above. `WEB_BASE_URL` asked a person to type the address of a
+# page this service is already running — and an address written twice is an
+# address that can disagree with itself. It is DERIVED now, from `BASE_URL` and
+# the UI's own port, and the check has to hold in BOTH directions: not in the
+# template, and read by nobody. The first alone would go green the day somebody
+# put the reader back and only forgot the field.
+ok('Target="WEB_BASE_URL"' not in TEMPLATE and "WEB_BASE_URL" not in _ENV_READERS,
+   "WEB_BASE_URL is gone from the template AND has no reader: the page's "
+   "address is derived, never configured twice",
+   [x for x in ("in the template" if 'Target="WEB_BASE_URL"' in TEMPLATE else "",
+                "still read" if "WEB_BASE_URL" in _ENV_READERS else "") if x])
+# And the derivation exists, in the module that owns both halves.
+ok(hasattr(_webmod, "ui_base_url"),
+   "web.py derives it: ui_base_url(BASE_URL) — the module that already knows "
+   "the UI's port is the one that builds the UI's address")
+_MAILER_ARGS = [n for n in ast.walk(parse(os.path.join(HERE, "server.py")))
+                if isinstance(n, ast.Call)
+                and ast.unparse(n.func) == "mail.from_env"]
+ok(len(_MAILER_ARGS) == 1
+   and "web.ui_base_url(BASE_URL)" in ast.unparse(_MAILER_ARGS[0]),
+   "and the service hands it to the mailer instead of the mailer reading it",
+   [ast.unparse(n) for n in _MAILER_ARGS])
 
 # The UI's password: mandatory, masked, and blocked at boot while it is a
 # placeholder. It is the one variable that cannot be "born optional with a
