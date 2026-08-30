@@ -1053,7 +1053,7 @@ is CUT at 70 characters there.
 which register just spoke; **`Sender:`** and who spoke, in the size between
 that name and the prose, because it is the one thing the subject cannot carry;
 **the task's own text**, at the size prose is read at; **a button that closes
-it**, when `WEB_BASE_URL` is set; and a **footnote at 9px** saying where it is
+it**, when `WEB_BASE_URL` is set; and a **small footnote** saying where it is
 answered. Nothing else, no disclaimer, and no picture — the sender's card in the address book
 draws that better than anything sent from here, and in the message list too.
 

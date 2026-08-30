@@ -240,7 +240,11 @@ class Mailer:
             f'{_html.escape(t).replace(chr(10), "<br>")}</p>' for t in lines)
         # AND THE POINTER IS THE ONLY SMALL THING. It is the one line that is
         # identical in every message ever sent, which is exactly what makes it
-        # a footnote: 9px, because at the body's size it competed with the body.
+        # a footnote: smaller than the body, because at the body's size it
+        # competed with it. ⚠ It was 9px until v7.0.0 and that was too far —
+        # a note that can only be read by bringing the face closer is not
+        # discreet, it is unreadable, and a footnote nobody can read is a
+        # footnote that is not there.
         # THE BUTTON, and it is a LINK dressed as one: a table-cell with a
         # background, which is the shape every mail client has agreed on for
         # twenty years. No image, no `<button>` — one is blocked by default and
@@ -261,7 +265,7 @@ class Mailer:
                 f'{_html.escape(link_label)}</a></td></tr></table>')
         if note:
             paragraphs += (
-                f'<p style="margin:1.3rem 0 0;font-size:9px;font-style:italic;'
+                f'<p style="margin:1.3rem 0 0;font-size:11px;font-style:italic;'
                 f'color:#6b7280">{_html.escape(note)}</p>')
         body_html = (
             '<div style="font-family:-apple-system,BlinkMacSystemFont,'
@@ -275,7 +279,11 @@ class Mailer:
             # sentence, which is why it is `Sender:` in bold and then a name.
             f'<div style="font-size:1.18rem;font-weight:600;color:#111827;'
             f'margin:0 0 .2rem">{_html.escape(project)}</div>'
-            f'<div style="font-size:17px;color:#374151;margin:0 0 1.15rem">'
+            # 15px and not 17: seventeen was a size this message uses nowhere
+            # else, invented for one line. The step down from the project's
+            # name is already made by the weight — `Sender:` is bold — so the
+            # extra two pixels bought a third size and no distinction.
+            f'<div style="font-size:15px;color:#374151;margin:0 0 1.15rem">'
             f'<span style="font-weight:700">Sender:</span> '
             f'{_html.escape(sender)}</div>'
             f'{paragraphs}</div>')
