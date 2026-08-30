@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-7.0.2-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-7.1.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -979,9 +979,19 @@ refusal. And for a **skill** the project's own brief and specs are **withheld**
 by the engine, by design: the page prints the engine's sentence saying so,
 rather than the profile a skill must not receive.
 
-**The consumers page is the whole anagrafica** — every chat, every skill and
-every person, live and retired, on one page. It was the *people* page until
-v7.0.0 and it held the humans only, which meant the person who owns the project
+**The consumers page is the whole anagrafica**, and since v7.1.0 it is a
+REGISTER you read at a glance plus one CARD at a time when you act. Two ways
+in: the button that adds one, and a menu that opens the one you pick. Which
+card is open lives in the URL — no javascript, no `<dialog>`: a state the
+server can see survives a reload, can be bookmarked, and comes back the same
+after a refusal. ⚠ **A person's post is in that person's own card** — their
+address, and a tick that says whether queued proposals are announced to them —
+instead of a table of everybody's addresses in a section of its own, three
+scrolls from the name each one belongs to. Saving one person's address leaves
+the mark where it is; only the tick moves it, and it is at most one person.
+
+It carries every chat, every skill and every person, live and retired. It was
+the *people* page until v7.0.0 and it held the humans only, which meant the person who owns the project
 could see every consumer EXCEPT through a chat, and could not read a mandate at
 all without asking one. Each card carries what the register knows — its kind,
 its groups, how many rules in force reach it, how many entries are open on its
