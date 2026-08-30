@@ -65,12 +65,14 @@ import contextlib
 import difflib
 import functools
 import hashlib
+import hmac
 import logging
 import os
 import re
 import secrets
 import sqlite3
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 # A CHILD of the service's logger, so it inherits LOG_LEVEL and is caught by
@@ -5311,6 +5313,85 @@ class Project:
         return {"id": row["display_id"],
                 "status": "completed" if has_out else "dropped",
                 "by": who, "outcome": outcome, "reason": reason}
+
+    def task_link(self, tid: str, days: int) -> dict:
+        """A SIGNED, STATELESS ticket that lets one entry be closed from the
+        page without a password — the thing a link in an email needs.
+
+        ⚠ NO TABLE, and that is the whole design rather than a shortcut. The
+        obvious shape for one-use tickets is a row; a row is a column is a
+        schema generation, and this register is LOADED — a generation costs the
+        corpus by hand and the open entries outright, since the log has no
+        source outside the database. So the ticket carries its own expiry and
+        proves itself with an HMAC, and the file is not touched.
+
+        THE ONE-USE PROPERTY IS ALREADY IN THE DOMAIN and is not rebuilt here:
+        `closed is closed`. A second click on the same link finds the entry
+        closed and gets the refusal that already exists. A reusable ticket for
+        an object that accepts one gesture is single-use in fact.
+
+        THE KEY IS THE PROJECT'S ADMIN CODE, and never leaves: HMAC does not
+        hand back what it was keyed with. It is the one secret that is already
+        per-project and already survives a restart — the session's own secret
+        is generated at boot precisely so it does NOT, which would kill every
+        link in every inbox at each Apply. ⚠ Rotating the admin code voids the
+        links already sent, and that is the correct behaviour rather than a
+        side effect: it is the revocation this design would otherwise not have.
+
+        ⚠ AND IT IS NOT A SECOND FACTOR ON ITS OWN. The ticket travels in
+        cleartext through a mail relay run by somebody else. What makes that
+        acceptable is that the page it opens does not answer outside the
+        tailnet — so it is written here as a PREMISE, not a detail: the day
+        that port is published anywhere else, this stops being safe."""
+        row = self._task_row(tid)
+        if row is None:
+            raise RulesError(f"{self._norm_task_id(tid)}: no such task in this project.")
+        if not self.admin_code:
+            raise RulesFault(
+                f"{self.name} has no admin code in the registry, so no link can be "
+                "signed: the key of the signature is that code.")
+        exp = int(time.time()) + max(1, int(days)) * 86400
+        return {"id": row["display_id"], "token": self._task_ticket(row["display_id"], exp),
+                "expires_at": datetime.fromtimestamp(exp, timezone.utc)
+                .strftime("%Y-%b-%d")}
+
+    def _task_ticket(self, display_id: str, exp: int) -> str:
+        mac = hmac.new(self.admin_code.encode(),
+                       f"close-task|{self.name}|{display_id}|{exp}".encode(),
+                       "sha256").hexdigest()
+        return f"{exp}.{mac}"
+
+    def check_task_link(self, tid: str, token: str) -> dict:
+        """The other half. Refuses a forged ticket and an expired one
+        DIFFERENTLY, on purpose: expired is a fact the reader can act on — ask
+        for it again — while a bad signature must say nothing at all about what
+        would have been right.
+
+        ⚠ The signature is compared in constant time, and the expiry is read
+        from INSIDE the signed string. A ticket that carried its expiry beside
+        the signature instead of under it would be a ticket anybody can
+        extend."""
+        row = self._task_row(tid)
+        if row is None:
+            raise RulesError(f"{self._norm_task_id(tid)}: no such task in this project.")
+        raw, _, mac = (token or "").strip().partition(".")
+        try:
+            exp = int(raw)
+        except ValueError:
+            raise RulesError("that link is not valid for this entry.") from None
+        if not hmac.compare_digest(mac, self._task_ticket(row["display_id"],
+                                                          exp).split(".", 1)[1]):
+            raise RulesError("that link is not valid for this entry.")
+        if exp < int(time.time()):
+            raise RulesError(
+                "that link has expired. The entry is untouched — it is closed from the "
+                "project's log page, or with tasks_close.")
+        return {"id": row["display_id"],
+                "owner": self.cx.execute(
+                    "SELECT name FROM consumer WHERE consumer_id=?",
+                    (row["consumer_id"],)).fetchone()[0],
+                "title": row["title"], "body": row["body"],
+                "status": row["status"], "kind": self._kind_of(row)["label"]}
 
     def task_amend(self, tid: str, by: str, title: str = "", body: str = "",
                    consumer: str = "", consumer_key: str = "",

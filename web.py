@@ -38,6 +38,13 @@ there is one person. The hidden username field on the form is for the password
 managers, which key an entry on a user and fill a password-only form wrong, in
 silence.
 
+THE ONE PAGE WITH NO DOOR, and it is written here rather than found: the
+closing link. A task posted to a person carries a button, and the ticket in
+that URL is the whole credential — no session, no password. It reaches ONE
+entry, it can only close it, and what makes that acceptable is that this port
+does not answer outside the tailnet. ⚠ A premise, not a detail: publish this
+port anywhere else and that page is a hole.
+
 WHERE THE MASTER IS TYPED: ONCE, AT THE DOOR, AND NOWHERE ELSE. Until v7.0.0
 every writing gesture asked for it again — the lot, a one-time code, the
 profile, a person, their post — on the ground that a session alone is a browser
@@ -67,6 +74,12 @@ Configuration, all through environment variables:
   WEB_PORT          the port this server listens on (default 9443). It must be
                     one the Funnel CANNOT publish and it must not collide with
                     the MCP port — the preflight refuses both at the edge
+  WEB_BASE_URL      where this UI answers from, e.g. http://10.0.0.9:9443 —
+                    read in mail.py, and the address the closing link in a
+                    posted task is built on. Optional, and without it there is
+                    no button and the message is the one sent yesterday: a
+                    guessed address in an email is a link that goes somewhere
+                    real and wrong
   WEB_UI_PASSWORD   the password of this whole UI. Read by the preflight,
                     which refuses a missing one, a placeholder and anything
                     under 12 characters; handed to build() by server.py, never
@@ -1515,6 +1528,145 @@ def build(*, registry, log, master: str, refusal, fault,
             log.info("refused web tasks: %s", e)
             return say(message=str(e), status=400)
 
+    # ---------- the closing link: the one page that has no session ----------
+    #
+    # WHAT IT IS. The mail that says a task landed on a person's desk carries a
+    # button; this is where it lands. It asks for no password — the ticket in
+    # the URL is the credential — and it can close exactly the one entry it
+    # names, with the words the person types here.
+    #
+    # ⚠ WHY THAT IS ACCEPTABLE, and it is a PREMISE rather than a detail. The
+    # ticket travels in cleartext through a mail relay run by somebody else, so
+    # it is worth precisely as much as reaching this port is: the UI does not
+    # answer outside the tailnet, and the Funnel cannot publish this port —
+    # the preflight refuses the three it could. The day that changes, this page
+    # is a hole and has to be taken out or given a second factor.
+    #
+    # ⚠ AND IT IS SINGLE-USE WITHOUT BEING SINGLE-USE. Nothing here spends a
+    # ticket, because nothing has to: `closed is closed`, so the second visit
+    # finds the entry closed and gets the refusal the engine already has. A
+    # reusable ticket for an object that accepts one gesture is single-use in
+    # fact — which is what let this be built with no table, and therefore with
+    # no schema generation, on a register that is loaded.
+    #
+    # The GET is a form and not a gesture: a link that closed something by
+    # being FETCHED would be closed by the first mail client that prefetches
+    # links, and nobody would ever know which one.
+
+    def _ticket_html(name: str, prj, tid: str, token: str, seen: dict, *,
+                     message: str = "") -> str:
+        act = f"/p/{_esc(name)}/t/{_esc(tid)}"
+        head = f"<p class='bad'>{_esc(message)}</p>" if message else ""
+        if seen["status"] != "pending":
+            return (head + f"<p class='ok'>{_esc(seen['id'])} — "
+                    f"{_esc(seen['title'])}</p>"
+                    f"<p class='note'>Already closed. Closed is closed: it is "
+                    f"not reopened and not amended. If the work came back, open "
+                    f"a new entry and cite this one.</p>")
+        return (head
+                + f"<div class='entry'><b>{_esc(seen['id'])}</b> "
+                  f"{_esc(seen['title'])}"
+                  f"<p class='note'>{_esc(seen['kind'])} · on "
+                  f"{_esc(seen['owner'])}'s desk</p>"
+                  f"<p>{_esc(seen['body'])}</p></div>"
+                + f"<form method='post' action='{act}'>"
+                  f"<input type='hidden' name='k' value='{_esc(token)}'>"
+                  f"<input type='hidden' name='action' value='complete'>"
+                  f"<label for='out'>What came of it</label>"
+                  f"<input id='out' name='outcome' required autofocus>"
+                  f"<p><button type='submit'>Complete it</button></p></form>"
+                + f"<form method='post' action='{act}'>"
+                  f"<input type='hidden' name='k' value='{_esc(token)}'>"
+                  f"<input type='hidden' name='action' value='drop'>"
+                  f"<label for='why'>Or why it will not be done</label>"
+                  f"<input id='why' name='reason' required>"
+                  f"<p><button type='submit'>Drop it</button></p></form>"
+                + f"<p class='note'>There is no undo — the words you type ARE "
+                  f"the confirmation. It is signed {_esc(seen['owner'])}, "
+                  f"because this link was sent to that desk.</p>")
+
+    def _ticket(request, prj, name: str, token: str):
+        """Resolve the ticket or answer with the refusal, as a page. Returns
+        (seen, None) or (None, response), so the two callers cannot each grow
+        their own idea of what a bad ticket looks like."""
+        tid = request.path_params["task"]
+        try:
+            return prj.check_task_link(tid, token), None
+        except fault:
+            raise
+        except refusal as e:
+            log.info("refused a task link on %s: %s", name, e)
+            return None, HTMLResponse(
+                _page(f"{name} — the entry",
+                      f"<p class='bad'>{_esc(e)}</p>", nav=""),
+                status_code=403)
+
+    async def ticket_page(request):
+        # NO SESSION HERE, ON PURPOSE — see the block above. `test_surface`
+        # pins this exception by name, so removing the guard from a page is a
+        # decision somebody takes rather than a line that drifts.
+        name = request.path_params["project"]
+        prj = _open(name)
+        if prj is None:
+            return _no_project(name)
+        token = (request.query_params.get("k") or "").strip()
+        seen, refused = _ticket(request, prj, name, token)
+        if refused is not None:
+            return refused
+        # NAV EMPTY, and it is not a decoration missing. Whoever arrives here
+        # arrived from an inbox with a ticket for ONE entry; a menu would offer
+        # them the rules, the people and the lot, every one of which would then
+        # answer with the login page. A door that shows doors it will not open
+        # is a door that looks broken.
+        return HTMLResponse(_page(f"{name} — {seen['id']}",
+                                  _ticket_html(name, prj, seen["id"], token, seen),
+                                  nav=""))
+
+    async def ticket_action(request):
+        name = request.path_params["project"]
+        prj = _open(name)
+        if prj is None:
+            return _no_project(name)
+        form = await request.form()
+        token = (form.get("k") or "").strip()
+        seen, refused = _ticket(request, prj, name, token)
+        if refused is not None:
+            return refused
+        what = (form.get("action") or "").strip()
+        if what not in ("complete", "drop"):
+            return HTMLResponse(
+                _page(f"{name} — {seen['id']}",
+                      _ticket_html(name, prj, seen["id"], token, seen,
+                                   message="Unknown action. Nothing was written."),
+                      nav=""), status_code=400)
+        try:
+            # SIGNED WITH THE DESK'S OWN NAME, and that is what the link is:
+            # it was posted to that desk and to no other, so the closure is
+            # theirs. It also means the engine's ordinary guard passes on its
+            # own merits — the owner may always close their own entry — rather
+            # than this page reaching for `admin=True`, which would make a
+            # ticket in an inbox worth an administrator.
+            v = prj.task_close(
+                seen["id"], seen["owner"],
+                outcome=(form.get("outcome") or "").strip() if what == "complete" else "",
+                reason=(form.get("reason") or "").strip() if what == "drop" else "")
+        except fault:
+            raise
+        except refusal as e:
+            log.info("refused a task link closure on %s: %s", name, e)
+            return HTMLResponse(
+                _page(f"{name} — {seen['id']}",
+                      _ticket_html(name, prj, seen["id"], token, seen,
+                                   message=str(e)), nav=""), status_code=400)
+        log.info("task closed from a link: %s — %s", v["id"], v["status"])
+        return HTMLResponse(_page(
+            f"{name} — {v['id']}",
+            f"<p class='ok'>{_esc(v['id'])} is {_esc(v['status'])}.</p>"
+            f"<p>{_esc(v['outcome'] or v['reason'])}</p>"
+            f"<p class='note'>Signed {_esc(v['by'])}. Nothing else on this "
+            f"register is reachable from here, and this link is now spent: "
+            f"closed is closed.</p>", nav=""))
+
     def _profile_html(name: str, prj, message: str = "", ok_msg: str = "") -> str:
         prof = prj.profile()
         cap = prof["queue_cap"]
@@ -1666,5 +1818,7 @@ def build(*, registry, log, master: str, refusal, fault,
         Route("/p/{project}/status", status_page, methods=["GET"]),
         Route("/p/{project}/tasks", tasks_page, methods=["GET"]),
         Route("/p/{project}/tasks", tasks_action, methods=["POST"]),
+        Route("/p/{project}/t/{task}", ticket_page, methods=["GET"]),
+        Route("/p/{project}/t/{task}", ticket_action, methods=["POST"]),
     ]
     return Starlette(routes=routes)

@@ -508,9 +508,17 @@ summary.
 | `ALLOWED_CIDRS` | `160.79.104.0/21 # documented egress of the model provider` |
 | `BACKUP_DIR` | `/db/backup` |
 
+`WEB_BASE_URL` (`http://<server-ip>:9443`, no trailing slash) is what the
+**closing button** in a posted task is built on — leave it empty and there is
+no button, because an address the container guessed would be a link that goes
+somewhere real and wrong. ⚠ Never put an address here that answers from
+outside the tailnet: the link travels in clear through a mail relay, and what
+makes that acceptable is that the page cannot be reached from the internet.
+
 Under **Show more settings**: `DB_DIR` (`/db` — move the mount, not this),
 `WEB_PORT` (empty means 9443), `ADMIN_AUTH_CODE_DURATION` (minutes a one-time
-code stays good), the six `SMTP_*` fields (leave them empty and nothing is ever
+code stays good), `TASK_LINK_DAYS` (days a closing button keeps working,
+default 14), the six `SMTP_*` fields (leave them empty and nothing is ever
 posted, and nothing complains about it — see *Notifications* below),
 `LOG_LEVEL` (`INFO` or `WARNING`, nothing else),
 `HTTP_MODE` (`stateless` on a new install; the code's fallback stays `stateful`
@@ -1001,6 +1009,38 @@ corrects the mistake was the one that swallowed the notice. Only a change of
 DESK posts; fixing a typo wakes nobody, and the desk a task LEAVES is not
 written to, because the register never posts a subtraction.
 
+### Closing a task from the button in its email
+
+A task posted to a person carries a **Close it** button. It opens a page
+showing that one entry — its text, whose desk it is on — with two boxes: what
+came of it, or why it will not be done. Writing one and pressing is the whole
+gesture, and it asks for **no password**.
+
+- **The ticket in the link is the credential**, and it is a signature rather
+  than a row: HMAC over the project, the entry and an expiry, keyed on the
+  project's admin code. ⚠ **No table, and that is the design**: a table is a
+  column is a schema generation, and this register is loaded — a generation
+  costs the corpus by hand and every open entry outright. Rotating the admin
+  code voids every link already sent, which is the revocation this would
+  otherwise not have.
+- **It is single-use without being single-use.** Nothing spends the ticket,
+  because `closed is closed`: the second press finds the entry closed and gets
+  the refusal that already exists.
+- **The GET never closes anything.** It renders a form. A link that acted on
+  being fetched would be pressed by the first mail client that prefetches
+  links, and nobody would ever know which one.
+- ⚠ **What makes this acceptable is a PREMISE, not a detail**: the ticket
+  travels in clear through somebody else's mail relay, and it is worth exactly
+  as much as reaching that port is — the UI does not answer outside the
+  tailnet, and the Funnel cannot publish it. Publish that port anywhere else
+  and this is a hole.
+- **It expires** — `TASK_LINK_DAYS`, 14 by default. Days and not minutes: a
+  one-time code is minted for a gesture about to happen, a task on a desk
+  waits. An expired link says so and leaves the entry untouched.
+- **It closes signed by the desk it was sent to**, which is what the link is:
+  it went to that desk and to no other. The page does not reach for
+  administrator powers to do it.
+
 **The subject is the whole headline, and says it once.** `TK-0003 — Aprimi su
 iPad`, or `Proposed Rule VA-0007 — <title>`, because that is the line an inbox
 list shows, and a reply, and a search. It is not printed again inside. `TK-`
@@ -1008,12 +1048,13 @@ already says *task*, which is why the word is not in a task's subject; `VA-`
 does not say *proposed*, which is why a proposal's spells it out. ⚠ The title
 is CUT at 70 characters there.
 
-**And the message is four things:** the **project's name**, the one word that
-changes between messages and tells you which register just spoke; **`Sender:`**
-and who spoke, in the size between that name and the prose, because it is the
-one thing the subject cannot carry; **the task's own text**, at the size prose
-is read at; and a **footnote at 9px** saying where it is answered. Nothing
-else, no disclaimer, and no picture — the sender's card in the address book
+**And the message is four things** — five when there is a button: the
+**project's name**, the one word that changes between messages and tells you
+which register just spoke; **`Sender:`** and who spoke, in the size between
+that name and the prose, because it is the one thing the subject cannot carry;
+**the task's own text**, at the size prose is read at; **a button that closes
+it**, when `WEB_BASE_URL` is set; and a **footnote at 9px** saying where it is
+answered. Nothing else, no disclaimer, and no picture — the sender's card in the address book
 draws that better than anything sent from here, and in the message list too.
 
 ⚠ **The text travels, and that reverses a rule this file carried for an

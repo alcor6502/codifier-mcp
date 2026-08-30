@@ -426,7 +426,14 @@ it too, but the field is the one to branch on.
   the project, `Sender:` with who opened it, **the task's own text** and a
   footnote saying where it is answered. ⚠ The text arrives VERBATIM: markdown
   is not rendered, so asterisks and hashes are read as characters. Over 4000
-  characters it is cut at the end, visibly. A
+  characters it is cut at the end, visibly.
+  ⚠ **And the message carries a BUTTON that closes the task**, when the
+  container knows its own address: it opens one page, shows that entry, and
+  takes the outcome or the reason — no password, because the ticket in the
+  link is the credential and the page does not answer outside the tailnet. So
+  a person may close a task without a chat and without the register: read
+  `kind` and the outcome, and do not assume that a task you opened for a human
+  is still open because nobody spoke to you. A
   human without an address is not written to, and neither is anybody if the
   container has no mail configured: there is no on/off switch, and both ways to
   be quiet are absences. The verdict carries `posted`, true or false, because a

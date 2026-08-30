@@ -2388,7 +2388,7 @@ ok("<PostArgs/>" in TEMPLATE,
 # variable introduced later means editing every existing install by hand. These
 # go in now, inert or not.
 for var in ("WEB_PORT", "WEB_UI_PASSWORD",
-            "ADMIN_AUTH_CODE_DURATION",
+            "ADMIN_AUTH_CODE_DURATION", "WEB_BASE_URL", "TASK_LINK_DAYS",
             "LOG_LEVEL", "ALLOWED_CIDRS", "DB_DIR", "BACKUP_DIR"):
     ok(f'Target="{var}"' in TEMPLATE, f"template declares {var}")
 
@@ -2998,7 +2998,7 @@ ok(_DEFINED == _LISTED,
 # added here too, and that second gesture is the whole point — it is where
 # somebody notices that the mailer has started asking the engine for something
 # new. `mail_cap` arrived with the per-kind ceiling and this line saw it.
-ok(_MAIL_ASKS == ["approver", "mail_cap", "postbox"],
+ok(_MAIL_ASKS == ["approver", "mail_cap", "postbox", "task_link"],
    f"and the doors it uses are exactly these: {_MAIL_ASKS}", _MAIL_ASKS)
 
 # AND THE OTHER DIRECTION, on the DOCUMENTS this image serves. The check above
@@ -4050,13 +4050,14 @@ ok([(r[0], r[2]) for r in _POSTS] == [("/login", "login"), ("/logout", "logout")
                                       ("/p/{project}/codes", "codes_mint"),
                                       ("/p/{project}/people", "people_action"),
                                       ("/p/{project}/profile", "profile_action"),
+                                      ("/p/{project}/t/{task}", "ticket_action"),
                                       ("/p/{project}/tasks", "tasks_action")],
-   "and exactly eight of them take POST: the door, the exit, and the six "
+   "and exactly nine of them take POST: the door, the exit, and the seven "
    "gestures — the lot, minting a one-time code, writing the project's own "
-   "profile, looking after its PEOPLE, working the LOG, and the backup, which "
-   "handles no secret. Renewal left with the expiry in 5.0.0; creating a "
-   "project and rekeying it are not here either, because a project is a line "
-   "in a file",
+   "profile, looking after its PEOPLE, working the LOG, closing ONE entry from "
+   "the link in its email, and the backup, which handles no secret. Renewal "
+   "left with the expiry in 5.0.0; creating a project and rekeying it are not "
+   "here either, because a project is a line in a file",
    [(r[0], r[2]) for r in _POSTS])
 # Every writing route is UNDER a project, and that is the shape of "a project
 # is a database": a gesture that named no project would be a gesture on all of
@@ -4165,6 +4166,13 @@ NO_SESSION_ON_PURPOSE = {
     "login": "it is the door: asking for a session to get one is a locked room",
     "logout": "throwing a cookie away can harm nobody, and refusing to do it "
               "for want of a valid session would leave a stale one in place",
+    "ticket_page": "the ticket in the URL is the credential, and the person "
+                   "holding it came from their own inbox — a password here "
+                   "would be a button that cannot be pressed from the sofa, "
+                   "which is the entire point of the button",
+    "ticket_action": "same ticket, same reason, and it can close exactly the "
+                     "one entry that ticket names — see TICKETED below, which "
+                     "is what replaces the session for these two",
 }
 _ENDPOINTS = [r[2] for r in _ROUTES]
 ok(bool(_ENDPOINTS), "the routes name their endpoints")
@@ -4206,6 +4214,28 @@ for _name, _fn in _BUILD_FUNCS.items():
     if not _writes:
         continue
     _GUARDED.append(_name)
+    if _name in NO_SESSION_ON_PURPOSE:
+        # ⚠ A WRITER WITHOUT A SESSION IS ALLOWED EXACTLY ONCE, and never on
+        # its own word: it must VERIFY A SIGNED TICKET, and verify it BEFORE it
+        # writes. Both halves are needed and they fail differently — a handler
+        # that never checks is an open door, and one that checks after the
+        # write has already written. The order is read off the line numbers,
+        # which is crude and is the point: it cannot be satisfied by a call
+        # that merely appears somewhere in the function.
+        _checks = [n.lineno for n in ast.walk(_fn) if isinstance(n, ast.Call)
+                   and ast.unparse(n.func) in ("_ticket", "prj.check_task_link")]
+        _writes_at = [n.lineno for n in ast.walk(_fn) if isinstance(n, ast.Call)
+                      and isinstance(n.func, ast.Attribute)
+                      and isinstance(n.func.value, ast.Name)
+                      and n.func.value.id == "prj" and n.func.attr in MUTATING]
+        ok(bool(_checks),
+           f"{_name} writes ({', '.join(sorted(_writes))}) with NO session, so "
+           f"it verifies a signed ticket instead", _checks)
+        ok(bool(_checks) and bool(_writes_at) and min(_checks) < min(_writes_at),
+           f"and it verifies BEFORE it writes — a check after the write is a "
+           f"check on something already done",
+           (_checks, _writes_at))
+        continue
     ok(_reaches(_name, "_session_ok"),
        f"{_name} writes ({', '.join(sorted(_writes))}) and is behind the session")
     # ⚠ THE ASSERTION IS INVERTED SINCE v7.0.0, and inverting it was the
@@ -4224,7 +4254,7 @@ for _name, _fn in _BUILD_FUNCS.items():
 # stayed at three. The equality fails on either mistake, and it fails saying
 # which name moved.
 ok(sorted(_GUARDED) == ["batch_action", "codes_mint", "people_action",
-                        "profile_action", "tasks_action"],
+                        "profile_action", "tasks_action", "ticket_action"],
    f"the writing handlers are exactly these, guarded: {sorted(_GUARDED)}",
    sorted(_GUARDED))
 
@@ -4274,6 +4304,9 @@ ok(_BUILD_FUNCS.get("_session_ok") is not None
 for _e in _ENDPOINTS:
     if _e in NO_SESSION_ON_PURPOSE or _e not in _BUILD_FUNCS:
         continue
+    # The ticketed pair is exempt from the SHAPE of this rule and not from the
+    # rule: what they must do first is verified above, against their own
+    # credential, and in the order that matters.
     _body = [x for x in _BUILD_FUNCS[_e].body
              if not (isinstance(x, ast.Expr) and isinstance(x.value, ast.Constant))]
     _first = ast.unparse(_body[0]) if _body else "(empty)"

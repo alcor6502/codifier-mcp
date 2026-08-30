@@ -1303,6 +1303,42 @@ refused("closing with neither", lambda: p.task_close(t2, "advisory"),
         "exactly one of the two")
 allowed("dropping costs a reason, and that is the whole gesture",
         lambda: p.task_close(t2, "advisory", reason="the desk that owns it changed"))
+# THE CLOSING TICKET: signed, stateless, and worth exactly one entry. What
+# each case pins is a property the page leans on and cannot check for itself.
+_tl = p.task_add("advisory", "to close from a link", "b", "architect")["id"]
+_tk = allowed("an entry can be given a signed ticket",
+              lambda: p.task_link(_tl, 14))
+equals("which names the entry it is for", (_tk or {}).get("id"), _tl)
+yields("and carries its own expiry, so nothing has to be stored",
+       lambda: len((_tk or {"token": ""})["token"].split(".")) == 2, True)
+allowed("the ticket opens that entry",
+        lambda: p.check_task_link(_tl, _tk["token"]))
+yields("and what comes back is enough to render it: the desk, the words, the "
+       "state", lambda: sorted(p.check_task_link(_tl, _tk["token"])),
+       ["body", "id", "kind", "owner", "status", "title"])
+_other = p.task_add("advisory", "another one entirely", "b", "architect")["id"]
+refused("a ticket does not travel to another entry",
+        lambda: p.check_task_link(_other, _tk["token"]), "not valid")
+refused("a doctored signature is refused",
+        lambda: p.check_task_link(_tl, _tk["token"][:-1] + "0"), "not valid")
+refused("and so is a token of the wrong shape",
+        lambda: p.check_task_link(_tl, "not-a-ticket"), "not valid")
+yields("the refusal for a forgery says NOTHING about what would have worked",
+       lambda: (lambda s: "expire" not in s and str(_tk["token"])[:8] not in s)(
+           _refusal(lambda: p.check_task_link(_tl, "aaa.bbb"))), True)
+_stale = p._task_ticket(_tl, int(rules.time.time()) - 60)
+refused("an expired ticket is told apart, in words",
+        lambda: p.check_task_link(_tl, _stale), "expired")
+yields("and the expiry cannot be moved without breaking the signature: it is "
+       "signed, not carried beside the signature",
+       lambda: "not valid" in _refusal(
+           lambda: p.check_task_link(_tl, f"{int(rules.time.time()) + 99999}."
+                                          f"{_stale.split('.', 1)[1]}")), True)
+yields("a ticket for an entry that does not exist is a missing entry, not a "
+       "bad signature",
+       lambda: "no such task" in _refusal(lambda: p.task_link("TK-9999", 14)),
+       True)
+
 # BOTH ENDS MAY AMEND IT, and the sender's end is the one that was missing:
 # until v7.0.0 whoever had written the wrong thing could only open a SECOND
 # entry — which leaves the first standing on somebody's desk — or reach for the
