@@ -38,14 +38,22 @@ there is one person. The hidden username field on the form is for the password
 managers, which key an entry on a user and fill a password-only form wrong, in
 silence.
 
-WHERE THE MASTER IS RETYPED, AND WHERE IT IS NOT. Every gesture that WRITES
-asks for it again — deciding the lot, minting a one-time code, editing the
-project's profile, adding or retiring a PERSON, writing where their post goes —
-because a session alone is a browser left open on the iPad. The backup
-does not, and the log page does not: a `VACUUM INTO` changes nothing and drops
-a file on the server's disk, and the log is a ring in memory. A master retyped
-where it defends nothing does not add a guard, it teaches the hand to type it
-without looking — which is the habit the lot page was invented to prevent.
+WHERE THE MASTER IS TYPED: ONCE, AT THE DOOR, AND NOWHERE ELSE. Until v7.0.0
+every writing gesture asked for it again — the lot, a one-time code, the
+profile, a person, their post — on the ground that a session alone is a browser
+left open on the iPad. That guard is GONE, on purpose and by decision, and the
+reason it went is the one the file already stated against itself: a secret
+typed five times an hour is typed without looking, and a password that is typed
+without looking defends nothing while costing every gesture. What defends this
+UI is the door — the session, signed, eight hours of inactivity, dead on a
+restart — plus the fact that the port is not published outside the tailnet.
+The one-time codes are untouched: they guard the MCP surface, where the caller
+is a chat and not a person, and there the second factor is the whole design.
+
+⚠ THE CONSEQUENCE, WRITTEN WHERE IT IS DECIDED: a live session now reaches every
+gesture on this page. Signing out and closing the tab is the whole of the
+protection, and the day this port were published anywhere but the tailnet, this
+decision would have to be taken again.
 
 WHAT IS NOT HERE ANY MORE. The deployment page: it created projects, rekeyed
 them and printed their codes, and all three died with the declarative registry
@@ -99,11 +107,18 @@ DEFAULT_PORT = 9443
 # same machine, and the guarantee did not have to be paid for with that.
 FUNNEL_PORTS = (443, 8443, 10000)
 
-# One hour of INACTIVITY, sliding: every authenticated request re-issues the
-# cookie. Not one hour of session — a page left open on the iPad while the
+# EIGHT HOURS of INACTIVITY, sliding: every authenticated request re-issues the
+# cookie. Not eight hours of session — a page left open on the iPad while the
 # batch is read is the normal case, and logging the person out mid-decision
 # would teach them to keep a second tab logged in.
-SESSION_MAX_IDLE = 3600
+#
+# It was one hour while every write retyped the master. When that retype went
+# (v7.0.0) this number became the ONLY thing standing between a borrowed
+# browser and the corpus, and it went UP rather than down — deliberately. An
+# hour spent nothing but the password again on a page that had just refused to
+# do anything without it; the guard that is worth having here is a working day
+# that ends, plus a port that does not leave the tailnet.
+SESSION_MAX_IDLE = 8 * 3600
 
 SESSION_COOKIE = "codifier_admin"
 
@@ -307,8 +322,9 @@ def _login_page(message: str = "") -> str:
          required autofocus>
   <p><button type="submit">Sign in</button></p>
 </form>
-<p class="note">One hour of inactivity ends the session, and so does a restart
-of the service.</p>""")
+<p class="note">Typed once, here, and not again: every page behind this one
+takes the session and nothing else. Eight hours of inactivity end it, and so
+does a restart of the service.</p>""")
 
 
 # =====================================================================
@@ -641,10 +657,6 @@ def build(*, registry, log, master: str, refusal, fault,
                 f"you read again.</p>"
                 f"{ceiling}"
                 f"<p class='note'>{_esc(current['contract'])}</p>"
-                f"<label for='master'>Master — once for this action, never once "
-                f"per rule</label>"
-                f"<input id='master' type='password' name='master' "
-                f"autocomplete='current-password' required>"
                 f"<p><button type='submit'>Approve the ticked, deny the rest</button></p>"
                 f"</form>")
         return HTMLResponse(_page(f"{name} — the lot", body, nav=_project_nav(name)),
@@ -669,14 +681,11 @@ def build(*, registry, log, master: str, refusal, fault,
         if prj is None:
             return _no_project(name)
         form = await request.form()
-        # The master, ONCE for the action and never once per rule: four rules
-        # are not four passwords, and a password typed four times is typed
-        # without looking — which is the very defect the lot was invented to
-        # avoid.
-        if not secrets.compare_digest((form.get("master") or "").strip(), master):
-            log.warning("refused web approval: wrong master, from %s", _client(request))
-            return _lot_page(name, prj, status=401,
-                             message="Wrong master. Nothing was changed.")
+        # NO MASTER HERE any more, and what took its place is not nothing: the
+        # DIGEST. The guard this page needs is not "is this the right person" —
+        # the session answered that at the door — it is "is this the queue you
+        # read", and a password never answered that. It travels in the hidden
+        # field and `decide()` compares it inside the transaction.
         seen = (form.get("digest") or "").strip()
         ticked = [i.strip() for i in form.getlist("approve") if i.strip()]
         # One reason per proposal, carried on a field named after the ID it
@@ -746,9 +755,10 @@ def build(*, registry, log, master: str, refusal, fault,
     # MODIFICATION of something that already exists asks for, on top of the
     # admin code. It sits on the PROJECT because that is what it is — a row in
     # that project's database, so a code belongs to its project by
-    # construction rather than by a check — and behind the master retyped,
-    # because a browser left open on the iPad must not be able to mint the
-    # second factor of every structural gesture.
+    # construction rather than by a check — and behind the session, which since
+    # v7.0.0 is the whole of what this page asks. What keeps a minted code
+    # small is not a password in front of it: it is that it lives minutes and
+    # buys ONE gesture.
     #
     # It is copied by hand from here into the chat that needs it. That is not
     # a limitation to route around: the point of a code somebody has to go and
@@ -784,9 +794,6 @@ def build(*, registry, log, master: str, refusal, fault,
                   "<label for='minutes'>Minutes it lives (blank = "
                 + _esc(data["default_minutes"]) + ")</label>"
                   "<input id='minutes' type='text' name='minutes' inputmode='numeric'>"
-                  "<label for='cmaster'>Master — once for this action</label>"
-                  "<input id='cmaster' type='password' name='master' "
-                  "autocomplete='current-password' required>"
                   "<p><button type='submit'>Mint a one-time code</button></p></form>"
                 + f"<h2>Live — {_esc(data['count_live'])}</h2>"
                 + (f"<table><tbody>{live}</tbody></table>" if live
@@ -822,16 +829,12 @@ def build(*, registry, log, master: str, refusal, fault,
         if prj is None:
             return _no_project(name)
         form = await request.form()
-        # The master, RETYPED for the action, compared in constant time —
-        # inline, not delegated: the guard is pinned as written, and a session
-        # alone is a browser left open on the iPad.
-        if not secrets.compare_digest((form.get("master") or "").strip(), master):
-            log.warning("refused web minting: wrong master, from %s", _client(request))
-            return HTMLResponse(
-                _page(f"{name} — one-time codes",
-                      _codes_html(name, prj,
-                                  message="Wrong master. Nothing was minted."),
-                      nav=_project_nav(name)), status_code=401)
+        # NO MASTER HERE any more (v7.0.0). Minting is a gesture with a
+        # ceiling of its own — the code lives minutes and buys ONE gesture —
+        # and the password in front of it bought nothing that the session and
+        # the expiry did not already buy. What it cost was real: a code was
+        # never minted without typing the master, and three codes meant typing
+        # it three times.
         raw = (form.get("minutes") or "").strip()
         if raw and not raw.isdigit():
             return HTMLResponse(
@@ -1089,10 +1092,10 @@ def build(*, registry, log, master: str, refusal, fault,
     # because that tool was insecure — it asked for the admin code — but
     # because these three are what everything else is read against: the brief
     # is the project's identity and the specs are the facts of the day. A chat
-    # may SUGGEST the wording; the change is a person's, behind this password.
+    # may SUGGEST the wording; the change is a person's, made at this page.
     #
     # It is the same shape as the lot and the minting, and deliberately not a
-    # new one: session, master retyped for the action, refusals as sentences.
+    # new one: session, then refusals as sentences.
 
     # ---------- the people: because they are people ----------
     #
@@ -1124,9 +1127,6 @@ def build(*, registry, log, master: str, refusal, fault,
                f"and a space is the character nobody sees when it is "
                f"wrong.</label>"
                f"<input id='pname' name='who' required>"
-               f"<label for='amaster'>Master — once for this action</label>"
-               f"<input id='amaster' type='password' name='master' "
-               f"autocomplete='current-password' required>"
                f"<p><button type='submit'>Add</button></p></form>"
                f"<p class='note'>A person receives tasks and no rules, and has "
                f"no brief and no specs: they already know who they are and "
@@ -1175,9 +1175,6 @@ def build(*, registry, log, master: str, refusal, fault,
                 f"GRANTS NOTHING: what opens this page is the password, and "
                 f"this only says which desk hears that a proposal is "
                 f"waiting.</p>"
-                f"<label for='pmaster'>Master — once for this action</label>"
-                f"<input id='pmaster' type='password' name='master' "
-                f"autocomplete='current-password' required>"
                 f"<p><button type='submit'>Write</button></p></form>")
 
         opts = "".join(f"<option value='{_esc(c['name'])}'>{_esc(c['name'])}"
@@ -1189,9 +1186,6 @@ def build(*, registry, log, master: str, refusal, fault,
                 f"<label for='why'>Why — it is the sentence whoever finds the "
                 f"dead row in six months will read</label>"
                 f"<input id='why' name='reason' required>"
-                f"<label for='rmaster'>Master — once for this action</label>"
-                f"<input id='rmaster' type='password' name='master' "
-                f"autocomplete='current-password' required>"
                 f"<p><button type='submit'>Retire</button></p></form>"
                 f"<p class='note'>The row stays and so does every pointer at "
                 f"it: the history reads. A desk with open post on it is "
@@ -1208,8 +1202,7 @@ def build(*, registry, log, master: str, refusal, fault,
     async def people_action(request):
         """The three gestures of this page, told apart by a hidden field —
         add, post, retire. One route, because they are one subject, and one
-        shape each: session, master retyped for the action, refusals as
-        sentences."""
+        shape each: session, then refusals as sentences."""
         if not _session_ok(request):
             return _guest(request)
         name = request.path_params["project"]
@@ -1223,9 +1216,6 @@ def build(*, registry, log, master: str, refusal, fault,
                 _page(f"{name} — people", _people_html(name, prj, message, ok_msg),
                       nav=_project_nav(name)), status_code=status)
 
-        if not secrets.compare_digest((form.get("master") or "").strip(), master):
-            log.warning("refused web people: wrong master, from %s", _client(request))
-            return say(message="Wrong master. Nothing was written.", status=401)
         what = (form.get("action") or "").strip()
         if what not in ("add", "post", "retire"):
             return say(message="Unknown action. Nothing was written.", status=400)
@@ -1284,9 +1274,6 @@ def build(*, registry, log, master: str, refusal, fault,
                   "signature in a row a person signs without reading.</label>"
                   f"<input id='cap' name='queue_cap' value="
                   f"'{_esc('' if cap is None else cap)}'>"
-                  "<label for='pmaster'>Master — once for this action</label>"
-                  "<input id='pmaster' type='password' name='master' "
-                  "autocomplete='current-password' required>"
                   "<p><button type='submit'>Write the profile</button></p>"
                   "</form>"
                   "<p class='note'>Citations are checked here like everywhere "
@@ -1316,13 +1303,6 @@ def build(*, registry, log, master: str, refusal, fault,
         if prj is None:
             return _no_project(name)
         form = await request.form()
-        if not secrets.compare_digest((form.get("master") or "").strip(), master):
-            log.warning("refused web profile: wrong master, from %s", _client(request))
-            return HTMLResponse(
-                _page(f"{name} — profile",
-                      _profile_html(name, prj,
-                                    message="Wrong master. Nothing was written."),
-                      nav=_project_nav(name)), status_code=401)
         raw = (form.get("queue_cap") or "").strip()
         if raw and not raw.isdigit():
             return HTMLResponse(

@@ -3688,10 +3688,13 @@ ok(any(ast.unparse(n.func).startswith("hmac.") for n in ast.walk(WEB_TREE)
        if isinstance(n, ast.Call)),
    "the session cookie is signed with hmac")
 
-# One hour of INACTIVITY, and the number is a named constant so the check and
-# the code cannot say different things.
-ok(getattr(__import__("web"), "SESSION_MAX_IDLE", None) == 3600,
-   "the session expires after one hour of inactivity",
+# EIGHT HOURS of INACTIVITY, and the number is a named constant so the check
+# and the code cannot say different things. It went UP in v7.0.0, in the same
+# grain that took the master out of every writing gesture: from then on this
+# number is the only thing between a borrowed browser and the corpus, so it is
+# pinned here rather than left to drift by an edit that reads like a comfort.
+ok(getattr(__import__("web"), "SESSION_MAX_IDLE", None) == 8 * 3600,
+   "the session expires after eight hours of inactivity",
    getattr(__import__("web"), "SESSION_MAX_IDLE", None))
 
 # A form with the password alone is the case where automatic filling goes
@@ -4066,12 +4069,13 @@ ok(all(r[1] in (("GET",), ("POST",)) for r in _ROUTES),
    "a page whose method is the only thing between the two",
    [r for r in _ROUTES if r[1] not in (("GET",), ("POST",))])
 
-print("\n== every page is behind the session, every write behind the master too ==")
+print("\n== every page is behind the session, and the master is typed at the door ==")
 
 # The same law as `_admin` on the MCP side, moved to the door a PERSON comes
-# through — and it needs both halves, because they fail differently. Without
-# the session anybody on the LAN reads the corpus; without the master retyped,
-# a browser left open on the iPad approves rules by being borrowed. The set of
+# through — and since v7.0.0 there is ONE door and not two. The master used to
+# be retyped by every writing gesture; it is now typed at `login` and nowhere
+# else, so what this block owes is both halves of that decision: every writer
+# behind the session, and NO writer asking for the password again. The set of
 # writing methods is DERIVED from rules.py, as it is for the tools: a list
 # copied into a second file drifts, and this one would drift towards
 # "unguarded".
@@ -4124,7 +4128,7 @@ ok(set(NO_SESSION_ON_PURPOSE) <= set(_ENDPOINTS),
    "every documented exception names an endpoint that exists",
    sorted(set(NO_SESSION_ON_PURPOSE) - set(_ENDPOINTS)))
 
-# And the writing ones behind the master as well, retyped for the action.
+# And NONE of them behind a retyped master, which is the new half of the rule.
 #
 # ⚠ The receiver is `prj` and not `registry`, and that one word is the whole
 # check: since v4.0.0 every write happens on a Project, so a set derived from
@@ -4152,10 +4156,15 @@ for _name, _fn in _BUILD_FUNCS.items():
     _GUARDED.append(_name)
     ok(_reaches(_name, "_session_ok"),
        f"{_name} writes ({', '.join(sorted(_writes))}) and is behind the session")
-    ok(any(ast.unparse(n.func) == "secrets.compare_digest" for n in ast.walk(_fn)
-           if isinstance(n, ast.Call)),
-       f"{_name} writes and retypes the master — a session alone is a browser "
-       f"left open on the iPad")
+    # ⚠ THE ASSERTION IS INVERTED SINCE v7.0.0, and inverting it was the
+    # decision, not a relaxation. It used to demand the comparison; it now
+    # forbids it, so that the password cannot come back one handler at a time
+    # — which is exactly how it spread in the first place.
+    ok(not [n for n in ast.walk(_fn) if isinstance(n, ast.Call)
+            and ast.unparse(n.func) == "secrets.compare_digest"],
+       f"{_name} writes and does NOT retype the master: the session is the "
+       f"door, and a secret typed five times an hour is typed without looking",
+       "it compares one again: if that is the new decision, this line moves")
 # And the block NAMES what it guarded, in both directions. A count with a
 # floor — it read `>= 3` — catches a guard that vanishes and says nothing
 # about a writer that arrives unguarded, and it goes stale in silence the day
@@ -4167,33 +4176,44 @@ ok(sorted(_GUARDED) == ["batch_action", "codes_mint", "people_action",
    f"the writing handlers are exactly these, guarded: {sorted(_GUARDED)}",
    sorted(_GUARDED))
 
-# And the mirror image, because the interesting half of a rule is its
-# exceptions. `backup` is NOT in MUTATING — VACUUM INTO produces a file and
-# changes nothing in the database — so the loop above never looks at the
-# handler that runs it, and dropping the master from it left no red line
-# anywhere. That silence is what this block ends: the decision is named here,
-# with its reason, and the day somebody puts the master back the suite says so
-# and the decision gets taken again instead of drifting.
-NO_MASTER_ON_PURPOSE = {
-    "project_backup": "VACUUM INTO is a reading: it changes nothing and the "
-                      "copy lands on the server's disk, not in the browser, "
-                      "so the master would have defended against one extra "
-                      "file in a directory — and a master typed where it "
-                      "guards nothing is a master typed without looking",
+# THE MASTER IS COMPARED IN EXACTLY ONE PLACE, and the check says which — in
+# both directions, because "nowhere else" is the half that decays. The loop
+# above only looks at handlers that WRITE; a page that asked for the password
+# while writing nothing would slip past it, and a password asked where it
+# guards nothing is the habit this grain was meant to end.
+#
+# `_session_ok` also calls compare_digest, on the cookie's MAC, and that one
+# must stay: it is told apart by what it compares rather than by its name, so
+# a handler cannot hide a master check behind a variable called `mac`.
+def _master_cmps(fn) -> list:
+    return [ast.unparse(n) for n in ast.walk(fn) if isinstance(n, ast.Call)
+            and ast.unparse(n.func) == "secrets.compare_digest"
+            and "master" in ast.unparse(n).lower()]
+
+
+MASTER_COMPARED_IN = {
+    "login": "it is the door, and the whole of what the UI asks: one password, "
+             "typed once, for a session that dies with a restart",
 }
-ok(set(NO_MASTER_ON_PURPOSE) <= set(_ENDPOINTS),
-   "every master-free endpoint named here exists",
-   sorted(set(NO_MASTER_ON_PURPOSE) - set(_ENDPOINTS)))
-for _name, _why in NO_MASTER_ON_PURPOSE.items():
-    _fn = _BUILD_FUNCS.get(_name)
-    ok(_fn is not None and not [n for n in ast.walk(_fn) if isinstance(n, ast.Call)
-                                and ast.unparse(n.func) == "secrets.compare_digest"],
-       f"{_name} asks for no master ON PURPOSE — {_why[:56]}...",
-       "it now compares one: if that is the new decision, drop the exception")
-    _reached = _engine_reached(_fn or ast.Module(body=[], type_ignores=[]))
-    ok(not (_reached & MUTATING),
-       f"and the exception holds only while {_name} writes nothing",
-       sorted(_reached & MUTATING))
+ok(set(MASTER_COMPARED_IN) <= set(_BUILD_FUNCS),
+   "every place named as comparing the master exists",
+   sorted(set(MASTER_COMPARED_IN) - set(_BUILD_FUNCS)))
+for _name, _why in MASTER_COMPARED_IN.items():
+    ok(len(_master_cmps(_BUILD_FUNCS[_name])) == 1,
+       f"{_name} compares the master, once — {_why[:52]}...",
+       _master_cmps(_BUILD_FUNCS[_name]))
+_STRAY = sorted(n for n, f in _BUILD_FUNCS.items()
+                if n not in MASTER_COMPARED_IN and n != "build" and _master_cmps(f))
+ok(not _STRAY,
+   "and NOBODY else compares it: the password came out of every gesture in "
+   "v7.0.0 and cannot come back one handler at a time", _STRAY)
+# And the cookie's own comparison is still constant-time, told apart by what it
+# compares: this is the guard the master's departure leaned the whole UI on.
+ok(_BUILD_FUNCS.get("_session_ok") is not None
+   and [n for n in ast.walk(_BUILD_FUNCS["_session_ok"]) if isinstance(n, ast.Call)
+        and ast.unparse(n.func) == "secrets.compare_digest"],
+   "the session cookie's MAC is compared in constant time, and that check is "
+   "now the whole door")
 
 # The session check is the FIRST statement of the handler, and not conditional.
 # `if request.query_params.get("preview"): ...` in front of it reads like a
@@ -4218,10 +4238,13 @@ for _e in _ENDPOINTS:
 # came back, the ceiling shifted by one.
 if _ACT is not None:
     _TESTS = [ast.unparse(n.test) for n in ast.walk(_ACT) if isinstance(n, ast.If)]
-    ok("not secrets.compare_digest((form.get('master') or '').strip(), master)"
-       in _TESTS,
-       "the lot action's master check is the constant-time comparison, as written",
-       [t[:60] for t in _TESTS])
+    # ⚠ The master check that stood here is GONE with v7.0.0, and its absence
+    # is pinned rather than merely deleted: what guards this page is the
+    # DIGEST, which answers the question the password never answered — is this
+    # the queue you read.
+    ok(not [t for t in _TESTS if "master" in t],
+       "the lot action asks for no master: the digest is what guards it",
+       [t[:60] for t in _TESTS if "master" in t])
     # The digest is no longer COMPARED here — `decide()` does that, in the
     # transaction — so what this file owes is that the one the browser sent
     # travels in untouched. A page that passed the batch's own digest instead
