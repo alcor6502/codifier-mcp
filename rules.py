@@ -3791,17 +3791,25 @@ class Project:
 
     @classmethod
     def refuse_not_yours(cls, entity: str, action: str, name: str, by: str) -> None:
-        """A consumer's `specs` travel under that consumer's OWN name, and this
-        is the whole of the rule: one sentence, no exceptions, not even for the
-        administrator. `specs` in the call and a different name on it is
-        refused — with or without the admin code, with or without a one-time
-        code, whatever else rides along in `fields`.
+        """A consumer's `specs` travel under that consumer's OWN name. `specs`
+        in the call and a different name on it is refused — with or without the
+        admin code, with or without a one-time code, whatever else rides along
+        in `fields`.
 
-        WITHOUT EXCEPTIONS ON PURPOSE. The permissive version — the rule holds
-        on the low door and the admin may write anybody's — is two rules, and
-        the day somebody asks which one applies the answer is "it depends what
-        else was in the call". An administrator who needs a consumer's specs
-        changed asks that consumer, in the same way anyone else does.
+        ONE EXCEPTION, AND IT IS NOT A TOOL. The administration page writes any
+        consumer's brief and specs (v7.0.0), and the caller decides that by
+        passing `on_the_page` — this method is not reached at all in that case.
+        It is the same exception `NO_TOOL_FOR_PEOPLE` already has and it has the
+        same reason: on the page there is no chat, there is the person with the
+        UI password, who already writes the PROJECT's brief and specs that no
+        tool may touch. What this guard is FOR is a chat writing another chat's
+        mandate, and that is refused exactly as before.
+
+        NO OTHER EXCEPTION, ON PURPOSE. The permissive version — the rule holds
+        on the low door and the ADMIN CODE may write anybody's — is two rules,
+        and the day somebody asks which one applies the answer is "it depends
+        what else was in the call". An administrator who needs a consumer's
+        specs changed asks that consumer, in the same way anyone else does.
 
         THE REFUSAL CARRIES THE ROAD, and that is not politeness: a refusal
         that says only `no` makes a chat try something worse. It says to open a
@@ -3942,7 +3950,23 @@ class Project:
         # call and before the credentials, because it compares two arguments
         # and reads nothing. A refusal on it must not cost a one-time code, and
         # it must not need one either.
-        if "specs" in fields:
+        # ⚠ NOT ON THE PAGE, and this is a rule gaining its first exception —
+        # written here rather than discovered. `refuse_not_yours` says "no
+        # exceptions, not even for the administrator", and the reason it gives
+        # is exactly why the page is not one of them: an administrator there is
+        # a CHAT holding a code, and a chat writing another chat's mandate is
+        # the thing that must not happen. On the page there is no chat. There
+        # is a person with the UI password — the same person who already writes
+        # the PROJECT's brief and specs, which no tool can touch at all,
+        # because what is fundative is written by a person.
+        #
+        # Alfredo, asking for it: "il brief e le specs li voglio modificare".
+        # The alternative was worse and was rejected: let the page sign with
+        # the consumer's own name, which passes this guard by writing a
+        # SIGNATURE THAT IS NOT TRUE — the history would say the skill amended
+        # itself. A rule with one declared exception is still checkable; a
+        # history that lies is not repairable.
+        if "specs" in fields and not on_the_page:
             self.refuse_not_yours(entity, action, name, actor)
         # The order of these two matters: on a retirement EVERY field is
         # unknown, and "not a field" would send the caller looking for the
@@ -5521,6 +5545,54 @@ class Project:
                         "composes no digest — it posts one task at a time, as it is "
                         "opened — so a roll-up is somebody else's job, and this payload "
                         "is what it is made of."}
+
+    def roster(self) -> dict:
+        """EVERY consumer of the project, live and RETIRED, with what a person
+        needs in order to decide anything about one.
+
+        It is not `project_info` with more fields, and the difference is the
+        retired ones. That payload is what a working chat reads, and it carries
+        only the live on purpose — `my name is in the list` means `my role is
+        alive`, and a retired row put back in front of a chat by the side door
+        would undo that. But a PERSON at the administration page has the
+        opposite need: a name that is taken and not visible is a name they will
+        try to reuse, and a retirement they want to undo is invisible until it
+        is listed. So the two payloads differ by audience, which is the only
+        honest reason for two.
+
+        The three counts are here because each one is a REFUSAL somebody would
+        otherwise meet by surprise: a consumer that rules reach cannot be
+        retired without emptying those rules' audience, and a desk with open
+        entries on it cannot be retired at all. Reading them beside the button
+        is how the refusal stops being a surprise."""
+        now = _now()
+        out = []
+        for c in self.cx.execute("SELECT * FROM consumer ORDER BY "
+                                 "retired_at IS NOT NULL, name"):
+            d = {"name": c["name"], "kind": c["kind"],
+                 "brief": c["brief"], "specs": c["specs"],
+                 "signed": bool(c["secret"]),
+                 "email": c["email"] or "",
+                 "approver": bool(c["approver"]),
+                 "retired": bool(c["retired_at"]),
+                 "retired_at": c["retired_at"], "reason": c["retired_reason"],
+                 "created_at": c["created_at"],
+                 "groups": [r[0] for r in self.cx.execute(
+                     "SELECT g.name FROM consumer_group_member m "
+                     "JOIN consumer_group g ON g.group_id = m.group_id "
+                     "WHERE m.consumer_id=? AND g.retired_at IS NULL "
+                     "ORDER BY g.name", (c["consumer_id"],))],
+                 "rules_in_force": len(self._reaching(c["consumer_id"])),
+                 "open_entries": self.cx.execute(
+                     "SELECT COUNT(*) FROM task WHERE consumer_id=? AND "
+                     "status='pending' AND archived_at IS NULL",
+                     (c["consumer_id"],)).fetchone()[0]}
+            out.append(d)
+        return {"project": self.name, "consumers": out,
+                "live": sum(1 for d in out if not d["retired"]),
+                "retired": sum(1 for d in out if d["retired"]),
+                "kinds": sorted({d["kind"] for d in out}),
+                "read_at": now}
 
     def task_board(self, group_by: str = "owner", show: str = "open",
                    query: str = "") -> dict:

@@ -947,10 +947,19 @@ it now is — the same digest contract the MCP tool used to carry.
 Beside it, readings that write nothing: the rules in force for a chosen
 consumer, exactly as that consumer's chat reads them, brief first; a rule's
 detail with its history and the diff between two versions; and the state of the
-project. And three pages that write without touching a rule: **codes**, where
+project. And four pages that write without touching a rule: **codes**, where
 one-time authorisation codes are minted — press the button again and the new
 one joins the ones already on the page, two spaces apart, so three codes are
-one drag — **profile**, and **log**.
+one drag — **profile**, **consumers**, and **log**.
+
+**Markdown is rendered, and the boxes are big.** A brief and a specs are read
+as markdown by every chat that opens the project, and they were being written
+into a box ten lines tall with no way to see the result. Every one of them now
+has a full-width box that grows, and a preview under it rendered by the server
+from the text that is actually stored — which answers the one question the box
+cannot: did the table come out as a table. The renderer is eighty lines in
+`web.py`, not a package and not a script from a CDN: a third party in the page
+that approves rules is what this service has refused from the beginning.
 
 **The profile page is where the project talks about itself** — its `brief`, its
 `specs` and its `queue_cap` — and since v5.0.0 that is the only place they can
@@ -959,11 +968,32 @@ is the project's identity and the specs are the facts every reading is done
 against: what is FUNDATIVE has no tool, the way what is catastrophic has none. A
 chat may suggest the wording; the change is a person's.
 
-**The people page is where the project's PEOPLE are** — added, addressed,
-marked, retired. Same sentence, said about the anagrafica: a chat and a skill
-are machinery and a tool manages them, a person is not. The mark that says whose
-desk hears about a proposal grants nothing at all: what opens this UI is the
-password, and this only says where an email goes.
+**The consumers page is the whole anagrafica** — every chat, every skill and
+every person, live and retired, on one page. It was the *people* page until
+v7.0.0 and it held the humans only, which meant the person who owns the project
+could see every consumer EXCEPT through a chat, and could not read a mandate at
+all without asking one. Each card carries what the register knows — its kind,
+its groups, how many rules in force reach it, how many entries are open on its
+desk — and, for a chat or a skill, its **brief and specs rendered as markdown**,
+with an editor under them.
+
+⚠ **Nothing is deleted, and the page says so where the button is.** A consumer
+is RETIRED: the row stays, every pointer at it still reads, the name stays
+taken because an ID is never reused, and the gesture is undone with *bring it
+back* rather than by creating the name a second time. A desk with open entries
+on it is refused — close those first, or hand them over.
+
+⚠ **The page writes any consumer's brief and specs, and that is this rule's one
+exception.** From a tool, `specs` under a name that is not your own is refused
+with no exception at all — a chat writing another chat's mandate is exactly
+what that guard is for. On the page there is no chat: there is the person
+holding the UI password, the same one who writes the PROJECT's brief and specs,
+which no tool may touch. The alternative — letting the page sign with the
+consumer's own name — passes the guard by writing a signature that is not true,
+and a history that lies is not repairable.
+
+The mark that says whose desk hears about a proposal grants nothing at all:
+what opens this UI is the password, and this only says where an email goes.
 
 **The log page is the whole task log at once** — every entry in the project,
 grouped by the desk it sits on or by who sent it, open only or open and closed,

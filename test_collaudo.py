@@ -407,6 +407,26 @@ refused("and the admin code with a one-time code does NOT open it either",
         lambda: p2.amend_project("consumer", "advisory", "amend",
                                  {"specs": "x", "brief": "y"}, actor="tax",
                                  auth_code=code(p2)), "changed by advisory")
+# ⚠ AND THE ONE EXCEPTION, WHICH IS NOT A TOOL — v7.0.0. The page writes any
+# consumer's specs, because on the page there is no chat: there is the person
+# with the UI password, the same one who writes the PROJECT's brief and specs,
+# which no tool may touch at all. The alternative was to let the page sign with
+# the consumer's own name, which passes the guard above by writing a signature
+# that is NOT TRUE — a rule with one declared exception stays checkable, a
+# history that lies does not.
+allowed("the PAGE writes somebody else's specs, signing as itself",
+        lambda: p2.amend_project("consumer", "advisory", "amend",
+                                 {"specs": "written from the page"},
+                                 actor="web ui", on_the_page=True))
+yields("and the history says the page did it, under its own name",
+       lambda: p2.cx.execute("SELECT specs, actor FROM consumer "
+                             "WHERE name='advisory'").fetchone()["actor"],
+       "web ui")
+refused("while the same call WITHOUT that flag is refused as before",
+        lambda: p2.amend_project("consumer", "advisory", "amend",
+                                 {"specs": "from a chat"}, actor="tax"),
+        "changed by advisory")
+
 allowed("while a consumer changes its OWN, on the reference code",
         lambda: p2.amend_project("consumer", "advisory", "amend",
                                  {"specs": "cash 50k"}, actor="advisory"))
@@ -414,6 +434,48 @@ yields("and the spelling of the name is not the identity: casefolded, like "
        "everywhere else in this registry",
        lambda: bool(p2.amend_project("consumer", "advisory", "amend",
                                      {"specs": "cash 60k"}, actor="ADVISORY")), True)
+# THE ROSTER: everybody, live and retired — the anagrafica the page is built
+# on. What each case pins is the difference from `project_info`, which is the
+# only reason there are two.
+p3 = project()
+p3.amend_project("consumer", "coach", "create", {"kind": "chat", "brief": "b"},
+                 actor="architect")
+p3.amend_project("consumer", "runner", "create", {"kind": "skill"},
+                 actor="architect")
+p3.amend_project("consumer", "runner", "retire", {}, reason="the gym closed",
+                 actor="architect", auth_code=code(p3))
+yields("the roster carries the RETIRED, which project_info does not — the "
+       "difference is measured on the name that was retired, not on the whole "
+       "list, because `project()` seeds an anagrafica of its own",
+       lambda: ("runner" in [c["name"] for c in p3.roster()["consumers"]],
+                "runner" in [c["name"] for c in p3.project_info()["consumers"]]),
+       (True, False))
+yields("and says which is which, with the reason somebody wrote",
+       lambda: [(c["retired"], c["reason"]) for c in p3.roster()["consumers"]
+                if c["name"] == "runner"], [(True, "the gym closed")])
+yields("the live and retired counts are counted from the rows, and they add "
+       "up to the whole list",
+       lambda: (lambda r: (r["live"] + r["retired"] == len(r["consumers"]),
+                           r["retired"]))(p3.roster()), (True, 1))
+yields("every row carries the two numbers a retirement is refused for",
+       lambda: all({"rules_in_force", "open_entries"} <= set(c)
+                   for c in p3.roster()["consumers"]), True)
+# ⚠ TWO ENTRIES AND ONE CLOSED, because a case with one open entry cannot tell
+# "the open ones on this desk" from "every entry this desk ever had" — and the
+# count is read beside a Retire button whose refusal depends on exactly that
+# difference. Injecting the wrong query left this case green until it counted
+# a closed one too.
+p3.task_add("coach", "a thing", "b", "architect")
+_done = p3.task_add("coach", "a finished thing", "b", "architect")["id"]
+p3.task_close(_done, "coach", outcome="done")
+yields("and the open entries are the ones still OPEN on that desk, not every "
+       "entry it ever had",
+       lambda: [c["open_entries"] for c in p3.roster()["consumers"]
+                if c["name"] == "coach"], [1])
+yields("a brief written from the page comes back on the roster",
+       lambda: [c["brief"] for c in p3.roster()["consumers"]
+                if c["name"] == "coach"], ["b"])
+
 # AND THE HAND IS RECORDED. Until 5.0.0 the surface passed a fixed 'admin' into
 # `actor`, so every write through this door read as the administrator's — on a
 # door reachable with the reference code alone, which is what made it a lie.

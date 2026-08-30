@@ -151,9 +151,13 @@ The project's STRUCTURE — the one door for all of it.
   it means is what lets you ask for the right number — writing it is still not
   yours.
 - **A CONSUMER'S `specs` ARE THAT CONSUMER'S.** `specs` in the call under a
-  different name is refused, and the rule has NO exception — not with the admin
-  code, not with a one-time code, whatever else rides along in `fields`. The
-  refusal carries the road:
+  different name is refused: not with the admin code, not with a one-time code,
+  whatever else rides along in `fields`. ⚠ **One exception since v7.0.0, and it
+  is not a tool**: the administration page writes any consumer's brief and
+  specs, because there is no chat there — there is the person holding the UI
+  password, the same one who writes the PROJECT's brief and specs, which no
+  tool may touch at all. From a tool the rule is unchanged. The refusal carries
+  the road:
 
       the specs of advisory are changed by advisory. If you need them changed,
       open a task: tasks_add(project, consumer='advisory', title=…, body=…,

@@ -3699,10 +3699,24 @@ ok(getattr(__import__("web"), "SESSION_MAX_IDLE", None) == 8 * 3600,
 
 # A form with the password alone is the case where automatic filling goes
 # wrong, and goes wrong in SILENCE — 1Password and the Apple keychain both
-# want a username field to key the entry on. It is hidden and constant: there
-# is only one user.
-ok('autocomplete="username"' in WEB_SRC,
-   "the login form carries a hidden username field, for the password managers")
+# want a username field to key the entry on.
+#
+# ⚠ AND IT MUST BE VISIBLE. It carried `hidden` until v7.0.0, which is
+# `display:none`, and a field that is not displayed is one those managers SKIP:
+# the offer to fill and the offer to save never appeared, with nothing failing
+# anywhere. So this pins BOTH halves — the field is there, and it is not
+# hidden — because the first alone is what was true while it did not work.
+_LOGIN = WEB_SRC[WEB_SRC.index("def _login_page"):]
+_LOGIN = _LOGIN[:_LOGIN.index("def build(")]
+ok('autocomplete="username"' in _LOGIN,
+   "the login form carries a username field, for the password managers")
+_UFIELD = next((ln for ln in _LOGIN.splitlines()
+                if 'name="username"' in ln), "")
+ok(bool(_UFIELD) and "hidden" not in _UFIELD
+   and "hidden" not in _LOGIN[_LOGIN.index(_UFIELD):
+                              _LOGIN.index(_UFIELD) + 220],
+   "and it is VISIBLE: a display:none field is one 1Password and the keychain "
+   "walk straight past, in silence", _UFIELD.strip())
 ok('autocomplete="current-password"' in WEB_SRC,
    "and marks the password as the current one")
 
@@ -3984,7 +3998,7 @@ ok(any(n.func.attr == "projects" for n in ROUTER_WEB),
 # refusal that keeps chats away from people, and the one-time code — so a
 # second caller acquiring it would be a second caller with neither. It is
 # passed in exactly one handler, and that handler is the one whose whole
-# subject is people.
+# subject is the anagrafica.
 # Walked from the TREE and not from `_WEB_FUNCS`, which is built further down:
 # a check that depends on where it happens to sit in the file is a check that
 # moves badly.
@@ -3997,9 +4011,9 @@ _FLAGGED = sorted({fn.name for fn in ast.walk(WEB_TREE)
                    and fn.name != "build"
                    for n in ast.walk(fn)
                    if isinstance(n, ast.keyword) and n.arg == "on_the_page"})
-ok(_FLAGGED == ["people_action"],
-   f"`on_the_page` is passed by one handler and it is the people's: {_FLAGGED}",
-   _FLAGGED)
+ok(_FLAGGED == ["consumers_action"],
+   f"`on_the_page` is passed by one handler and it is the anagrafica's: "
+   f"{_FLAGGED}", _FLAGGED)
 
 _CAP_KEYS = [n for n in ast.walk(WEB_TREE) if isinstance(n, ast.Subscript)
              and isinstance(n.slice, ast.Constant) and n.slice.value == "queue_cap"]
@@ -4048,16 +4062,17 @@ ok([(r[0], r[2]) for r in _POSTS] == [("/login", "login"), ("/logout", "logout")
                                       ("/p/{project}/backup", "project_backup"),
                                       ("/p/{project}/batch", "batch_action"),
                                       ("/p/{project}/codes", "codes_mint"),
-                                      ("/p/{project}/people", "people_action"),
+                                      ("/p/{project}/consumers", "consumers_action"),
                                       ("/p/{project}/profile", "profile_action"),
                                       ("/p/{project}/t/{task}", "ticket_action"),
                                       ("/p/{project}/tasks", "tasks_action")],
    "and exactly nine of them take POST: the door, the exit, and the seven "
    "gestures — the lot, minting a one-time code, writing the project's own "
-   "profile, looking after its PEOPLE, working the LOG, closing ONE entry from "
-   "the link in its email, and the backup, which handles no secret. Renewal "
-   "left with the expiry in 5.0.0; creating a project and rekeying it are not "
-   "here either, because a project is a line in a file",
+   "profile, the ANAGRAFICA (every consumer, not only the people), working the "
+   "LOG, closing ONE entry from the link in its email, and the backup, which "
+   "handles no secret. Renewal left with the expiry in 5.0.0; creating a "
+   "project and rekeying it are not here either, because a project is a line "
+   "in a file",
    [(r[0], r[2]) for r in _POSTS])
 # Every writing route is UNDER a project, and that is the shape of "a project
 # is a database": a gesture that named no project would be a gesture on all of
@@ -4253,7 +4268,7 @@ for _name, _fn in _BUILD_FUNCS.items():
 # a handler leaves: the renewals action left in 5.0.0 and the floor would have
 # stayed at three. The equality fails on either mistake, and it fails saying
 # which name moved.
-ok(sorted(_GUARDED) == ["batch_action", "codes_mint", "people_action",
+ok(sorted(_GUARDED) == ["batch_action", "codes_mint", "consumers_action",
                         "profile_action", "tasks_action", "ticket_action"],
    f"the writing handlers are exactly these, guarded: {sorted(_GUARDED)}",
    sorted(_GUARDED))
