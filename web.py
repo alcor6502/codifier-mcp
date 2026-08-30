@@ -136,6 +136,14 @@ SESSION_COOKIE = "codifier_admin"
 # time.
 LOG_RING_LINES = 200
 
+# How many minted codes stay on the line at once. Not a policy on minting —
+# the engine decides what a code is worth and how long it lives, and pressing
+# the button an eleventh time still mints — but a ceiling on what one page
+# prints, so that a run cannot grow without end down an iPad. The oldest fall
+# off the front, because the one you are about to use is the one you just
+# pressed for.
+CODE_RUN_MAX = 10
+
 
 class LogRing(logging.Handler):
     """The last lines of the service's own log, IN MEMORY.
@@ -274,6 +282,13 @@ tr:last-child td { border-bottom: none; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
        font-size: .9em; background: var(--raised); border-radius: 4px;
        padding: .1rem .3rem; }
+/* The minted codes, on one line, separated by TWO SPACES so that one drag
+   takes the lot. `pre-wrap` and not the default: HTML collapses runs of
+   whitespace, so without it the two spaces that make the run readable — and
+   that survive the paste — would arrive as one. `break-all` because the run
+   is long and an iPad is narrow. */
+code.run { white-space: pre-wrap; overflow-wrap: break-all;
+           display: block; padding: .5rem .6rem; line-height: 1.7; }
 /* Rule bodies are prose, and they used to run off the side of an iPad: a
    horizontal scrollbar inside a page you read with a thumb is a paragraph you
    do not read. */
@@ -764,22 +779,39 @@ def build(*, registry, log, master: str, refusal, fault,
     # a limitation to route around: the point of a code somebody has to go and
     # fetch is the breath it forces — it guards against haste, not malice.
 
-    def _codes_html(name: str, prj, *, minted=None, message: str = "") -> str:
+    def _codes_html(name: str, prj, *, run=(), minted=None,
+                    message: str = "") -> str:
+        """`run` is what has been minted SINCE THIS PAGE WAS OPENED, in order,
+        the newest last. Three codes is the button pressed three times, and
+        they stay on the page together so that one drag takes all three —
+        which is the gesture this page exists for: a chat that needs three
+        modifications needs three codes, and fetching them one page-load at a
+        time was the whole of the tedium.
+
+        It is carried in a HIDDEN FIELD and in no other state: no server-side
+        basket that would outlive the tab and hold cleartext codes for
+        whoever asks next, and no cookie. The field holds exactly what is
+        already printed on the page in front of the person — so it adds no
+        exposure — and it dies when the page is left, which is why the GET
+        starts an empty run rather than restoring one."""
         data = prj.auth_codes()
         head = f"<p class='bad'>{_esc(message)}</p>" if message else ""
-        if minted:
-            # SHOWN ONCE, and once is all it is good for. What the database
-            # keeps is a hash, so this is not a value that can be read back
-            # from anywhere — leaving the page without copying it costs
+        if run:
+            # SHOWN ONCE, and once is all they are good for. What the database
+            # keeps is a hash, so these are not values that can be read back
+            # from anywhere — leaving the page without copying them costs
             # another minting, which is cheap and is the whole reason this is
             # not treated as a secret to store.
-            head += (f"<p class='ok'>Copy it now — it is not shown again and "
-                     f"it cannot be read back:</p>"
-                     f"<p><code>{_esc(minted['auth_code'])}</code></p>"
-                     f"<p class='note'>Good until {_esc(minted['expires_at'])} "
+            head += (f"<p class='ok'>{'Copy it now' if len(run) == 1 else f'All {len(run)} of them, in one drag'}"
+                     f" — not shown again, and they cannot be read back:</p>"
+                     f"<p><code class='run'>{_esc('  '.join(run))}</code></p>")
+        if minted:
+            head += (f"<p class='note'>The last one is good until "
+                     f"{_esc(minted['expires_at'])} "
                      f"({_esc(minted['minutes'])} minutes), for ONE gesture on "
                      f"<b>{_esc(minted['project'])}</b>. A refused gesture rolls "
-                     f"it back and does not spend it.</p>")
+                     f"it back and does not spend it. Press the button again for "
+                     f"another, and it joins the line above.</p>")
         live = "".join(f"<tr><td>#{_esc(r['code_id'])}</td>"
                        f"<td class='note'>minted {_esc(r['minted_at'])}</td>"
                        f"<td>expires {_esc(r['expires_at'])}</td></tr>"
@@ -791,10 +823,15 @@ def build(*, registry, log, master: str, refusal, fault,
                         for r in data["spent"])
         return (head
                 + "<form method='post' action='/p/" + _esc(name) + "/codes'>"
+                  "<input type='hidden' name='run' value='"
+                + _esc(" ".join(run)) + "'>"
                   "<label for='minutes'>Minutes it lives (blank = "
                 + _esc(data["default_minutes"]) + ")</label>"
                   "<input id='minutes' type='text' name='minutes' inputmode='numeric'>"
-                  "<p><button type='submit'>Mint a one-time code</button></p></form>"
+                  "<p><button type='submit'>Mint"
+                + (" another" if run else " a one-time code") + "</button>"
+                + ("&nbsp;&nbsp;<a href='/p/" + _esc(name) + "/codes'>start a "
+                   "fresh line</a>" if run else "") + "</p></form>"
                 + f"<h2>Live — {_esc(data['count_live'])}</h2>"
                 + (f"<table><tbody>{live}</tbody></table>" if live
                    else "<p class='note'>None. A gesture that needs one is "
@@ -835,11 +872,18 @@ def build(*, registry, log, master: str, refusal, fault,
         # the expiry did not already buy. What it cost was real: a code was
         # never minted without typing the master, and three codes meant typing
         # it three times.
+        # WHAT THE PAGE ALREADY SHOWS, handed back so the next one can join it.
+        # It is split on whitespace and filtered, and it is never parsed for
+        # meaning: this field decides what gets PRINTED and nothing else, so
+        # the worst a doctored one can do is print rubbish to the person who
+        # doctored it. A code is spent against the hash in the database, which
+        # is not reachable from here.
+        run = [c for c in (form.get("run") or "").split() if c][-CODE_RUN_MAX:]
         raw = (form.get("minutes") or "").strip()
         if raw and not raw.isdigit():
             return HTMLResponse(
                 _page(f"{name} — one-time codes",
-                      _codes_html(name, prj, message=(
+                      _codes_html(name, prj, run=run, message=(
                           f"{raw!r} is not a whole number of minutes. Nothing "
                           f"was minted.")),
                       nav=_project_nav(name)), status_code=400)
@@ -851,14 +895,15 @@ def build(*, registry, log, master: str, refusal, fault,
             log.info("refused web minting: %s", e)
             return HTMLResponse(
                 _page(f"{name} — one-time codes",
-                      _codes_html(name, prj, message=str(e)),
+                      _codes_html(name, prj, run=run, message=str(e)),
                       nav=_project_nav(name)), status_code=400)
         # The MINTING is logged and the code is not: what a log is for here is
         # answering "who let that gesture through", and the answer is the row,
         # not the secret.
         log.info("one-time code minted for %s, %s minutes", name, minted["minutes"])
+        run = (run + [minted["auth_code"]])[-CODE_RUN_MAX:]
         return HTMLResponse(_page(f"{name} — one-time codes",
-                                  _codes_html(name, prj, minted=minted),
+                                  _codes_html(name, prj, run=run, minted=minted),
                                   nav=_project_nav(name)))
 
     async def project_backup(request):

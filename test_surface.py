@@ -4069,6 +4069,57 @@ ok(all(r[1] in (("GET",), ("POST",)) for r in _ROUTES),
    "a page whose method is the only thing between the two",
    [r for r in _ROUTES if r[1] not in (("GET",), ("POST",))])
 
+print("\n== the run of one-time codes: three presses, one drag ==")
+
+# The ceiling on what the codes page prints at once lives in a NAMED constant,
+# and the page slices with that name — not with a number typed twice, which is
+# the copy this repo pays for every time it is written.
+_RUN_MAX = getattr(__import__("web"), "CODE_RUN_MAX", None)
+ok(isinstance(_RUN_MAX, int) and _RUN_MAX >= 1,
+   f"web.py names the ceiling of the printed run: CODE_RUN_MAX = {_RUN_MAX}",
+   _RUN_MAX)
+_SLICES = [ast.unparse(n) for n in ast.walk(WEB_TREE) if isinstance(n, ast.Subscript)
+           and "CODE_RUN_MAX" in ast.unparse(n)]
+ok(len(_SLICES) == 2,
+   "and both cuts of the run read that constant — the one that comes in from "
+   "the field and the one that goes back out", _SLICES)
+# A blunter "the number appears once in the file" was written here and taken
+# out: `rows='10'` on the two textareas is the same integer with nothing to do
+# with this ceiling, and a check that goes red for a coincidence teaches the
+# reader to ignore it. What is worth pinning is that the CUTS read the name,
+# which is the line above.
+
+# ⚠ TWO SPACES, and the CSS that makes them survive. HTML collapses a run of
+# whitespace, so `'  '.join` alone would reach the browser as single spaces
+# and the person would copy a line they cannot tell apart — a defect that
+# renders, looks fine, and is only found by pasting. The separator and the
+# declaration that preserves it are pinned TOGETHER, because either alone is
+# the bug.
+ok("'  '.join(run)" in WEB_SRC,
+   "the minted codes are joined by two spaces, so one drag takes the lot",
+   [x.strip()[:60] for x in WEB_SRC.splitlines() if ".join(run)" in x])
+_CSSC = getattr(__import__("web"), "_CSS", "")
+ok("code.run" in _CSSC and "white-space: pre-wrap" in _CSSC,
+   "and `code.run` declares white-space: pre-wrap, without which HTML "
+   "collapses those two spaces into one and nothing looks wrong",
+   [ln.strip() for ln in _CSSC.splitlines() if "code.run" in ln
+    or "white-space" in ln])
+
+# The run is carried in the FORM and in nothing else: a basket on the server
+# would outlive the tab and hold cleartext codes for whoever loads the page
+# next. The hidden field is the whole of the state, and this says so by name.
+ok("name='run' value='" in WEB_SRC,
+   "the run travels in a hidden field on the page that prints it")
+# `_BUILD_FUNCS` is built further down, so the handler is found here on the
+# tree — a name borrowed from below is how this file dies half way instead of
+# going red, and a suite that dies prints hundreds of greens first.
+_MINT = next((n for n in ast.walk(WEB_TREE)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name == "codes_mint"), None)
+ok(_MINT is not None and "form.get('run')" in ast.unparse(_MINT),
+   "and the handler reads it back from the form, never from a module-level "
+   "basket", ast.unparse(_MINT)[:80] if _MINT else "(no handler)")
+
 print("\n== every page is behind the session, and the master is typed at the door ==")
 
 # The same law as `_admin` on the MCP side, moved to the door a PERSON comes
