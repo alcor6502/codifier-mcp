@@ -79,7 +79,7 @@ from datetime import datetime, timedelta, timezone
 # and both are alarms about the world outside this process.
 log = logging.getLogger("codifier-mcp.registry")
 
-VERSION = "6.2.0"
+VERSION = "7.0.0"
 
 # The GENERATION of the schema, and it is a number the database carries in
 # `PRAGMA user_version`. It exists because of a thing that was seen live at
@@ -5422,6 +5422,74 @@ class Project:
                         "composes no digest — it posts one task at a time, as it is "
                         "opened — so a roll-up is somebody else's job, and this payload "
                         "is what it is made of."}
+
+    def task_board(self, group_by: str = "owner", show: str = "open",
+                   query: str = "") -> dict:
+        """EVERY log entry in the project at once, grouped — the cross view the
+        admin page is built on, and the one reading in this engine that answers
+        "where is all of it" instead of "what does this desk owe".
+
+        `task_overview` does not replace it and is not replaced by it: that one
+        is a DESK census — pending only, capped per desk, with the addresses a
+        digest is composed from. This one carries the closed ones when asked,
+        groups by either END of an entry, and caps nothing, because a page that
+        showed you nine of eleven and said so is a page you cannot work from.
+
+        `group_by` is `owner` — the desk it sits on — or `sender`, which is
+        `created_by`, a SIGNATURE and not a pointer: two spellings of the same
+        person are two groups here, and that is honest rather than tidy. The
+        engine folds case and nothing else.
+
+        `show` is `open` or `all`. Reading moves nothing: no counter, no
+        timestamp, no archive."""
+        by = (group_by or "owner").strip().lower()
+        if by not in ("owner", "sender"):
+            raise RulesError(
+                f"group_by is 'owner' or 'sender', not {group_by!r}: the two ends of "
+                "an entry are the two ways a log can be read.")
+        what = (show or "open").strip().lower()
+        if what not in ("open", "all"):
+            raise RulesError(
+                f"show is 'open' or 'all', not {show!r}: an entry is pending or it is "
+                "closed, and there is no third state to ask for.")
+        now = _now()
+        rows = list(self.cx.execute(
+            "SELECT * FROM v_task WHERE archived_at IS NULL"
+            + ("" if what == "all" else " AND status='pending'")))
+        q = (query or "").strip().lower()
+        if q:
+            rows = [r for r in rows
+                    if q in (r["title"] or "").lower()
+                    or q in (r["body"] or "").lower()
+                    or q in (r["display_id"] or "").lower()]
+        names = {c["consumer_id"]: c["name"] for c in
+                 self.cx.execute("SELECT consumer_id, name FROM consumer")}
+        groups: dict = {}
+        for r in rows:
+            head = (names.get(r["consumer_id"], "?") if by == "owner"
+                    else (r["created_by"] or "").strip() or "(unsigned)")
+            groups.setdefault(_fold(head), {"group": head, "entries": []})
+            # THE BODY TRAVELS, and it is the difference between a list and a
+            # console. Deciding what to do with an entry means reading it, and
+            # a page that made you open each one to see the text would be a
+            # page you answer by guessing from the title.
+            d = self._task_brief(r, now)
+            d["body"] = r["body"]
+            groups[_fold(head)]["entries"].append(d)
+        out = []
+        for g in sorted(groups.values(), key=lambda g: _fold(g["group"])):
+            g["entries"].sort(key=lambda d: (d["status"] != "pending",
+                                             0 if d["urgent"] else 1,
+                                             d["created_at"]))
+            g["open"] = sum(1 for d in g["entries"] if d["status"] == "pending")
+            g["closed"] = len(g["entries"]) - g["open"]
+            out.append(g)
+        return {"project": self.name, "group_by": by, "show": what,
+                "groups": out,
+                "open": sum(g["open"] for g in out),
+                "closed": sum(g["closed"] for g in out),
+                "count": sum(len(g["entries"]) for g in out),
+                "query": q}
 
     def prune_tasks(self, before: str, actor: str = "web ui") -> dict:
         """ARCHIVE what is finished and older than a date. It marks, it does

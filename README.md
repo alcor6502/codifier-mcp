@@ -1,6 +1,6 @@
 # Codifier MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-6.2.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-7.0.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-16%20tools-8A63D2.svg">
 
 **The rules your project runs on, in a registry instead of scattered Markdown —
 so a chat can answer "which rules am I under?" in one call.**
@@ -850,7 +850,7 @@ In this order:
 3. **The password.** There is no recovery: set a new `WEB_UI_PASSWORD` and Apply.
 4. **A session that ended.** Every restart of the service invalidates every
    session, deliberately — the session secret is generated at boot and stored
-   nowhere. So does an hour of inactivity.
+   nowhere. So do eight hours of inactivity.
 
 </details>
 
@@ -939,8 +939,10 @@ it now is — the same digest contract the MCP tool used to carry.
 Beside it, readings that write nothing: the rules in force for a chosen
 consumer, exactly as that consumer's chat reads them, brief first; a rule's
 detail with its history and the diff between two versions; and the state of the
-project. And two pages that write without touching a rule: **codes**, where a
-one-time authorisation code is minted, and **profile**.
+project. And three pages that write without touching a rule: **codes**, where
+one-time authorisation codes are minted — press the button again and the new
+one joins the ones already on the page, two spaces apart, so three codes are
+one drag — **profile**, and **log**.
 
 **The profile page is where the project talks about itself** — its `brief`, its
 `specs` and its `queue_cap` — and since v5.0.0 that is the only place they can
@@ -955,14 +957,26 @@ are machinery and a tool manages them, a person is not. The mark that says whose
 desk hears about a proposal grants nothing at all: what opens this UI is the
 password, and this only says where an email goes.
 
-The password is asked for again on every gesture that WRITES — deciding the lot,
-minting a code, writing the profile, adding or retiring a person, writing where
-their post goes — because a session alone is a browser left open on the iPad. It is *not* asked again for the backup or the log: a
-`VACUUM INTO` changes nothing and the log is a ring in memory, and a password
-retyped where it defends nothing only teaches the hand to type it without
-looking. One password, from the template, and one hour of inactivity. A restart
-of the service invalidates every session, deliberately: the session secret is
-generated at boot and stored nowhere.
+**The log page is the whole task log at once** — every entry in the project,
+grouped by the desk it sits on or by who sent it, open only or open and closed,
+with the two gestures a log needs under each one: close it, or correct it and
+hand it to another desk. Nothing on it is capped and every entry carries its
+body, because a page that showed you nine of eleven is a page you cannot work
+from. Gestures made there are signed `web ui` in the history — what it
+witnessed is that somebody closed this at the admin page, and a field that
+typed a name would be a field that typed somebody else's.
+
+**The password is typed once, at the door, and nowhere else.** Until v7.0.0
+every writing gesture asked for it again, on the ground that a session alone is
+a browser left open on the iPad; that guard is gone, for the reason the design
+had already written against it — a secret typed five times an hour is typed
+without looking, and a password typed without looking defends nothing while
+costing every gesture. What is left is one password from the template, a signed
+cookie, **eight hours of inactivity**, and a port that does not leave the
+tailnet. A restart of the service invalidates every session, deliberately: the
+session secret is generated at boot and stored nowhere. The one-time codes are
+untouched — they guard the MCP surface, where the caller is a chat and not a
+person.
 
 **What is not here any more, since v4.0.0: the deployment page.** It created
 projects, rekeyed them and printed their codes, and all three died with the
@@ -1038,8 +1052,8 @@ still taken, a retirement that would leave a rule binding nobody is refused. A
 page with its own copy of those rules would be a page with one of them out of
 step. The flag also stands in for the one-time code, and for the reason that
 code exists: it is there so a chat holding the admin code cannot modify alone,
-and on the page there is no chat — there is a person who has just retyped a
-password no tool carries.
+and on the page there is no chat — there is a person who came through a door no
+tool can open.
 
 **There is no on/off switch, anywhere.** The two ways to be quiet are both
 ABSENCES: no `SMTP_HOST` on the container, so nothing is ever sent; no address

@@ -144,6 +144,13 @@ LOG_RING_LINES = 200
 # pressed for.
 CODE_RUN_MAX = 10
 
+# WHAT THIS PAGE SIGNS, in one place. Every gesture made here goes into the
+# history under this name — a person's own name would have to be typed, and a
+# field that types a signature is a field that types somebody else's. What the
+# history witnessed is that it was done at the admin page, by whoever holds
+# the password, and that is what this says.
+WEB_SIGNATURE = "web ui"
+
 
 class LogRing(logging.Handler):
     """The last lines of the service's own log, IN MEMORY.
@@ -287,6 +294,14 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
    whitespace, so without it the two spaces that make the run readable — and
    that survive the paste — would arrive as one. `break-all` because the run
    is long and an iPad is narrow. */
+/* One entry of the log: a card, so that where one ends and the next begins is
+   readable on a phone as well as at the desk — the two gestures under it act
+   on THAT entry, and a run of them with no edge is a page you close the wrong
+   one from. */
+div.entry { border: 1px solid var(--line); border-radius: 8px;
+            padding: .6rem .8rem; margin: .6rem 0; background: var(--raised); }
+div.entry form { margin: .3rem 0; }
+div.entry details { margin-top: .4rem; }
 code.run { white-space: pre-wrap; overflow-wrap: break-all;
            display: block; padding: .5rem .6rem; line-height: 1.7; }
 /* Rule bodies are prose, and they used to run off the side of an iPad: a
@@ -516,6 +531,7 @@ def build(*, registry, log, master: str, refusal, fault,
     def _project_nav(name: str) -> str:
         n = _esc(name)
         return (f"<a href='/p/{n}/batch'>lot</a><a href='/p/{n}/rules'>rules</a>"
+                f"<a href='/p/{n}/tasks'>log</a>"
                 f"<a href='/p/{n}/profile'>profile</a>"
                 f"<a href='/p/{n}/people'>people</a>"
                 f"<a href='/p/{n}/codes'>codes</a>"
@@ -1294,6 +1310,211 @@ def build(*, registry, log, master: str, refusal, fault,
             log.info("refused web people: %s", e)
             return say(message=str(e), status=400)
 
+    # ---------- the log: every entry, both ends, and the two gestures --------
+    #
+    # WHY THIS PAGE EXISTS, and it is not convenience. Until v7.0.0 the only
+    # cross view of the log was `tasks_overview` on the MCP surface: one desk
+    # per block, pending only, capped, and behind the admin code — so the
+    # person who owns the project read their own log through a chat, one desk
+    # at a time, and could close an entry only by asking a chat to do it. The
+    # two gestures a log needs — close it, correct it — were reachable from
+    # everywhere except the page where the person actually is.
+    #
+    # THE ENTRIES CARRY THEIR BODIES, and nothing here is capped. A page that
+    # showed nine of eleven and said so is a page you cannot work from, and an
+    # entry you must open to read is an entry you answer from its title.
+    #
+    # ⚠ WHAT THE PAGE SIGNS. Every gesture from here is signed `web ui`, the
+    # same signature the other pages write, and it goes into the history where
+    # it stays. It is the honest one: what the history witnessed is that
+    # somebody closed this at the admin page, and the project has one person
+    # who can be there. A menu of names would let the page write somebody
+    # else's signature, which is the one thing a signature must not allow.
+    #
+    # ⚠ AND IT PASSES `admin=True`, like every other gesture on this page: the
+    # engine's own guard is "closing somebody else's task takes the admin
+    # code", and the code is what a CHAT presents to prove it is allowed. The
+    # person at this page has already presented the password at the door.
+
+    def _tasks_html(name: str, prj, *, by: str = "owner", show: str = "open",
+                    query: str = "", message: str = "", ok_msg: str = "") -> str:
+        board = prj.task_board(by, show, query)
+        act = f"/p/{_esc(name)}/tasks"
+        head = ((f"<p class='bad'>{_esc(message)}</p>" if message else "")
+                + (f"<p class='ok'>{_esc(ok_msg)}</p>" if ok_msg else ""))
+        # The view is a GET form, so a view is a URL: it can be bookmarked, it
+        # survives a reload, and the POST that follows carries the same three
+        # values back so that acting on an entry leaves you where you were
+        # rather than at the top of everything.
+        def _opt(val, cur, label):
+            return (f"<option value='{_esc(val)}'{' selected' if val == cur else ''}>"
+                    f"{_esc(label)}</option>")
+        controls = (
+            f"<form method='get' action='{act}'>"
+            f"<label for='by'>Group by</label>"
+            f"<select id='by' name='by'>{_opt('owner', by, 'whose desk it is on')}"
+            f"{_opt('sender', by, 'who sent it')}</select>"
+            f"<label for='show'>Show</label>"
+            f"<select id='show' name='show'>{_opt('open', show, 'open only')}"
+            f"{_opt('all', show, 'open and closed')}</select>"
+            f"<label for='q'>Containing (blank = everything)</label>"
+            f"<input id='q' name='q' value='{_esc(query)}'>"
+            f"<p><button type='submit'>Show</button></p></form>")
+
+        def _carry() -> str:
+            return (f"<input type='hidden' name='by' value='{_esc(by)}'>"
+                    f"<input type='hidden' name='show' value='{_esc(show)}'>"
+                    f"<input type='hidden' name='q' value='{_esc(query)}'>")
+
+        people = _consumers(prj)
+
+        def _entry(d: dict) -> str:
+            flags = ("<b class='bad'> URGENT</b>" if d.get("urgent") else "") \
+                + (f"<span class='note'> · {_esc(d['stale'])}</span>"
+                   if d.get("stale") else "")
+            who = (f"<p class='note'>{_esc(d['kind'])} · from "
+                   f"{_esc(d['created_by'])} · on {_esc(d['owner'])}'s desk · "
+                   f"opened {_esc(d['created_at'])}</p>")
+            body = f"<p>{_esc(d['body'])}</p>"
+            if d["status"] != "pending":
+                said = d.get("outcome") or d.get("reason_dropped") or ""
+                return (f"<div class='entry'><b>{_esc(d['id'])}</b> "
+                        f"{_esc(d['title'])}{flags}{who}{body}"
+                        f"<p class='note'>{_esc(d['status'])} on "
+                        f"{_esc(d['closed_at'])} — {_esc(said)}</p></div>")
+            opts = "".join(
+                f"<option value='{_esc(n)}'"
+                f"{' selected' if n == d['owner'] else ''}>{_esc(n)}</option>"
+                for n in people)
+            # TWO FORMS AND NOT ONE WITH TWO BUTTONS, because each needs its own
+            # required field: `outcome` completes it and `reason` drops it, the
+            # engine takes exactly one of the two, and a single form could not
+            # demand the right one. ⚠ There is no undo — closed is closed — so
+            # the field that must be filled IS the confirmation, and it is
+            # meant to be: a bare button next to an entry is a mis-tap that
+            # writes history.
+            close = (f"<form method='post' action='{act}'>{_carry()}"
+                     f"<input type='hidden' name='id' value='{_esc(d['id'])}'>"
+                     f"<input type='hidden' name='action' value='complete'>"
+                     f"<input name='outcome' required "
+                     f"placeholder='what came of it — this is the closure'>"
+                     f"<p><button type='submit'>Complete</button></p></form>"
+                     f"<form method='post' action='{act}'>{_carry()}"
+                     f"<input type='hidden' name='id' value='{_esc(d['id'])}'>"
+                     f"<input type='hidden' name='action' value='drop'>"
+                     f"<input name='reason' required "
+                     f"placeholder='why it will not be done'>"
+                     f"<p><button type='submit'>Drop</button></p></form>")
+            amend = (f"<details><summary>Correct it, or hand it to another "
+                     f"desk</summary>"
+                     f"<form method='post' action='{act}'>{_carry()}"
+                     f"<input type='hidden' name='id' value='{_esc(d['id'])}'>"
+                     f"<input type='hidden' name='action' value='amend'>"
+                     f"<label>Title</label>"
+                     f"<input name='title' value='{_esc(d['title'])}'>"
+                     f"<label>Body</label>"
+                     f"<textarea name='body' rows='4'>{_esc(d['body'])}</textarea>"
+                     f"<label>Desk</label>"
+                     f"<select name='consumer'>{opts}</select>"
+                     f"<p><button type='submit'>Write the correction</button></p>"
+                     f"</form>"
+                     f"<p class='note'>Only what differs is written, and the "
+                     f"hand-over is named in the history, which keeps both "
+                     f"desks. Urgency is not here on purpose: it belongs to "
+                     f"whoever opened the entry.</p></details>")
+            return (f"<div class='entry'><b>{_esc(d['id'])}</b> "
+                    f"{_esc(d['title'])}{flags}{who}{body}{close}{amend}</div>")
+
+        blocks = "".join(
+            f"<h2>{_esc(g['group'])} — {_esc(g['open'])} open"
+            + (f", {_esc(g['closed'])} closed" if g["closed"] else "") + "</h2>"
+            + "".join(_entry(d) for d in g["entries"])
+            for g in board["groups"])
+        if not board["groups"]:
+            blocks = ("<p class='note'>Nothing to show. With <i>open only</i> "
+                      "that is the good outcome: no desk owes anything.</p>")
+        tally = (f"<p class='note'>{_esc(board['count'])} shown — "
+                 f"{_esc(board['open'])} open, {_esc(board['closed'])} closed — "
+                 f"grouped by {_esc(board['group_by'])}. Nothing here is "
+                 f"capped: this is the whole log, minus what the prune "
+                 f"archived.</p>")
+        return head + controls + tally + blocks
+
+    async def tasks_page(request):
+        if not _session_ok(request):
+            return _guest(request)
+        name = request.path_params["project"]
+        prj = _open(name)
+        if prj is None:
+            return _no_project(name)
+        q = request.query_params
+        by = (q.get("by") or "owner").strip()
+        show = (q.get("show") or "open").strip()
+        query = (q.get("q") or "").strip()
+        try:
+            body = _tasks_html(name, prj, by=by, show=show, query=query)
+        except fault:
+            raise
+        except refusal as e:
+            log.info("refused web tasks: %s", e)
+            body = _tasks_html(name, prj, message=str(e))
+        response = HTMLResponse(_page(f"{name} — the log", body,
+                                      nav=_project_nav(name)))
+        _issue(response)
+        return response
+
+    async def tasks_action(request):
+        """Close an entry, drop it, or correct it — the three gestures of a
+        log, told apart by a hidden field, all three landing back on the view
+        they were made from."""
+        if not _session_ok(request):
+            return _guest(request)
+        name = request.path_params["project"]
+        prj = _open(name)
+        if prj is None:
+            return _no_project(name)
+        form = await request.form()
+        by = (form.get("by") or "owner").strip()
+        show = (form.get("show") or "open").strip()
+        query = (form.get("q") or "").strip()
+        tid = (form.get("id") or "").strip()
+
+        def say(message="", ok_msg="", status=200):
+            return HTMLResponse(
+                _page(f"{name} — the log",
+                      _tasks_html(name, prj, by=by, show=show, query=query,
+                                  message=message, ok_msg=ok_msg),
+                      nav=_project_nav(name)), status_code=status)
+
+        what = (form.get("action") or "").strip()
+        if what not in ("complete", "drop", "amend"):
+            return say(message="Unknown action. Nothing was written.", status=400)
+        try:
+            if what == "amend":
+                v = prj.task_amend(tid, WEB_SIGNATURE,
+                                   title=(form.get("title") or "").strip(),
+                                   body=(form.get("body") or "").strip(),
+                                   consumer=(form.get("consumer") or "").strip(),
+                                   admin=True)
+                moved = (f" — handed over from {v['reassigned_from']}"
+                         if v.get("reassigned_from") else "")
+                log.info("task amended on the page: %s%s", v["id"], moved)
+                return say(ok_msg=f"{v['id']} corrected, on {v['owner']}'s "
+                                  f"desk{moved}.")
+            v = prj.task_close(
+                tid, WEB_SIGNATURE,
+                outcome=(form.get("outcome") or "").strip() if what == "complete" else "",
+                reason=(form.get("reason") or "").strip() if what == "drop" else "",
+                admin=True)
+            log.info("task closed on the page: %s — %s", v["id"], v["status"])
+            return say(ok_msg=f"{v['id']} is {v['status']}: "
+                              f"{v['outcome'] or v['reason']}")
+        except fault:
+            raise
+        except refusal as e:
+            log.info("refused web tasks: %s", e)
+            return say(message=str(e), status=400)
+
     def _profile_html(name: str, prj, message: str = "", ok_msg: str = "") -> str:
         prof = prj.profile()
         cap = prof["queue_cap"]
@@ -1443,5 +1664,7 @@ def build(*, registry, log, master: str, refusal, fault,
         Route("/p/{project}/rules", rules_page, methods=["GET"]),
         Route("/p/{project}/rule/{rule}", rule_page, methods=["GET"]),
         Route("/p/{project}/status", status_page, methods=["GET"]),
+        Route("/p/{project}/tasks", tasks_page, methods=["GET"]),
+        Route("/p/{project}/tasks", tasks_action, methods=["POST"]),
     ]
     return Starlette(routes=routes)

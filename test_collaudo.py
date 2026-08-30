@@ -1319,6 +1319,45 @@ yields("and the outcome is on it, which is why the sender stops re-sending",
        lambda: [t["outcome"] for t in
                 p.task_list("architect", authored=True)["closed_recent"]
                 if t["id"] == t1["id"]], ["done"])
+# THE BOARD: the whole log at once, and it is a DIFFERENT reading from the
+# overview — not pending-only, not capped per desk, and groupable by either end
+# of an entry. What each case here pins is the half a page cannot be written
+# against otherwise: that `sender` really groups on `created_by` and not on the
+# desk, that `all` really carries the closed ones, and that the entries carry
+# their BODIES, because a console that made you open each entry to read it is a
+# console you answer from the title.
+yields("the board groups by desk, and every desk with an entry is there — "
+       "the human's among them, which is the desk a chat cannot read",
+       lambda: sorted(g["group"] for g in p.task_board()["groups"]),
+       ["Alfredo", "advisory", "news"])
+yields("by SENDER it groups on who signed it, which is the other end",
+       lambda: sorted(g["group"] for g in
+                      p.task_board(group_by="sender")["groups"]),
+       ["architect"])
+yields("open is the default, and the closed ones are not in it",
+       lambda: all(d["status"] == "pending"
+                   for g in p.task_board()["groups"] for d in g["entries"]),
+       True)
+yields("`all` brings them back, closed ones included",
+       lambda: p.task_board(show="all")["closed"] > 0, True)
+yields("and every entry carries its body, which is what a console is for",
+       lambda: all("body" in d for g in p.task_board(show="all")["groups"]
+                   for d in g["entries"]), True)
+yields("the tally counts what it shows, and is not a second arithmetic",
+       lambda: (lambda b: b["count"] == sum(len(g["entries"]) for g in b["groups"])
+                and b["count"] == b["open"] + b["closed"])(
+                    p.task_board(show="all")), True)
+yields("a query filters on title, body and ID alike",
+       lambda: [d["id"] for g in p.task_board(show="all", query="to reassign")
+                ["groups"] for d in g["entries"]], [t3])
+refused("a group_by that is neither end of an entry",
+        lambda: p.task_board(group_by="colour"), "'owner' or 'sender'")
+refused("and a show that is neither state",
+        lambda: p.task_board(show="archived"), "'open' or 'all'")
+yields("the refusal NAMES what was asked for, or it is a wall",
+       lambda: "colour" in _refusal(lambda: p.task_board(group_by="colour")),
+       True)
+
 yields("the overview sees every desk, humans included",
        lambda: sorted(d["consumer"] for d in p.task_overview()["desks"]),
        ["Alfredo", "advisory", "architect", "news"])

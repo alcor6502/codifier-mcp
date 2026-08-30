@@ -31,7 +31,9 @@ project's database, so it is good for that project and for no other. It is shown
 once and copied by hand into the chat, lives minutes, and is burned in the same
 transaction as the SUCCEEDED gesture — a refusal rolls back and does not consume
 it. Spent or expired it is nothing; alone it elevates nobody. Chained gestures
-mint one code per gesture, one at a time.
+mint one code per gesture — and since v7.0.0 the page mints them in a line:
+press the button once per code and they come back two spaces apart, so three
+gestures cost one visit and one copy.
 
 **One declared exception**, downward: closing or amending someone else's task
 takes the admin code ALONE. A task closed wrong reopens as a new task; a rule

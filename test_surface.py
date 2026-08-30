@@ -4049,13 +4049,14 @@ ok([(r[0], r[2]) for r in _POSTS] == [("/login", "login"), ("/logout", "logout")
                                       ("/p/{project}/batch", "batch_action"),
                                       ("/p/{project}/codes", "codes_mint"),
                                       ("/p/{project}/people", "people_action"),
-                                      ("/p/{project}/profile", "profile_action")],
-   "and exactly seven of them take POST: the door, the exit, and the five "
+                                      ("/p/{project}/profile", "profile_action"),
+                                      ("/p/{project}/tasks", "tasks_action")],
+   "and exactly eight of them take POST: the door, the exit, and the six "
    "gestures — the lot, minting a one-time code, writing the project's own "
-   "profile, looking after its PEOPLE, and the backup, which asks for no "
-   "master because it handles no secret. Renewal left with the expiry in "
-   "5.0.0; creating a project and rekeying it are not here either, because a "
-   "project is a line in a file",
+   "profile, looking after its PEOPLE, working the LOG, and the backup, which "
+   "handles no secret. Renewal left with the expiry in 5.0.0; creating a "
+   "project and rekeying it are not here either, because a project is a line "
+   "in a file",
    [(r[0], r[2]) for r in _POSTS])
 # Every writing route is UNDER a project, and that is the shape of "a project
 # is a database": a gesture that named no project would be a gesture on all of
@@ -4223,7 +4224,7 @@ for _name, _fn in _BUILD_FUNCS.items():
 # stayed at three. The equality fails on either mistake, and it fails saying
 # which name moved.
 ok(sorted(_GUARDED) == ["batch_action", "codes_mint", "people_action",
-                        "profile_action"],
+                        "profile_action", "tasks_action"],
    f"the writing handlers are exactly these, guarded: {sorted(_GUARDED)}",
    sorted(_GUARDED))
 
