@@ -96,6 +96,7 @@ import os
 import re
 import secrets
 import time
+from datetime import datetime
 from collections import deque
 
 # ---------------------------------------------------------------------
@@ -308,10 +309,21 @@ label small, label .hint { display: block; font-weight: 400; font-size: .94rem;
 label:has(input[type=checkbox]) { font-size: 1rem; font-weight: 500;
                                   color: var(--fg); margin: 0 0 .4rem; }
 
-input[type=password], input[type=text], input[type=email], select, textarea {
+/* ⚠ SELECTED BY WHAT IT IS NOT, and that is the fix rather than a style. This
+   rule listed the types — [type=password], [type=text] — and an <input> with
+   NO type attribute is a text field that matches none of them: it kept the
+   browser's default width, about 140px, in the middle of a page where every
+   other box is full width. That was the "ridiculously small box": half the
+   forms here write `<input name=…>` without a type, because a text field is
+   the default. Written as an exclusion it cannot happen again. */
+input:not([type=checkbox]):not([type=radio]):not([type=submit]),
+select, textarea {
   font: inherit; font-size: 1rem; padding: .65rem .8rem; min-height: 2.9rem;
   border: 1px solid var(--line); border-radius: 10px; background: var(--field);
   color: inherit; width: 100%; max-width: 34rem; }
+/* Inside a table cell the box is the cell: a max-width there leaves a column
+   half empty next to a value that does not fit. */
+td input { max-width: none; }
 /* ⚠ PROSE GETS ROOM. brief and specs are the identity of a project and of
    every consumer, they are read as markdown, and they were being written in a
    box three lines tall — which is how a paragraph gets written short because
@@ -391,6 +403,19 @@ div.md p:last-child { margin-bottom: .8rem; }
 .empty { color: var(--muted); font-style: italic; }
 
 .note { font-size: .94rem; color: var(--muted); }
+/* ⚠ URGENT is a TAG and not a banner. It was `.bad`, which carries a left rule,
+   a padded background and block spacing — an ornament designed for a sentence
+   on its own line, and beside a title it read as a stray red bar. */
+.tag { display: inline-block; font-size: .82rem; font-weight: 700;
+       letter-spacing: .04em; padding: .1rem .45rem; border-radius: 6px;
+       vertical-align: .1em; margin-left: .45rem;
+       background: var(--bad-bg); color: var(--bad); }
+/* A field and the button that acts on it belong on ONE line: stacked, three
+   entries fill a screen with two boxes each and the page stops being a list. */
+form.row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap;
+           margin: .5rem 0; }
+form.row input { flex: 1 1 18rem; max-width: none; }
+form.row button { flex: 0 0 auto; }
 .bad { border-left: 3px solid var(--bad); background: var(--bad-bg);
        color: var(--bad); padding: .75rem .9rem; border-radius: 0 10px 10px 0;
        font-size: 1rem; }
@@ -405,6 +430,22 @@ def _esc(v) -> str:
     engine — that was the decision — so this is the whole defence, and it is
     one function so that it can be looked for."""
     return html.escape("" if v is None else str(v), quote=True)
+
+
+def _when(stamp: str) -> str:
+    """A timestamp as a person reads one: `2026-Aug-30 11:04`.
+
+    The database keeps ISO-8601 in UTC and that is right — it sorts, it is
+    unambiguous, and every other reader of this file wants it. On a page it is
+    seventeen characters of machinery in the middle of a sentence. The format
+    is the vault's own, `%Y-%b-%d`, so a date copied off this page into a
+    document is already spelled the way that document spells dates."""
+    raw = (stamp or "").strip()
+    try:
+        return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").strftime(
+            "%Y-%b-%d %H:%M")
+    except ValueError:
+        return raw
 
 
 def _same(a: str, b: str) -> bool:
@@ -1062,18 +1103,18 @@ def build(*, registry, log, master: str, refusal, fault,
                      f"<p><code class='run'>{_esc('  '.join(run))}</code></p>")
         if minted:
             head += (f"<p class='note'>The last one is good until "
-                     f"{_esc(minted['expires_at'])} "
+                     f"{_esc(_when(minted['expires_at']))} "
                      f"({_esc(minted['minutes'])} minutes), for ONE gesture on "
                      f"<b>{_esc(minted['project'])}</b>. A refused gesture rolls "
                      f"it back and does not spend it. Press the button again for "
                      f"another, and it joins the line above.</p>")
         live = "".join(f"<tr><td>#{_esc(r['code_id'])}</td>"
-                       f"<td class='note'>minted {_esc(r['minted_at'])}</td>"
-                       f"<td>expires {_esc(r['expires_at'])}</td></tr>"
+                       f"<td class='note'>minted {_esc(_when(r['minted_at']))}</td>"
+                       f"<td>expires {_esc(_when(r['expires_at']))}</td></tr>"
                        for r in data["live"])
         spent = "".join(f"<tr><td>#{_esc(r['code_id'])}</td>"
-                        f"<td class='note'>minted {_esc(r['minted_at'])}</td>"
-                        f"<td class='note'>spent {_esc(r['spent_at'])}</td>"
+                        f"<td class='note'>minted {_esc(_when(r['minted_at']))}</td>"
+                        f"<td class='note'>spent {_esc(_when(r['spent_at']))}</td>"
                         f"<td>{_esc(r['spent_action'])}</td></tr>"
                         for r in data["spent"])
         return (head
@@ -1083,7 +1124,7 @@ def build(*, registry, log, master: str, refusal, fault,
                   "<label for='minutes'>Minutes it lives (blank = "
                 + _esc(data["default_minutes"]) + ")</label>"
                   "<input id='minutes' type='text' name='minutes' inputmode='numeric'>"
-                  "<p><button type='submit'>Mint"
+                  "<p><button class='go' type='submit'>Mint"
                 + (" another" if run else " a one-time code") + "</button>"
                 + ("&nbsp;&nbsp;<a href='/p/" + _esc(name) + "/codes'>start a "
                    "fresh line</a>" if run else "") + "</p></form>"
@@ -1463,7 +1504,7 @@ def build(*, registry, log, master: str, refusal, fault,
                      + f" · reached by {_esc(c['rules_in_force'])} rules in force"
                      + f" · {_esc(c['open_entries'])} open on its desk</p>")
             if c["retired"]:
-                body = (f"<p class='note'>Retired {_esc(c['retired_at'])} — "
+                body = (f"<p class='note'>Retired {_esc(_when(c['retired_at']))} — "
                         f"{_esc(c['reason'] or 'no reason recorded')}</p>"
                         f"<form method='post' action='{act}'>"
                         f"<input type='hidden' name='action' value='revive'>"
@@ -1752,19 +1793,19 @@ def build(*, registry, log, master: str, refusal, fault,
         people = _consumers(prj)
 
         def _entry(d: dict) -> str:
-            flags = ("<b class='bad'> URGENT</b>" if d.get("urgent") else "") \
+            flags = ("<span class='tag'>URGENT</span>" if d.get("urgent") else "") \
                 + (f"<span class='note'> · {_esc(d['stale'])}</span>"
                    if d.get("stale") else "")
             who = (f"<p class='note'>{_esc(d['kind'])} · from "
                    f"{_esc(d['created_by'])} · on {_esc(d['owner'])}'s desk · "
-                   f"opened {_esc(d['created_at'])}</p>")
+                   f"opened {_esc(_when(d['created_at']))}</p>")
             body = f"<p>{_esc(d['body'])}</p>"
             if d["status"] != "pending":
                 said = d.get("outcome") or d.get("reason_dropped") or ""
                 return (f"<div class='entry'><b>{_esc(d['id'])}</b> "
                         f"{_esc(d['title'])}{flags}{who}{body}"
                         f"<p class='note'>{_esc(d['status'])} on "
-                        f"{_esc(d['closed_at'])} — {_esc(said)}</p></div>")
+                        f"{_esc(_when(d['closed_at']))} — {_esc(said)}</p></div>")
             opts = "".join(
                 f"<option value='{_esc(n)}'"
                 f"{' selected' if n == d['owner'] else ''}>{_esc(n)}</option>"
@@ -1776,18 +1817,18 @@ def build(*, registry, log, master: str, refusal, fault,
             # the field that must be filled IS the confirmation, and it is
             # meant to be: a bare button next to an entry is a mis-tap that
             # writes history.
-            close = (f"<form method='post' action='{act}'>{_carry()}"
+            close = (f"<form class='row' method='post' action='{act}'>{_carry()}"
                      f"<input type='hidden' name='id' value='{_esc(d['id'])}'>"
                      f"<input type='hidden' name='action' value='complete'>"
                      f"<input name='outcome' required "
                      f"placeholder='what came of it — this is the closure'>"
-                     f"<p><button type='submit'>Complete</button></p></form>"
-                     f"<form method='post' action='{act}'>{_carry()}"
+                     f"<button class='go' type='submit'>Complete</button></form>"
+                     f"<form class='row' method='post' action='{act}'>{_carry()}"
                      f"<input type='hidden' name='id' value='{_esc(d['id'])}'>"
                      f"<input type='hidden' name='action' value='drop'>"
                      f"<input name='reason' required "
                      f"placeholder='why it will not be done'>"
-                     f"<p><button type='submit'>Drop</button></p></form>")
+                     f"<button type='submit'>Drop</button></form>")
             amend = (f"<details><summary>Correct it, or hand it to another "
                      f"desk</summary>"
                      f"<form method='post' action='{act}'>{_carry()}"
@@ -2082,7 +2123,8 @@ def build(*, registry, log, master: str, refusal, fault,
                   "force, or nothing is written. There is no tool for this "
                   "page, and that is the decision — what is fundative has "
                   "none, the way what is catastrophic has none.</p>"
-                + (f"<p class='note'>Last written {_esc(prof['updated_at'])}.</p>"
+                + (f"<p class='note'>Last written "
+                   f"{_esc(_when(prof['updated_at']))}.</p>"
                    if prof["updated_at"] else
                    "<p class='note'>Never written: this project has no profile "
                    "yet, which is a legitimate state and not a fault.</p>"))
