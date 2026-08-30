@@ -324,6 +324,18 @@ select, textarea {
 /* Inside a table cell the box is the cell: a max-width there leaves a column
    half empty next to a value that does not fit. */
 td input { max-width: none; }
+/* ⚠ A READONLY BOX MUST NOT LOOK LIKE AN EMPTY ONE WAITING FOR YOU. The login
+   carries one — the account name, there for the password managers — and drawn
+   like every other field it read as a question: "do I have to type this?".
+   Alfredo asked exactly that. Same shape, no cursor, and plainly not yours to
+   fill. */
+/* ⚠ The selector has to be as specific as the one above it, or it loses in
+   silence: `input:not(a):not(b):not(c)` counts as three classes, and a bare
+   [readonly] is one. It looked exactly like an editable box for one round of
+   screenshots. */
+input[readonly]:not([type=checkbox]):not([type=radio]) {
+  background: var(--raised); color: var(--muted); cursor: default;
+  border-style: dashed; }
 /* ⚠ PROSE GETS ROOM. brief and specs are the identity of a project and of
    every consumer, they are read as markdown, and they were being written in a
    box three lines tall — which is how a paragraph gets written short because
@@ -607,10 +619,13 @@ def _login_page(message: str = "") -> str:
     warn = f"<p class='bad'>{_esc(message)}</p>" if message else ""
     return _page("Sign in", f"""{warn}
 <form method="post" action="/login">
-  <label for="username">Account</label>
+  <label for="username">Account<span class="hint">Fixed, and not something to
+  type: it is here only so a password manager has a name to file the entry
+  under. There is one user.</span></label>
   <input id="username" type="text" name="username" value="codifier"
-         autocomplete="username" readonly>
-  <label for="master">Password</label>
+         autocomplete="username" readonly tabindex="-1">
+  <label for="master">Password<span class="hint">The one from
+  <code>WEB_UI_PASSWORD</code> on the container.</span></label>
   <input id="master" type="password" name="master" autocomplete="current-password"
          required autofocus>
   <p><button class="go" type="submit">Sign in</button></p>
@@ -618,10 +633,10 @@ def _login_page(message: str = "") -> str:
 <p class="note">Typed once, here, and not again: every page behind this one
 takes the session and nothing else. Eight hours of inactivity end it, and so
 does a restart of the service.</p>
-<p class="note">The account name is fixed — there is one — and it is on the form
-so that a password manager has something to file the entry under. ⚠ If yours
-still does not offer to save it, the reason is the plain <code>http://</code>
-address: browsers do not keep passwords typed over one.</p>""")
+<p class="note">⚠ If your password manager still does not offer to save this,
+the reason is the plain <code>http://</code> address: browsers do not keep
+passwords typed over one. The cure is an https address for this port from
+inside the tailnet, not anything on this page.</p>""")
 
 
 # =====================================================================
@@ -1586,10 +1601,24 @@ def build(*, registry, log, master: str, refusal, fault,
                f"<option value='skill'>skill</option>"
                f"<option value='human'>person</option></select>"
                f"<label for='cbrief'>Brief"
-               f"<span class='hint'>Optional now, and written later on the "
-               f"card below. Ignored for a person. Markdown.</span></label>"
+               f"<span class='hint'>Who it is and what it is for. Optional here "
+               f"— the card below writes it too, with a preview. Ignored for a "
+               f"person, who has neither. Markdown.</span></label>"
                f"<textarea id='cbrief' name='brief' class='short'></textarea>"
-               f"<p><button class='go' type='submit'>Add</button></p></form>")
+               f"<label for='cspecs'>Specs"
+               f"<span class='hint'>Its living facts. Same three sentences as "
+               f"above.</span></label>"
+               f"<textarea id='cspecs' name='specs' class='short'></textarea>"
+               f"<p><button class='go' type='submit'>Add</button></p></form>"
+               f"<p class='note'>⚠ <b>What cannot be changed afterwards, and "
+               f"where the refusal comes from.</b> The KIND is fixed at "
+               f"creation: a chat that became a skill would be a row whose "
+               f"history describes two different things. And a PERSON never "
+               f"carries a brief or specs — that one is the database's, a "
+               f"CHECK on the table, not this page being careful: they already "
+               f"know who they are, and two writable fields nobody reads are "
+               f"the same disease as an address on a chat. Everything else "
+               f"about any consumer is written from here.</p>")
 
         if people:
             rows = "".join(
@@ -1673,8 +1702,10 @@ def build(*, registry, log, master: str, refusal, fault,
             if what == "create":
                 kind = (form.get("kind") or "chat").strip()
                 fields = {"kind": kind}
-                if kind != "human" and (form.get("brief") or "").strip():
-                    fields["brief"] = (form.get("brief") or "").strip()
+                if kind != "human":
+                    for f in ("brief", "specs"):
+                        if (form.get(f) or "").strip():
+                            fields[f] = (form.get(f) or "").strip()
                 v = prj.amend_project("consumer", who, "create", fields,
                                       actor=WEB_SIGNATURE, on_the_page=True)
                 return say(ok_msg=_said(v), editing=v["name"])
