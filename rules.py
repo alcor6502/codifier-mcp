@@ -5318,6 +5318,21 @@ class Project:
         """Amend an OPEN task: title, body, or `consumer` to reassign — the
         reassignment is named in the story, which keeps both owners.
 
+        TWO ENDS MAY AMEND IT: the desk it sits on, and WHOEVER SENT IT. Until
+        v7.0.0 only the desk could, and the sender who had written the wrong
+        thing had no way back — they could open a second entry, which leaves
+        the first one standing, or ask for the admin code, which is the
+        credential a chat should not be reaching for to fix its own typo. The
+        entry belongs to both ends: the one who wrote it and the one who owes
+        it. This is the same doctrine `task_close` already carries for a
+        message, said about the other gesture.
+
+        ⚠ `created_by` is a SIGNATURE and not a pointer — on a task anyone may
+        sign anything — so this door is worth exactly what a signature is
+        worth, which is what it was already worth for closing a message. What
+        it is NOT is a way past the admin code for a THIRD party: a name that
+        is neither end is refused, and the refusal names both.
+
         `urgent` has no parameter here, and that is not an oversight: urgency
         belongs to whoever created the task, and a door that let the receiver
         clear it would put the lever in the hand of whoever has an interest in
@@ -5333,10 +5348,13 @@ class Project:
             raise RulesError("`by` is required: an amendment is signed.")
         if row["status"] != "pending":
             raise RulesError(f"{row['display_id']} is {row['status']}: closed is closed.")
-        if not admin and _fold(who) != _fold(owner["name"]):
+        if not admin and _fold(who) not in (_fold(owner["name"]),
+                                            _fold(row["created_by"] or "")):
             raise RulesError(
-                f"{row['display_id']} belongs to {owner['name']}: amending somebody "
-                f"else's {self._kind_of(row)['label']} takes the admin code in `key`.")
+                f"{row['display_id']} is between {row['created_by']} and "
+                f"{owner['name']}: a {self._kind_of(row)['label']} is amended by its "
+                "desk or by the one who sent it, and anybody else takes the admin "
+                "code in `key`.")
         signer = self.cx.execute("SELECT * FROM consumer WHERE lower(name)=?",
                                  (_fold(who),)).fetchone()
         if signer is not None:

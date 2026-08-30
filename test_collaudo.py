@@ -1303,6 +1303,30 @@ refused("closing with neither", lambda: p.task_close(t2, "advisory"),
         "exactly one of the two")
 allowed("dropping costs a reason, and that is the whole gesture",
         lambda: p.task_close(t2, "advisory", reason="the desk that owns it changed"))
+# BOTH ENDS MAY AMEND IT, and the sender's end is the one that was missing:
+# until v7.0.0 whoever had written the wrong thing could only open a SECOND
+# entry — which leaves the first standing on somebody's desk — or reach for the
+# admin code to fix their own typo.
+_ta = p.task_add("advisory", "wrong from the start", "and wrongly worded",
+                 "architect")["id"]
+allowed("the SENDER amends what they sent, with no admin code",
+        lambda: p.task_amend(_ta, "architect", title="right from now on"))
+yields("and the correction is really on the entry",
+       lambda: p.task_get([_ta])["tasks"][0]["title"], "right from now on")
+allowed("the desk it sits on still amends it too",
+        lambda: p.task_amend(_ta, "advisory", body="reworded by the desk"))
+refused("a third party amends nothing without the admin code",
+        lambda: p.task_amend(_ta, "news", title="not mine to touch"),
+        "amended by its desk or by the one who sent it")
+yields("and the refusal names BOTH ends, or it is a wall",
+       lambda: (lambda s: "architect" in s and "advisory" in s)(
+           _refusal(lambda: p.task_amend(_ta, "news", title="x"))), True)
+allowed("the sender may hand it to another desk as well",
+        lambda: p.task_amend(_ta, "architect", consumer="news"))
+allowed("and the admin code still opens it for anybody",
+        lambda: p.task_amend(_ta, "nobody at all", title="by the admin code",
+                             admin=True))
+
 t3 = p.task_add("advisory", "to reassign", "b", "architect")["id"]
 moved = allowed("a reassignment is named",
                 lambda: p.task_amend(t3, "advisory", consumer="news"))

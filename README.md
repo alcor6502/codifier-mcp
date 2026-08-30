@@ -1100,8 +1100,37 @@ a **human who carries an address** emails them — see *Notifications* below.
 **Closing costs a sentence**: `tasks_close`
 takes an `outcome` that completes it or a `reason` that drops it, exactly one of
 the two, and the refusal is in the schema as well as at the door. **Closed is
-closed** — an open task is amended freely, its owner included, and a closed one
-not at all.
+closed** — an open entry is amended, a closed one not at all. **Both ends may
+amend an open one**: the desk it sits on and whoever SENT it; anybody else
+takes the admin code. Until v7.0.0 only the desk could, and the sender who had
+written the wrong thing had no way back except opening a second entry or
+reaching for a credential to fix their own typo.
+
+### A task and a message: ask who will close it, and why
+
+The log has two kinds of entry, and they are told apart by one question rather
+than by a list of properties.
+
+| | a **task** | a **message** |
+|---|---|---|
+| what it is | work that must happen | a condition that can pass |
+| who closes it | the desk that DID it | its desk **or the one who sent it** |
+| what closing means | somebody acted, and the outcome says what came of it | the condition is gone — possibly with nothing done |
+| closing words | always owed | may be omitted: the engine writes `closed by <who> on <date>` |
+| if nobody ever looks | it stays on the desk, and comes back marked stale | it may be opened and closed unseen, and that is correct |
+
+Work that must happen is a **task**, even when it reads like news. A condition
+that can stop mattering on its own is a **message**, even when it asks for
+attention — the tax monitor says a statement is missing, the statement
+arrives, and the same skill closes its own message on the next round.
+
+⚠ A **task** is also how one chat asks another for something (*look at this
+proposal and tell me what you think*). That is a request, not a
+`kind='message'`, and the two words are worth keeping apart: what makes it a
+task is that somebody has to answer it. ⚠ And a **message is not a push
+notification** — a chat sees its desk when it starts, so one opened and closed
+between two starts is one nobody will ever see. For something that has to be
+read regardless, open a task.
 
 **`urgent` belongs to whoever created the task** and cannot be changed by
 anyone afterwards, because the receiver is the party with an interest in

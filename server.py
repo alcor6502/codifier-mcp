@@ -621,16 +621,24 @@ def tasks_add(project: str, consumer: str, title: str, body: str,
     afterwards, because a door that let the receiver clear it would put the
     lever in the hand of the one with an interest in clearing it.
 
+    TASK OR MESSAGE? ASK WHO WILL CLOSE IT, AND WHY. A TASK is closed by the
+    desk that DID something: it waits until somebody acts, and the outcome
+    says what came of it. A MESSAGE is closed when the CONDITION that produced
+    it has passed — often by the sender, who is the one who finds out — and
+    nothing need have been done at all. Work that must happen is a task, even
+    when it reads like news; a condition that can stop mattering on its own is
+    a message, even when it asks for attention. Both sit on the same desk and
+    arrive in the same list; `kind` on the verdict tells them apart.
+
     `kind` IS WHAT YOU OPEN. Left out you get a task, exactly as before, so
     every call written before kinds existed still means what it meant. Pass
     `'message'` and you get one instead — `MS-0001`, a numbering of its own,
-    and THE SENDER MAY CLOSE IT. A message is for a condition that DECAYS: the
-    reminder stops because the thing happened, and whoever sent it is usually
-    the one who finds out. Two guards come with it, and both are about the
-    CLOSING rather than the opening — the sender must be a live consumer of
-    this project, spelled as the registry spells it, and the desk must be
-    somebody else. A word that is not a kind is refused with the list of the
-    ones that are.
+    and THE SENDER MAY CLOSE IT, which is the only power a message has that a
+    task does not. Two guards come with it, and both are about the CLOSING
+    rather than the opening — the sender must be a live consumer of this
+    project, spelled as the registry spells it, and the desk must be somebody
+    else. A word that is not a kind is refused with the list of the ones that
+    are.
 
     ⚠ A MESSAGE IS NOT A PUSH NOTIFICATION. A chat sees its desk when it
     starts, and between two starts a day can pass: one opened and closed in
@@ -639,13 +647,15 @@ def tasks_add(project: str, consumer: str, title: str, body: str,
 
     A TASK IS A CHANNEL WITH TWO READERS
  — the desk it sits on and the hand
-    that opened it — and that makes it two things rather than one. It is a
-    MESSAGE between chats: `look at this proposal and tell me what you think`,
-    and an open proposal may be cited in the body for exactly that. It is also
-    the way to find out WHETHER ANOTHER CHAT DID THE WORK: open the task, then
-    read it back with `tasks_list(authored=True)` and see whether it was closed
-    and with what outcome. Neither needs a new tool; what was missing was the
-    name for it.
+    that opened it — and that makes it two things rather than one. It carries
+    a REQUEST from one chat to another: `look at this proposal and tell me
+    what you think`, and an open proposal may be cited in the body for exactly
+    that. ⚠ That is a request and not a `kind='message'`, and the words are
+    worth keeping apart: what makes it a task is that somebody has to answer
+    it. It is also the way to find out WHETHER ANOTHER CHAT DID THE WORK: open
+    the task, then read it back with `tasks_list(authored=True)` and see
+    whether it was closed and with what outcome. Neither needs a new tool;
+    what was missing was the name for it.
 
     Opening one for a HUMAN who carries an address POSTS IT TO THEM, since
     5.0.0 — WITH ITS TEXT: the ID and the title in the subject, and in the
@@ -781,9 +791,13 @@ def tasks_amend(project: str, id: str, by: str, title: str = "", body: str = "",
     desk — the reassignment is named in the story, which keeps both owners.
     Only what you pass changes.
 
+    TWO ENDS MAY AMEND IT: the desk it sits on, and WHOEVER SENT IT — the
+    sender who wrote the wrong thing used to have no way back except opening a
+    second entry or reaching for the admin code. Anybody else still takes the
+    admin code in `key`, and the refusal names both ends.
+
     `urgent` has no parameter here, and that is not an oversight: it belongs to
-    whoever created the task, and that door does not exist. Amending a task you
-    do not own takes the admin code in `key`, like closing one."""
+    whoever created the task, and that door does not exist."""
     admin = bool((key or "").strip())
     prj = _admin(project, key) if admin else _project(project)
     out = prj.task_amend(id, by, title=title, body=body, consumer=consumer,
