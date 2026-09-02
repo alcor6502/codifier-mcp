@@ -715,7 +715,7 @@ refused("a task citing a DENIED rule", lambda: p.task_add(
 p = project()
 first = p.task_add("architect", "the first errand", "b", "architect")["id"]
 refused("a task citing a task that was never opened", lambda: p.task_add(
-    "architect", "t", "see (TK-9999)", "architect"), "not a task in this project")
+    "architect", "t", "see (TK-9999)", "architect"), "not a task or message in this project")
 allowed("a task citing an OPEN task",
         lambda: p.task_add("architect", "t", f"see ({first})", "architect"))
 p.task_close(first, "architect", outcome="done")
@@ -1607,6 +1607,33 @@ refused("and MS IS visible to the sanitiser: a bare ID is still refused",
         lambda: p.task_add("advisory", "see MS-0001 for the rest", "a body",
                            "architect"),
         "MS-0001")
+
+# ---- 2b. THE MANUAL PROMISES `(MS-0001)`, AND THE ENGINE REFUSED IT ---------
+# "messages as (MS-0001)", says the model page — and until 7.1.1 the door told
+# the log from the rules with `TASK_PREFIX` alone, so a message citation was
+# looked up among the RULES and refused as `never defined`: a message that
+# existed, called non-existent. Three readers had the same defect — the door,
+# the expansion, and the sweep — and each is measured here on its own.
+msg = p.task_add("architect", "a message to cite", "a body", "advisory",
+                 kind="message")["id"]
+allowed("a task may cite a MESSAGE, as the manual says",
+        lambda: p.task_add("advisory", "t", f"see ({msg})", "architect"))
+yields("and reading puts the message's title in, not 'never defined'",
+       lambda: p._expand(f"see ({msg})"), f"see ({msg} — a message to cite)")
+allowed("the gloss the registry writes for a message, pasted straight back",
+        lambda: p.task_add("advisory", "t", f"see ({msg} — a message to cite)",
+                           "architect"))
+refused("a message that was never opened, named for what it is",
+        lambda: p.task_add("advisory", "t", "see (MS-0999)", "architect"),
+        "not a task or message")
+yields("and a pointer at it reads as 'no such message' while reading carries on",
+       lambda: p._expand("see (MS-0999)"), "see (MS-0999 — ⚠ no such message)")
+refused("a RULE citing a message is refused the way a rule citing a task is",
+        lambda: p.propose("VA", "R", "t", f"see ({msg})", "why", "all", "architect"),
+        "never a task")
+yields("and the sweep does not report a stored message citation as dangling",
+       lambda: [d for d in p.status()["dangling_citations"] if d["cites"] == msg],
+       [])
 
 # ---- 3. THE AUTOMATIC OUTCOME MUST NOT REFUSE ITSELF ------------------------
 # The sentence the engine writes goes through the SAME citation door as prose a

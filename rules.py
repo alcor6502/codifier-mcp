@@ -2544,14 +2544,14 @@ class Project:
                 "a DIFFERENT rule and nobody was told. Nothing is deleted here and nothing "
                 "is rewritten for you: say it in words — 'the old rule about mergers' — or "
                 "cite by its real ID the rule that replaced it.")
-        # TK IS IN THE SET, and it is not a domain: no project may declare it
-        # as one, so it would never arrive from `_domain_codes`. Without it a
-        # forgotten bracket around a TASK id — `see TK-0001` — went in, was
-        # stored, and was seen by nobody: `dangling_citations` reads citations
-        # and that is not one. It matters now more than it did, because since
-        # 4.0.1 pointing at a task is the commonest citation the log has, which
+        # THE LOG'S CODES ARE IN THE SET. Since 6.0.0 `TK` and `MS` are rows of
+        # `domain` with `reserved = 1`, and `_domain_codes` reads them on
+        # purpose — see its docstring. Without them a forgotten bracket around
+        # a log id — `see TK-0001` — went in, was stored, and was seen by
+        # nobody: `dangling_citations` reads citations and that is not one.
+        # Pointing at a task is the commonest citation the log has, which
         # makes the missing bracket the commonest typo.
-        doms = set(self._domain_codes()) | {TASK_PREFIX}
+        doms = set(self._domain_codes())
         stray = sorted({f"{m.group(1).upper()}-{m.group(2)}"
                         for m in RE_BARE.finditer(RE_CITE.sub(" ", text))
                         if m.group(1).upper() in doms})
@@ -2643,7 +2643,8 @@ class Project:
                 glossed.append((dst, m.group(2).strip()))
             if dst not in out:
                 out.append(dst)
-        cited_tasks = [d for d in out if d.startswith(TASK_PREFIX + "-")]
+        labels = self._log_labels()
+        cited_tasks = [d for d in out if d.split("-")[0] in labels]
         rule_ids = [d for d in out if d not in cited_tasks]
         found: dict = {}
         if cited_tasks and not in_task:
@@ -2658,7 +2659,7 @@ class Project:
         if gone:
             raise RulesError(
                 f"citation in `{field}` that does not resolve: {', '.join(gone)} "
-                f"{'are' if len(gone) > 1 else 'is'} not a task in this project. A CLOSED "
+                f"{'are' if len(gone) > 1 else 'is'} not a task or message in this project. A CLOSED "
                 "task may be cited — pointing back at work that is done is what the log is "
                 "for, and the reader is told the state when they read it — but one that was "
                 "never opened is a pointer nobody can follow.")
@@ -2717,7 +2718,7 @@ class Project:
             wanted = self._gloss(found[dst])
             if gloss == wanted or gloss.startswith(wanted + " ·"):
                 continue
-            what = "task" if dst.startswith(TASK_PREFIX + "-") else "rule"
+            what = labels.get(dst.split("-")[0], "rule")
             raise RulesError(
                 f"the text inside ({dst} — …) is not that {what}'s title. A citation is the "
                 f"ID alone; the title is added when you READ, so the only thing that may "
@@ -2770,20 +2771,21 @@ class Project:
         It never raises: what is in the database has already passed the door,
         and a reading path that can fail is a reading path that will."""
         now = _now()
+        labels = self._log_labels()
 
         def one(m):
             try:
                 rid = _norm_id(m.group(1))
             except RulesError:
                 return m.group(0)
-            if rid.startswith(TASK_PREFIX + "-"):
+            if rid.split("-")[0] in labels:
                 # A task can be cited too, and in a task's body it is the
                 # commonest citation there is. It never refuses: a broken
                 # pointer is NAMED in the text and reading carries on.
                 trow = self.cx.execute("SELECT * FROM v_task WHERE display_id=?",
                                        (rid,)).fetchone()
                 if trow is None:
-                    return f"({rid}{GLOSS_SEP}⚠ no such task)"
+                    return f"({rid}{GLOSS_SEP}⚠ no such {labels[rid.split('-')[0]]})"
                 mark = "" if trow["status"] == "pending" else f" · {trow['status']}"
                 return f"({rid}{GLOSS_SEP}{self._gloss(trow)}{mark})"
             row = self._rule_row(rid)
@@ -4677,19 +4679,21 @@ class Project:
         seen_fields = (("title", "title"), ("body", "body"), ("reason", "reason"),
                        ("source", "source"))
 
+        labels = self._log_labels()
+
         def _walk(where: str, text: str, label: str) -> None:
             for m in RE_CITE.finditer(text or ""):
                 try:
                     dst = _norm_id(m.group(1))
                 except RulesError:
                     continue
-                if dst.startswith(TASK_PREFIX + "-"):
+                if dst.split("-")[0] in labels:
                     # A task cited from a task is only broken when it resolves
                     # to nothing: a CLOSED one is a legitimate pointer back at
                     # work that is done, and reading labels its state.
                     if self._task_row(dst) is None:
                         dangling.append({"in": where, "field": label, "cites": dst,
-                                         "state": "no such task"})
+                                         "state": f"no such {labels[dst.split('-')[0]]}"})
                     continue
                 target = self._rule_row(dst)
                 if target is None:
@@ -4934,6 +4938,14 @@ class Project:
             "SELECT k.*, d.code FROM task_kind k JOIN domain d "
             "ON d.domain_id = k.domain_id WHERE k.domain_id=?",
             (row["domain_id"],)).fetchone()
+
+    def _log_labels(self) -> dict:
+        """Code → label for every kind of log entry alive here, `{'TK':
+        'task', 'MS': 'message'}` today. THIS is what tells a citation towards
+        the log from one towards a rule: `TASK_PREFIX` alone told `TK` apart
+        and nothing else, so `(MS-0001)` — which the manual promises — was
+        looked up among the rules and refused as never defined."""
+        return {r["code"]: label for label, r in self._kinds().items()}
 
     def _norm_task_id(self, tid: str) -> str:
         t = (tid or "").strip().upper()
