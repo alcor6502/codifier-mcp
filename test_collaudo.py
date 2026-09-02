@@ -1594,6 +1594,34 @@ allowed("while a body AT the ceiling goes through both doors",
         lambda: p.task_amend(tid, "advisory", body="y" * rules.MAX_BODY_BYTES))
 
 # =====================================================================
+print("\n— A FIELD OF THE WRONG TYPE IS REFUSED, NOT CRASHED —")
+# `fields` is a dict on the surface and the surface validates the dict, not
+# what is in it: `{"kind": 5}` reached `.strip()` and left as an
+# AttributeError — a traceback at ERROR for a caller's typo. And a `members`
+# given as one string was walked letter by letter and refused as "'a' is not
+# a consumer", a refusal that named the wrong mistake. Measured on 7.1.0.
+
+p = project()
+refused("a kind that is a number", lambda: p.amend_project(
+    "consumer", "x", "create", {"kind": 5}, actor="architect"), "fields.kind")
+refused("a reason that is a number", lambda: p.amend_project(
+    "domain", "PE", "create", {"reason": 5}, actor="architect"), "fields.reason")
+refused("a brief that is a list", lambda: p.amend_project(
+    "consumer", "advisory", "amend", {"brief": ["x"]}, actor="architect",
+    auth_code=code(p)), "fields.brief")
+refused("members given as ONE string, named as the mistake it is",
+        lambda: p.amend_project("group", "g", "create", {"members": "advisory"},
+                                actor="architect"), "fields.members")
+refused("members holding a number", lambda: p.amend_project(
+    "group", "g", "create", {"members": [1]}, actor="architect"), "fields.members")
+allowed("while a None is still 'not given', as it always was",
+        lambda: p.amend_project("consumer", "y", "create",
+                                {"kind": "chat", "brief": None}, actor="architect"))
+allowed("and a tuple of names is a list of names",
+        lambda: p.amend_project("group", "g", "create",
+                                {"members": ("advisory", "news")}, actor="architect"))
+
+# =====================================================================
 print("\n— THE MESSAGES —")
 # Three guarantees, and each one was watched failing before it was kept: a
 # check nobody has seen go red is not a check.

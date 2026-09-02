@@ -3915,6 +3915,30 @@ class Project:
             raise RulesError(f"action {action!r}: one of {', '.join(self.ACTIONS)}.")
         if (entity, action) in self.NO_TOOL:
             raise RulesError(self.NO_TOOL[(entity, action)])
+        # THE VALUES ARE TYPED HERE, ONCE. The surface declares `fields` as a
+        # dict and validates the outer type only, so `{"kind": 5}` arrived
+        # intact and died on `.strip()` — an AttributeError in the log, at
+        # ERROR, for a caller's mistake. Every field is a string, except
+        # `members`, which is a list of them; a list given as one string was
+        # walked LETTER BY LETTER and refused as "'a' is not a consumer",
+        # which is a refusal that lies about what was wrong. Only the fields
+        # this gesture TAKES are typed: an unknown one is refused further
+        # down, by name, and that refusal is the more useful of the two.
+        for _f, _v in fields.items():
+            if _v is None or _f not in self.FIELDS.get(entity, {}).get(action, ()):
+                continue
+            if _f == "members":
+                if isinstance(_v, str) or not isinstance(_v, (list, tuple)) \
+                        or not all(isinstance(_m, str) for _m in _v):
+                    raise RulesError(
+                        f"fields.members: a LIST of consumer names — "
+                        f"['advisory', 'news'] — not {_v!r}. One name is still a "
+                        "list of one.")
+            elif not isinstance(_v, str):
+                raise RulesError(
+                    f"fields.{_f}: a string, not {type(_v).__name__} {_v!r}. "
+                    "Nothing in a project's structure is a number: a code, a "
+                    "kind, a reason, a brief are all text.")
         # THE PEOPLE, refused before the credentials like the rest of the
         # shape. On `create` the kind is in `fields`; on the other three the
         # kind is on the row, so the row is read — which is a state read, and
