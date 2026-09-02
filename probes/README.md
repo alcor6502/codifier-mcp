@@ -5,13 +5,13 @@ which is why it can say that every handler calls the engine with a compatible
 signature — and why it cannot say what a handler does with the dictionary that
 comes back. That gap is what these scripts are for.
 
-They are **not a fourth suite**. Nothing here runs in CI, and the reason is in
-`build.yml`: the test job installs the engine with `--no-deps` and carries no
-web stack at all. Adding one would make every release pay for a dependency
-tree the image does not have.
+They are **not a fourth suite** — the suites run on every job, these run at
+the tag — but since v7.1.0 they are a **release gate**. `build.yml` has a
+`probes` job and `image` waits for it, so a red probe is a release that does
+not happen.
 
-So they are run **by hand, when `web.py` or `mail.py` moves**. That is the
-whole rule.
+Run them by hand too, whenever `web.py` or `mail.py` moves. Waiting for the
+tag to find out is waiting too long.
 
 ## What they have caught
 
@@ -35,17 +35,43 @@ python3.12 -m venv /tmp/probe-venv
 /tmp/probe-venv/bin/pip install -r probes/requirements.txt
 
 export PYTHONPATH=<mcp-common-engine, EXTRACTED FROM THE PINNED TAG>
-/tmp/probe-venv/bin/python probes/probe_ui.py
-/tmp/probe-venv/bin/python probes/probe_link.py
+/tmp/probe-venv/bin/python probes/run.py
 ```
 
-Each prints one line per case and ends with `all green` or `FAILED: <names>`,
-and exits non-zero when anything failed. **Read the exit code**: a probe that
-dies halfway still prints a screen of passes.
+⚠ **`run.py` is the command CI runs, character for character.** That is why it
+exists instead of two lines of YAML that resemble it: a bench that runs
+something slightly different from what the release runs is a bench that lies.
+Run a single probe directly when you are working on it; run `run.py` before
+you believe the result.
+
+Each probe prints one line per case and ends with `all green` or
+`FAILED: <names>`. `run.py` prints all of that, then a summary, and exits
+non-zero if **anything** did.
+
+### What `run.py` refuses to call a pass
+
+| | Why it is not paranoia |
+|---|---|
+| a probe that exits non-zero | the obvious one |
+| a probe that exits **zero** having printed fewer `PASS` lines than it has `ok()` calls in its own source | a probe killed halfway prints a screen of passes before it dies, and **a control that does not count what it watches goes green for lack of work**. The floor is read from the file, never written down — loops make the real count higher, so the test is `printed >= declared` |
+| a run that found fewer than two probes | a glob that matches nothing succeeds at everything, which is the quietest way for a gate to become decorative |
+
+`shots.py` is deliberately not picked up: only `probe_*.py` is. It has no
+verdict to give, so it has no business in a gate — and pulling a browser into
+every release would cost minutes for nothing. Its dependencies live apart, in
+`requirements-shots.txt`, which CI does not install.
 
 The probes put the repository root on `sys.path` themselves, so they can be
 launched from anywhere. They need no database, no network and no FastMCP —
 each one builds its own registry under `mktemp -d`.
+
+### And the gate is pinned, because a gate is six lines of YAML away from gone
+
+`test_surface.py` holds that `build.yml` has a `probes` job, that `image`
+**waits** for it, that CI runs `run.py` and not a hand-rolled loop, and that it
+does not install the browser stack. It also reads `run.py` itself and holds
+that it still counts cases and still refuses an empty glob. Every one of those
+was seen to fail by injecting the defect.
 
 ## The three files
 
@@ -53,7 +79,8 @@ each one builds its own registry under `mktemp -d`.
 |---|---|
 | `probe_ui.py` | the whole admin page: the door, the profile, the register and the card, the one-time codes minted in a run, the log dashboard, and the rules page **on all three kinds of consumer** |
 | `probe_link.py` | the closing link end to end — the message composed by a real `Mailer` with only its delivery replaced, the button, the page opened with no session, the closure landing in the database, the second press, a doctored ticket, one from another entry, an expired one |
-| `shots.py` | **not a check, a look.** Screenshots of every page, light and dark, at iPad width. Whether the type and the contrasts sit well on a real screen is a judgement no measurement replaces |
+| `shots.py` | **not a check, a look.** Screenshots of every page, light and dark, at iPad width. Whether the type and the contrasts sit well on a real screen is a judgement no measurement replaces. Needs `requirements-shots.txt`, and finds the browser under `PLAYWRIGHT_BROWSERS_PATH` rather than naming a build |
+| `run.py` | runs every `probe_*.py`, and is what both CI and a person invoke |
 
 ## Two things they have taught, which are about probes and not about the code
 

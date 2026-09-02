@@ -2277,6 +2277,71 @@ _WF = source(os.path.join(HERE, ".github", "workflows", "build.yml"))
 ok("pip install --no-deps -r requirements.txt" in _WF,
    "build.yml installs the engine for the suites, --no-deps, from the one pin")
 
+# ⚠ AND THE GATE THAT IS NOT ABOUT SOURCE. The probes job is the only thing in
+# this pipeline that renders a page, and a gate can be removed by deleting six
+# lines of YAML — which is a change nothing else here would notice. So the job
+# is pinned, and so is the fact that `image` WAITS for it: a job that runs
+# beside the release instead of before it is a job whose red nobody reads.
+ok(re.search(r"^  probes:\s*$", _WF, re.MULTILINE) is not None,
+   "build.yml has a probes job")
+_NEEDS = re.search(r"^  image:\n(?:\s*#.*\n)*\s*needs:\s*(.+)$", _WF, re.MULTILINE)
+ok(_NEEDS is not None and "probes" in _NEEDS.group(1),
+   "build.yml: the image waits for the probes — the gate BLOCKS the release",
+   _NEEDS.group(1) if _NEEDS else "no needs: on the image job")
+ok(_NEEDS is not None and "test" in _NEEDS.group(1),
+   "build.yml: and it still waits for the suites",
+   _NEEDS.group(1) if _NEEDS else "no needs: on the image job")
+# It must run the runner, not a hand-rolled loop over the probes: the moment CI
+# runs something a person cannot run, the bench stops being evidence.
+ok("python3 probes/run.py" in _WF,
+   "build.yml runs probes/run.py — the same command a person runs")
+ok("pip install -r probes/requirements.txt" in _WF,
+   "build.yml installs the probes' own stack, kept out of the image's")
+# ⚠ And NOT the browser one. shots.py is a look, not a check; pulling a browser
+# into a release gate is minutes of every release spent on nothing.
+#
+# ⚠ COMMENTS STRIPPED FIRST, and this check was written wrong before it was
+# written right: build.yml NAMES requirements-shots.txt in the comment that
+# explains why it is not installed, so a plain substring search failed on a
+# workflow that is correct. The house rule cuts both ways — a search is
+# satisfied by a commented-out line, and refused by a commented-about one.
+_WF_LIVE = "\n".join(l for l in _WF.splitlines()
+                     if not l.lstrip().startswith("#"))
+ok("requirements-shots.txt" not in _WF_LIVE,
+   "build.yml does NOT install the browser stack — shots.py is a look, not a gate",
+   [l for l in _WF_LIVE.splitlines() if "requirements-shots" in l])
+
+print("\n== the probe runner refuses to pass for lack of work ==")
+
+# The runner is the thing standing between a broken page and a published
+# image, so what it REFUSES matters more than what it runs. Three properties,
+# read from its source, each of which has a way of silently disappearing.
+_RUN = os.path.join(PROBE_DIR, "run.py")
+ok(os.path.exists(_RUN), "probes/run.py is in the repository")
+if os.path.exists(_RUN):
+    _RSRC = source(_RUN)
+    _RTREE = ast.parse(_RSRC)
+    # It counts the cases each probe DECLARES and compares. Without this a
+    # probe killed halfway exits 0 having printed a screen of passes — which
+    # is exactly the failure this repository has already paid for twice.
+    ok("ast.parse" in _RSRC and "returncode" in _RSRC,
+       "probes/run.py reads each probe's source AND its exit code")
+    ok(re.search(r"got\s*<\s*want", _RSRC) is not None,
+       "probes/run.py fails a probe that printed fewer cases than its source "
+       "declares — a control that does not count what it watches goes green "
+       "for lack of work")
+    # And a glob that matches nothing must not pass everything.
+    _FLOOR = [n for n in ast.walk(_RTREE) if isinstance(n, ast.Assign)
+              and any(getattr(t, "id", "") == "FLOOR" for t in n.targets)]
+    ok(len(_FLOOR) == 1 and isinstance(_FLOOR[0].value, ast.Constant)
+       and _FLOOR[0].value.value >= 2,
+       "probes/run.py refuses a run that found fewer than two probes",
+       ast.unparse(_FLOOR[0]) if _FLOOR else "no FLOOR")
+    # The floor is a real count, not a wish: there are at least that many.
+    ok(len([p for p in PROBES if p.startswith("probe_")]) >= _FLOOR[0].value.value
+       if _FLOOR else False,
+       "and there really are that many probe_*.py files", PROBES)
+
 print("\n== a malformed call does not print what it carried ==")
 
 # fastmcp logs invalid arguments ITSELF, at WARNING, with the arguments in the
