@@ -2770,6 +2770,20 @@ ok(len(_MAILER_ARGS) == 1
 # container that will not boot to a form that will not save. (Its old sibling
 # ADMIN_ACCESS_CODE died in v3.0.0, and the "master" in its own old name died
 # in v4.0.0 with the level it claimed: what is behind this password is a UI.)
+# THE TEMPLATE SAYS WHAT THE PAGE DOES WITH THE PASSWORD. Until 7.1.1 the field
+# read "asked for AGAIN on every gesture that writes" — true up to 6.2 and
+# false since 7.0.0, where the session is a cookie and the password is typed
+# once. A description a person reads while filling the form is a guide, and
+# it ships with the behaviour: the hours are read off web.py's constant.
+_PW_DESC = re.search(r'Target="WEB_UI_PASSWORD"[^>]*Description="([^"]*)"', TEMPLATE)
+ok(_PW_DESC is not None, "the template describes WEB_UI_PASSWORD")
+if _PW_DESC is not None:
+    ok("asked for AGAIN" not in _PW_DESC.group(1)
+       and f"lives {_webmod.SESSION_MAX_IDLE // 3600} hours" in _PW_DESC.group(1),
+       "and says the password is typed once, for a session of the hours web.py "
+       "keeps it — not asked again per gesture, which stopped in 7.0.0",
+       _PW_DESC.group(1)[:120])
+
 _MASTER_FIELD = re.search(r'<Config[^>]*Target="WEB_UI_PASSWORD"[^>]*>', TEMPLATE)
 ok(_MASTER_FIELD is not None, "the UI's password is a field of the template")
 if _MASTER_FIELD:
