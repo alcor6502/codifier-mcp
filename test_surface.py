@@ -1885,6 +1885,71 @@ for _f in SERVED_FILES:
        f"Dockerfile: {_f} is copied in — a tool serves it", DOCKER_COPIES)
 ok(not any("test_" in l for l in DOCKER_COPIES), "Dockerfile: no test file is copied in")
 
+# ⚠ AND NEITHER ARE THE PROBES. They live in the repository since the work
+# moved to the cloud environment — there is no laptop to keep them on any
+# more — and they must stay out of the image for the same reason the suites
+# do: they carry a web stack the container has no use for, and shipping a
+# driver of the pages inside the thing it drives is a way to run it by
+# accident. The Dockerfile has no wildcard COPY, so today this holds by
+# construction; the check is here so that the day somebody writes one, the
+# red says which directory it swept in.
+ok(not any("probes" in l for l in DOCKER_COPIES),
+   "Dockerfile: the probes are NOT copied into the image",
+   [l for l in DOCKER_COPIES if "probes" in l])
+
+print("\n== the probes are in the repository, and they parse ==")
+
+# A probe that does not import is a probe nobody runs, and nobody finds out
+# until the day it is needed — which is the day web.py moved. The suites
+# cannot EXECUTE them (no web stack in CI, on purpose) but they can read them,
+# and a file that does not parse is the failure that costs nothing to catch.
+PROBE_DIR = os.path.join(HERE, "probes")
+PROBES = ("probe_ui.py", "probe_link.py", "shots.py")
+for _p in PROBES:
+    _path = os.path.join(PROBE_DIR, _p)
+    ok(os.path.exists(_path), f"probes/{_p} is in the repository")
+    if os.path.exists(_path):
+        _src = source(_path)
+        try:
+            _tree = ast.parse(_src)
+            _parsed = True
+        except SyntaxError as _exc:
+            _tree, _parsed = None, False
+            print(f"        {_p}: {_exc}")
+        ok(_parsed, f"probes/{_p} parses")
+        # ⚠ AND IT DRIVES THIS REPOSITORY, not a copy of it. A probe living in
+        # a subdirectory does not find the root on sys.path by itself — the
+        # working directory is not sys.path[0] for a script — so each one puts
+        # it there, and the day somebody drops that line the probe imports
+        # whatever else is called `rules` and reports on it.
+        if _parsed:
+            _roots = {a.name for n in ast.walk(_tree) if isinstance(n, ast.Import)
+                      for a in n.names} | {n.module for n in ast.walk(_tree)
+                                           if isinstance(n, ast.ImportFrom) and n.module}
+            _local = {m for m in _roots
+                      if os.path.exists(os.path.join(HERE, f"{m.split('.')[0]}.py"))}
+            ok(bool(_local), f"probes/{_p} imports modules of this repository",
+               sorted(_roots))
+            ok("sys.path.insert" in _src,
+               f"probes/{_p} puts the repository root on sys.path, so it drives "
+               f"THIS code and not another copy")
+
+# And what they need is written down where it can be installed, because the
+# project's own requirements.txt must not grow a web stack the image would
+# then carry.
+_PREQ = os.path.join(PROBE_DIR, "requirements.txt")
+ok(os.path.exists(_PREQ), "probes/requirements.txt says what they need")
+if os.path.exists(_PREQ):
+    _pr = source(_PREQ)
+    for _dep in ("httpx", "starlette", "python-multipart"):
+        ok(_dep in _pr, f"probes/requirements.txt names {_dep}")
+    # ⚠ IN THE OTHER DIRECTION TOO: none of it may reach the image.
+    _MAIN_REQ = source(os.path.join(HERE, "requirements.txt"))
+    for _dep in ("httpx", "playwright"):
+        ok(_dep not in _MAIN_REQ,
+           f"requirements.txt does NOT carry {_dep} — that is the probes' stack, "
+           f"and the container does not drive its own pages")
+
 # What starts the container, and it is checked in two files at once because it
 # only works if the two agree. The Dockerfile has a CMD and no ENTRYPOINT; the
 # template's Post Arguments field is EMPTY, because Unraid appends that field
