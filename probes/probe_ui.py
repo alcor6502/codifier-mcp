@@ -232,7 +232,21 @@ async def main():
             _prj3.amend_project("consumer", _n, "create",
                                 {"kind": _k, "brief": f"the {_k}"},
                                 actor="web ui", on_the_page=True)
-        r = await c.get("/p/Palestra/rules?consumer=Deliberator")
+        # THE PAGE READS THE PROJECT ONCE. Until 7.1.1 the menu and the pick
+        # each asked `project_info` for the same list, so every rules page
+        # was two readings of the anagrafica — counted here on the engine's
+        # own method, because a page that grows a third reading would not
+        # look any different.
+        _reads = []
+        _orig_info = rules.Project.project_info
+        rules.Project.project_info = lambda self_, *a, **k: (
+            _reads.append(1), _orig_info(self_, *a, **k))[1]
+        try:
+            r = await c.get("/p/Palestra/rules?consumer=Deliberator")
+        finally:
+            rules.Project.project_info = _orig_info
+        ok("the rules page reads the anagrafica ONCE, not once per widget",
+           len(_reads) == 1, f"project_info called {len(_reads)} times")
         ok("the rules page opens for a CHAT, with the project's brief",
            r.status_code == 200 and "the gym" in r.text, r.status_code)
         r = await c.get("/p/Palestra/rules?consumer=Executor")

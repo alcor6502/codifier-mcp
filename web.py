@@ -909,8 +909,7 @@ def build(*, registry, log, master: str, refusal, fault,
         return (f"<details open><summary>{_esc(label)}</summary>"
                 f"{_md(text)}</details>")
 
-    def _consumer_picker(name: str, prj, chosen: str, where: str,
-                         kinds=()) -> str:
+    def _consumer_picker(name: str, chosen: str, where: str, names) -> str:
         """The consumer is a MENU and not a text field, and the list comes from
         the engine. Typed by hand it would be one more place a name can be
         spelt wrong, and the engine's refusal for an unknown consumer is not
@@ -920,10 +919,11 @@ def build(*, registry, log, master: str, refusal, fault,
         Since v4.0.0 `project_info` returns the LIVE ones only, so a retired
         consumer cannot be picked here at all: the menu offers what still
         exists rather than offering a name that every call behind it would
-        refuse."""
+        refuse. `names` is that list, read ONCE by the page: read here and
+        again in `_pick`, every rules page rendered `project_info` twice."""
         opts = "".join(
             f"<option value='{_esc(n)}'{' selected' if n == chosen else ''}>"
-            f"{_esc(n)}</option>" for n in _consumers(prj, kinds))
+            f"{_esc(n)}</option>" for n in names)
         return (f"<form method='get' action='/p/{_esc(name)}/{where}'>"
                 f"<label for='consumer'>Consumer</label>"
                 f"<select id='consumer' name='consumer'>{opts}</select> "
@@ -1402,20 +1402,20 @@ def build(*, registry, log, master: str, refusal, fault,
         _issue(response)
         return response
 
-    def _pick(request, prj, kinds=()) -> str:
+    def _pick(request, names) -> str:
         """The consumer asked for, or the first one there is. Never empty: the
         readings that want a consumer refuse without one, and a page that
         opened on a refusal would teach that it is broken — which is exactly
-        why `kinds` exists, and why the rules page passes it: opening on a
-        human meant opening on `a person is not an audience`."""
+        why the rules page hands in the names of the BOUND kinds only:
+        opening on a human meant opening on `a person is not an audience`."""
         wanted = (request.query_params.get("consumer") or "").strip()
-        names = _consumers(prj, kinds)
         return wanted if wanted in names else (names[0] if names else "")
 
     async def rules_page(request):
         def render(name, prj):
-            consumer = _pick(request, prj, BOUND_KINDS)
-            picker = _consumer_picker(name, prj, consumer, "rules", BOUND_KINDS)
+            names = _consumers(prj, BOUND_KINDS)
+            consumer = _pick(request, names)
+            picker = _consumer_picker(name, consumer, "rules", names)
             # ⚠ A SUBSTITUTION IS ANNOUNCED. Asked for a name this page cannot
             # read as — a person — `_pick` falls back to one it can, which is
             # right and would otherwise be SILENT: the reader asked about
@@ -1499,7 +1499,7 @@ def build(*, registry, log, master: str, refusal, fault,
     async def rule_page(request):
         def render(name, prj):
             rid = request.path_params["rule"]
-            consumer = _pick(request, prj, BOUND_KINDS)
+            consumer = _pick(request, _consumers(prj, BOUND_KINDS))
             out = [f"<p class='note'>Read as <b>{_esc(consumer)}</b>.</p>"]
             # ONE call for the rule AND its story. `history=True` is an
             # argument and not a second method since v4.0.0 — the story of a
