@@ -1622,6 +1622,45 @@ allowed("and a tuple of names is a list of names",
                                 {"members": ("advisory", "news")}, actor="architect"))
 
 # =====================================================================
+print("\n— A NUMBER OUT OF RANGE, A DATE OFF THE CALENDAR, AN ID THAT IS NOT TEXT —")
+# Three shapes of the same defect, all measured on 7.1.0: a caller's value
+# that the engine answered with a traceback (OverflowError, ValueError,
+# AttributeError) or, worse, with a silent wrong answer. The page lets thirty
+# nines through `isdigit`, and they became a 500 here.
+
+p = project()
+tid = p.task_add("advisory", "t", "a body", "architect")["id"]
+refused("a code asked to live longer than any date",
+        lambda: p.mint_auth_code(10 ** 30), "no such date")
+refused("a duration that is not a number", lambda: p.mint_auth_code("abc"),
+        "whole number")
+refused("a queue_cap larger than the database can store",
+        lambda: p.set_profile(queue_cap=10 ** 30), "more than the database")
+refused("a queue_cap that is not a number", lambda: p.set_profile(queue_cap="abc"),
+        "none of the three")
+allowed("while a queue_cap given as digits is still a number",
+        lambda: p.set_profile(queue_cap="7"))
+refused("a thirteenth month", lambda: p.task_list("advisory", since="2026-13-45"),
+        "one that exists")
+refused("the thirtieth of February", lambda: p.task_list("advisory", until="2026-02-30"),
+        "one that exists")
+refused("a stamp with a 25th hour",
+        lambda: p.task_list("advisory", until="2026-01-01T25:99:99Z"), "one that exists")
+refused("a prune 'before' a day that does not exist — which used to archive "
+        "nothing in silence", lambda: p.prune_tasks("2026-99-99"), "one that exists")
+refused("a date given as a number", lambda: p.task_list("advisory", since=20260101),
+        "a date")
+allowed("while a real date, and a real stamp, still bound the list",
+        lambda: (p.task_list("advisory", since="2026-01-01", until="2026-12-31T23:59:59Z")))
+refused("a log ID that is a number", lambda: p.task_close(123, "advisory", outcome="x"),
+        "malformed log ID")
+refused("a rule ID that is a number, as `supersedes`",
+        lambda: p.propose("VA", "R", "t", "b", "why", "all", "architect", supersedes=123),
+        "malformed ID")
+refused("a rule ID that is a number, retired — refused by name, not crashed",
+        lambda: p.retire(123, "why", auth_code=code(p)), "123")
+
+# =====================================================================
 print("\n— THE MESSAGES —")
 # Three guarantees, and each one was watched failing before it was kept: a
 # check nobody has seen go red is not a check.

@@ -197,6 +197,10 @@ RE_SLUG_CHAR = re.compile(r"[a-z0-9-]")
 FILE_MODE = 0o644                       # root writes, everyone else reads
 DIR_MODE = 0o755
 MAX_BODY_BYTES = 64_000
+# What an INTEGER column holds, and therefore the most any count can be
+# asked to be. Above it sqlite3 raises OverflowError on the bind, which is a
+# traceback for what is a caller's number.
+SQLITE_INT_MAX = 2 ** 63 - 1
 
 # The ceiling of a LIST of rules. Generous on purpose: the cap exists so that a
 # runaway answer cannot eat a chat's context, not to discipline anybody. When
@@ -426,7 +430,7 @@ def split_guide(text: str) -> tuple[str, dict[str, str]]:
     return model.strip(), cards
 
 
-def guide_for(text: str, name: str = "") -> dict:
+def guide_for(text: str, name="") -> dict:
     """What `reference_guide` answers, minus the version and the level — so the
     tool is a shell and this is the behaviour, testable with no fastmcp.
 
@@ -449,6 +453,7 @@ def guide_for(text: str, name: str = "") -> dict:
     others, so a card behind the gate does not announce itself through the
     refusal of the door in front of it."""
     model, cards = split_guide(text)
+    name = str(name or "")
     if not (name or "").strip():
         return {"guide": model, "cards": sorted(cards),
                 "how": "reference_guide(name) for one command's card"}
@@ -474,13 +479,21 @@ def _day_bound(s: str, what: str, end: bool) -> str:
     an upper bound would silently exclude everything that happened that day,
     which is the class of off-by-one nobody notices until a month is missing
     from a changelog. A full stamp is taken as given."""
-    t = (s or "").strip()
-    if re.match(r"^\d{4}-\d{2}-\d{2}$", t):
+    t = str(s or "").strip()
+    # THE SHAPE AND THE CALENDAR. Until 7.1.1 only the shape was read, so
+    # `2026-13-45` went through, was compared as a string, and a typo in a
+    # month yielded a silent empty answer — or, at prune, a silent empty
+    # archive — instead of this refusal.
+    for form in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            datetime.strptime(t, form)
+        except ValueError:
+            continue
+        if "T" in t:
+            return t
         return t + ("T23:59:59Z" if end else "T00:00:00Z")
-    if re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", t):
-        return t
     raise RulesError(f"{what} {s!r}: a date, YYYY-MM-DD (or a whole stamp, "
-                     "YYYY-MM-DDTHH:MM:SSZ)")
+                     "YYYY-MM-DDTHH:MM:SSZ), and one that exists")
 
 
 def _day_start(s: str, what: str) -> str:
@@ -494,7 +507,7 @@ def _day_end(s: str, what: str) -> str:
 def _strip_gloss(s: str) -> str:
     """Take the pointer out of anything reading may have handed back: the
     brackets, and the title the expansion added inside them."""
-    s = (s or "").strip()
+    s = str(s or "").strip()
     if s.startswith("(") and s.endswith(")"):
         s = s[1:-1].strip()
     g = RE_CITE_GLOSSED.match(s)
@@ -2140,12 +2153,22 @@ class Project:
         registry file, a backup or a stolen database yields nothing that can be
         spent — and the spent rows are left where they are, because they are
         the audit of every structural gesture this project has had."""
-        minutes = int(minutes or self.auth_code_minutes)
+        try:
+            minutes = int(minutes or self.auth_code_minutes)
+        except (TypeError, ValueError):
+            raise RulesError(f"minutes {minutes!r}: a whole number of minutes")
         if minutes < 1:
             raise RulesError("an auth_code that lives less than a minute is a code "
                              "nobody can carry from the page to a chat")
         code = _gen(AUTH_CODE_LEN)
-        expires = _plus_minutes(minutes)
+        # A number too large for a date is refused, not thrown: the page's
+        # `isdigit` lets thirty nines through, and they died here as an
+        # OverflowError on the way to a 500.
+        try:
+            expires = _plus_minutes(minutes)
+        except OverflowError:
+            raise RulesError(f"minutes {minutes}: no code lives that long — there is "
+                             "no such date to expire on")
         self.cx.execute(
             "INSERT INTO auth_code (code_hash, minted_at, expires_at) VALUES (?,?,?)",
             (_key_hash(code), _now(), expires))
@@ -3376,7 +3399,7 @@ class Project:
                         "SELECT title FROM rule WHERE status='proposed' ORDER BY rule_id")))
 
         victim = None
-        if (supersedes or "").strip():
+        if str(supersedes or "").strip():
             sup = _norm_id(supersedes)
             victim = self._rule_row(sup)
             if victim is None:
@@ -4079,10 +4102,18 @@ class Project:
         elif queue_cap is None:
             new_cap = None
         else:
-            new_cap = int(queue_cap)
+            try:
+                new_cap = int(queue_cap)
+            except (TypeError, ValueError):
+                raise RulesError(f"queue_cap {queue_cap!r}: null is unlimited, 0 closes "
+                                 "the queue, N is N — and this is none of the three.")
             if new_cap < 0:
                 raise RulesError("queue_cap: null is unlimited, 0 closes the queue, N is "
                                  "N. A negative ceiling is none of the three.")
+            if new_cap > SQLITE_INT_MAX:
+                raise RulesError(f"queue_cap {new_cap}: more than the database can "
+                                 "store, and a queue that deep has no ceiling — that "
+                                 "is what null is for.")
         changed = sorted(
             k for k, a, b in (("brief", cur_brief, new_brief),
                               ("specs", cur_specs, new_specs),
@@ -4972,7 +5003,7 @@ class Project:
         return {r["code"]: label for label, r in self._kinds().items()}
 
     def _norm_task_id(self, tid: str) -> str:
-        t = (tid or "").strip().upper()
+        t = str(tid or "").strip().upper()
         m = RE_ID_IN.match(t)
         codes = sorted({r["code"] for r in self._kinds().values()})
         if not m or m.group(1) not in codes:
