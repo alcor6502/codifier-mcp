@@ -2278,6 +2278,31 @@ _STRAY = [f for f in ("server.py", "preflight.py", "Dockerfile",
           if re.search(r"^VERSION\s*=", source(os.path.join(HERE, f)), re.MULTILINE)]
 ok(not _STRAY, "no second file declares a VERSION of its own", _STRAY)
 
+print("\n== a docstring's evidence exists, and a ceiling is measured on what is sent ==")
+
+# `_serialised` explains its re-entrant lock by naming methods that call each
+# other. On 7.1.0 it named status() → list_rules() and import_rules() →
+# check(): neither pair existed. Every `name()` it cites must be a method of
+# Project, so the sentence cannot go stale in silence again.
+_SER = next(n for n in ENGINE_TREE.body
+            if isinstance(n, ast.FunctionDef) and n.name == "_serialised")
+_PROJECT = next(n for n in ENGINE_TREE.body
+                if isinstance(n, ast.ClassDef) and n.name == "Project")
+_PROJECT_METHODS = {n.name for n in _PROJECT.body
+                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+_CITED = set(re.findall(r"\b([a-z_]+)\(\)", ast.get_docstring(_SER) or ""))
+ok(_CITED and _CITED <= _PROJECT_METHODS,
+   "every method _serialised's docstring names as calling another EXISTS on Project",
+   sorted(_CITED - _PROJECT_METHODS))
+
+# The byte ceiling of rules_get and tasks_get: the cards say "cut at 60000
+# bytes", and the number has to be of the JSON the client receives, not of
+# Python's repr of the dict — which spells None, True and quotes differently.
+_SIZE_LINES = [ast.unparse(n) for n in ast.walk(_PROJECT)
+               if isinstance(n, ast.AugAssign) and ast.unparse(n.target) == "size"]
+ok(len(_SIZE_LINES) == 2 and all("json.dumps(" in l for l in _SIZE_LINES),
+   "both GET ceilings are measured on json.dumps, not on str()", _SIZE_LINES)
+
 print("\n== the engine is pinned to a tag, and the pin is what is installed ==")
 
 # A tag is a number a check can compare — this is that check. The tarball

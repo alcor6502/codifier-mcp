@@ -66,6 +66,7 @@ import difflib
 import functools
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
@@ -1942,8 +1943,11 @@ def _serialised(cls):
     on one connection would produce a COMMIT that closes somebody else's
     transaction. So the check goes off AND the calls are serialised.
 
-    The lock is re-entrant because public methods call each other: status()
-    calls list_rules(), import_rules() calls check().
+    The lock is re-entrant because public methods call each other:
+    list_rules() calls profile() and queue_cap(), amend_project() calls
+    port_for(). (It used to name two pairs — status calling list_rules,
+    import_rules calling check — and neither existed: a docstring's evidence
+    has to, and test_surface now reads the names off this sentence.)
 
     Serialising costs nothing here — one user, a few calls a minute — and it
     buys the property that matters: whatever the pool does, the database sees
@@ -3338,7 +3342,11 @@ class Project:
                 d["cited_by"] = cited_by
             if history:
                 d["history"] = self._gestures(row["rule_id"])
-            size += len(str(d).encode())
+            # Measured on what is SENT — JSON — not on Python's repr, which
+            # spells None, True and every quote differently: the cards say
+            # "cut at 60000 bytes", and that number was of a text nobody
+            # receives.
+            size += len(json.dumps(d, ensure_ascii=False).encode())
             if size > GET_BYTES and out:
                 cut = True
                 continue
@@ -5389,7 +5397,11 @@ class Project:
                 age = self._age_days(row["created_at"], now)
                 if age >= TASKS_STALE_DAYS:
                     d["stale"] = f"open for {age} days"
-            size += len(str(d).encode())
+            # Measured on what is SENT — JSON — not on Python's repr, which
+            # spells None, True and every quote differently: the cards say
+            # "cut at 60000 bytes", and that number was of a text nobody
+            # receives.
+            size += len(json.dumps(d, ensure_ascii=False).encode())
             if size > GET_BYTES and out:
                 cut = True
                 continue
