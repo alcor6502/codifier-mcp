@@ -21,7 +21,29 @@ English in this repo: code, docstrings, errors, README, commit messages, tags.
 - **`git add` named files. Never `-A`.** Read `git status --short` line by line
   and ask whether each one is yours; a line you do not recognise is not.
 
-## Running the suites
+## Running the suites, and shipping
+
+```
+scripts/test.sh                        # the bench and the five suites, in order
+scripts/ship.sh <msg-file> <file>...   # suites, commit, push to main, release link
+```
+
+`test.sh` makes a venv, installs the engine **from the pin in
+`requirements.txt`** — the tarball, or a clone of the same tag when the network
+refuses the tarball — and runs the suites the CI runs, in the same order,
+stopping at the first red. Each suite goes to a file and the script prints
+`exit=`. `test_surface.py` reads both files and goes red if the suite list
+differs from `build.yml` in either direction, or if the script carries a copy
+of the tag.
+
+`ship.sh` runs `test.sh`, `git add`s the **named** files, commits with the
+anonymous identity passed on the command, pushes `HEAD:refs/heads/main`, proves
+the push against the fetched hash, and — if `VERSION` moved in that commit —
+prints the pre-filled release link. **The tag is never typed and never pushed**:
+from the sandbox a tag push answers 403, and one typed on a tablet came out
+`V7.0.0`, which the workflow's glob ignored in silence.
+
+By hand, when you need one suite:
 
 ```
 export PYTHONPATH=<mcp-common-engine, EXTRACTED FROM THE PINNED TAG>
@@ -90,8 +112,10 @@ the same commit, or the suite goes red — which is the point of it.
 
 ## Shipping
 
-- **Branch first, then tag.** The workflow fires on the tag: tag a branch that is
-  not pushed and it builds something nobody can read.
+- **`scripts/ship.sh`, every commit, straight to `main`.** No feature branch,
+  no pull request, no merge: a branch is a merge, and a merge is where two hands
+  in the same file notice each other too late. The tag is born on the release
+  page, from the link the script prints — never typed, never pushed.
 - **The tag must equal `VERSION`.** A CI step compares them and stops the
   release. It exists because a version was once published declaring another.
 - **If the MCP surface moves — names, parameters, or *descriptions* — the tag

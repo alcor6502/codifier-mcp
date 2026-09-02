@@ -2311,6 +2311,86 @@ ok("requirements-shots.txt" not in _WF_LIVE,
    "build.yml does NOT install the browser stack — shots.py is a look, not a gate",
    [l for l in _WF_LIVE.splitlines() if "requirements-shots" in l])
 
+print("\n== the delivery scripts run what the CI runs, from the one pin ==")
+
+# From 2026-09-02 the work runs in a container with nothing but the clone, and
+# the delivery is two scripts: test.sh builds the bench and runs the suites,
+# ship.sh runs test.sh, commits the NAMED files, pushes straight to main and
+# prints the release link. Each of them can quietly stop matching what CI does
+# — one suite dropped, a tag typed in by hand, a push aimed at a branch — and
+# nothing else here would notice. So the properties that matter are read off
+# the two files, comments stripped first: a search is satisfied by a
+# commented-out line, and refused by a commented-about one.
+_SCRIPTS = os.path.join(HERE, "scripts")
+_TEST_SH = source_or_none(os.path.join(_SCRIPTS, "test.sh"))
+_SHIP_SH = source_or_none(os.path.join(_SCRIPTS, "ship.sh"))
+ok(_TEST_SH is not None, "scripts/test.sh is in the repository")
+ok(_SHIP_SH is not None, "scripts/ship.sh is in the repository")
+for _name in ("test.sh", "ship.sh"):
+    _p = os.path.join(_SCRIPTS, _name)
+    ok(os.path.exists(_p) and os.access(_p, os.X_OK),
+       f"scripts/{_name} is executable")
+
+
+def _live_sh(text: str) -> str:
+    return "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+
+
+_CI_SUITES = re.findall(r"^\s*- run: python3 (test_\w+\.py)\s*$", _WF, re.MULTILINE)
+ok(len(_CI_SUITES) >= 5, "build.yml runs the suites, one line each", _CI_SUITES)
+if _TEST_SH is not None:
+    _T = _live_sh(_TEST_SH)
+    # The tag is a number a check can compare, and it is compared where it is
+    # READ: requirements.txt. A literal copy in the script is the same number
+    # in two places, and the script's copy is the one that would go stale.
+    _LIT = re.findall(r"\bv\d+\.\d+\.\d+\b", _T)
+    ok(not _LIT, "scripts/test.sh carries no literal engine tag — the pin is "
+       "READ from requirements.txt", _LIT)
+    ok("requirements.txt" in _T and "refs/tags/" in _T,
+       "scripts/test.sh reads the tag off requirements.txt")
+    ok("--no-deps" in _T,
+       "scripts/test.sh installs the engine --no-deps, as build.yml does")
+    # The same suites, in the same order, in both directions: a suite the
+    # script skips is one that is green because nobody asked, and a suite the
+    # script runs that CI does not is a bench that disagrees with the release.
+    _M = re.search(r'^SUITES="([^"]*)"\s*$', _T, re.MULTILINE)
+    _SH_SUITES = _M.group(1).split() if _M else []
+    ok(bool(_M) and _SH_SUITES == _CI_SUITES,
+       "scripts/test.sh runs the suites build.yml runs, same order, both directions",
+       f"test.sh {_SH_SUITES} vs build.yml {_CI_SUITES}")
+    ok(all(os.path.exists(os.path.join(HERE, _s)) for _s in _SH_SUITES),
+       "and every suite it names exists",
+       [_s for _s in _SH_SUITES if not os.path.exists(os.path.join(HERE, _s))])
+    ok("exit=" in _T,
+       "scripts/test.sh prints the exit code — the one signal a suite dead "
+       "halfway gives")
+if _SHIP_SH is not None:
+    _S = _live_sh(_SHIP_SH)
+    ok("scripts/test.sh" in _S, "scripts/ship.sh runs test.sh before anything else")
+    ok("14092600+alcor6502@users.noreply.github.com" in _S,
+       "scripts/ship.sh commits with the anonymous identity, on the command")
+    _MAILS = set(re.findall(r"[\w.+-]+@[\w.-]+\.\w+", _SHIP_SH + _TEST_SH))
+    ok(_MAILS <= {"14092600+alcor6502@users.noreply.github.com"},
+       "and no other address appears in either script", _MAILS)
+    ok(re.search(r'git add -- "\$@"', _S) is not None
+       and not re.search(r"git add (-A|--all|\.)\b", _S),
+       "scripts/ship.sh adds the NAMED files, never -A")
+    ok(re.search(r"^BRANCH=main\s*$", _S, re.MULTILINE) is not None
+       and 'HEAD:refs/heads/$BRANCH' in _S,
+       "scripts/ship.sh pushes straight to main")
+    _PUSHES = [l for l in _S.splitlines() if re.search(r"\bgit push\b", l)]
+    ok(bool(_PUSHES) and not any(re.search(r"--tags|refs/tags|\bv\d", l)
+                                for l in _PUSHES),
+       "and never pushes a tag — the tag is born on the release page", _PUSHES)
+    ok("git fetch" in _S and "rev-parse" in _S,
+       "scripts/ship.sh proves the push against the fetched remote hash")
+    ok(re.search(r"^VERSION_FILE=rules\.py\s*$", _S, re.MULTILINE) is not None,
+       "scripts/ship.sh reads VERSION from rules.py, where it lives")
+    ok("server.py" not in _S,
+       "and never looks for it in server.py, where the twin keeps it")
+    ok("releases/new?" in _S,
+       "scripts/ship.sh prints the release link when VERSION moved")
+
 print("\n== the probe runner refuses to pass for lack of work ==")
 
 # The runner is the thing standing between a broken page and a published

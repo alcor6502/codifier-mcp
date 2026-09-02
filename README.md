@@ -1590,7 +1590,11 @@ take.
 <details>
 <summary><b>Testing, and changing this</b></summary>
 
-Five suites. No network, no FastMCP, no Docker.
+Five suites. No network, no FastMCP, no Docker. `scripts/test.sh` builds a
+bench — a venv with the engine installed from the pin in `requirements.txt` —
+and runs them in the order the CI does, stopping at the first red;
+`scripts/ship.sh <message-file> <file>...` runs it, commits the named files,
+pushes to `main` and prints the release link when `VERSION` moved. By hand:
 
 ```
 python3 test_schema.py      # the DDL: triggers, constraints, generation
