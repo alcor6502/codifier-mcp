@@ -1712,6 +1712,44 @@ equals("while a query reads the body, because it has to",
        True)
 
 # =====================================================================
+print("\n— AN ID IS LOOKED UP THROUGH ITS INDEX, NOT BY SCANNING THE VIEW —")
+# `display_id` is computed in the view, so `WHERE display_id=?` was a scan of
+# the whole table: 100 lookups took 17 ms on 300 rules and 43 ms on 1000
+# tasks, growing with every row filed — and every citation, read and close
+# goes through those two lookups. Measured on 7.1.0. The plan is read off
+# the statement the engine actually sends, not off one written here.
+
+p = project()
+_rid = rule(p, title="looked up")
+_tid = p.task_add("advisory", "looked up too", "a body", "architect")["id"]
+
+
+def _plan_of(fn, table):
+    """The statement `fn` sends that touches `table`, and SQLite's plan for it."""
+    seen = []
+    p.cx.set_trace_callback(lambda sql: seen.append(sql))
+    try:
+        fn()
+    finally:
+        p.cx.set_trace_callback(None)
+    stmt = next(s for s in seen if table in s)
+    return [r[3] for r in p.cx.execute("EXPLAIN QUERY PLAN " + stmt)]
+
+
+for _label, _fn, _table, _alias in (
+        ("a rule", lambda: p._rule_row(_rid), "v_rule", "r"),
+        ("a task", lambda: p._task_row(_tid), "v_task", "t")):
+    _plan = _plan_of(_fn, _table)
+    equals(f"{_label} by its ID is a SEARCH, never a SCAN of the table",
+           [step for step in _plan if step.startswith(f"SCAN {_alias}")], [])
+yields("and the short form, in lower case, still resolves onto the same rule",
+       lambda: p._rule_row(f"{_rid[:2].lower()}-{int(_rid[3:]):02d}")["display_id"], _rid)
+yields("and a task in lower case too",
+       lambda: p._task_row(_tid.lower())["display_id"], _tid)
+yields("while an ID nobody handed out is None, not a crash",
+       lambda: (p._rule_row("VA-9999"), p._task_row("TK-9999")), (None, None))
+
+# =====================================================================
 print("\n— THE MESSAGES —")
 # Three guarantees, and each one was watched failing before it was kept: a
 # check nobody has seen go red is not a check.
