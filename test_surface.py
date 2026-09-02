@@ -1885,6 +1885,71 @@ for _f in SERVED_FILES:
        f"Dockerfile: {_f} is copied in — a tool serves it", DOCKER_COPIES)
 ok(not any("test_" in l for l in DOCKER_COPIES), "Dockerfile: no test file is copied in")
 
+# ⚠ AND NEITHER ARE THE PROBES. They live in the repository since the work
+# moved to the cloud environment — there is no laptop to keep them on any
+# more — and they must stay out of the image for the same reason the suites
+# do: they carry a web stack the container has no use for, and shipping a
+# driver of the pages inside the thing it drives is a way to run it by
+# accident. The Dockerfile has no wildcard COPY, so today this holds by
+# construction; the check is here so that the day somebody writes one, the
+# red says which directory it swept in.
+ok(not any("probes" in l for l in DOCKER_COPIES),
+   "Dockerfile: the probes are NOT copied into the image",
+   [l for l in DOCKER_COPIES if "probes" in l])
+
+print("\n== the probes are in the repository, and they parse ==")
+
+# A probe that does not import is a probe nobody runs, and nobody finds out
+# until the day it is needed — which is the day web.py moved. The suites
+# cannot EXECUTE them (no web stack in CI, on purpose) but they can read them,
+# and a file that does not parse is the failure that costs nothing to catch.
+PROBE_DIR = os.path.join(HERE, "probes")
+PROBES = ("probe_ui.py", "probe_link.py", "shots.py")
+for _p in PROBES:
+    _path = os.path.join(PROBE_DIR, _p)
+    ok(os.path.exists(_path), f"probes/{_p} is in the repository")
+    if os.path.exists(_path):
+        _src = source(_path)
+        try:
+            _tree = ast.parse(_src)
+            _parsed = True
+        except SyntaxError as _exc:
+            _tree, _parsed = None, False
+            print(f"        {_p}: {_exc}")
+        ok(_parsed, f"probes/{_p} parses")
+        # ⚠ AND IT DRIVES THIS REPOSITORY, not a copy of it. A probe living in
+        # a subdirectory does not find the root on sys.path by itself — the
+        # working directory is not sys.path[0] for a script — so each one puts
+        # it there, and the day somebody drops that line the probe imports
+        # whatever else is called `rules` and reports on it.
+        if _parsed:
+            _roots = {a.name for n in ast.walk(_tree) if isinstance(n, ast.Import)
+                      for a in n.names} | {n.module for n in ast.walk(_tree)
+                                           if isinstance(n, ast.ImportFrom) and n.module}
+            _local = {m for m in _roots
+                      if os.path.exists(os.path.join(HERE, f"{m.split('.')[0]}.py"))}
+            ok(bool(_local), f"probes/{_p} imports modules of this repository",
+               sorted(_roots))
+            ok("sys.path.insert" in _src,
+               f"probes/{_p} puts the repository root on sys.path, so it drives "
+               f"THIS code and not another copy")
+
+# And what they need is written down where it can be installed, because the
+# project's own requirements.txt must not grow a web stack the image would
+# then carry.
+_PREQ = os.path.join(PROBE_DIR, "requirements.txt")
+ok(os.path.exists(_PREQ), "probes/requirements.txt says what they need")
+if os.path.exists(_PREQ):
+    _pr = source(_PREQ)
+    for _dep in ("httpx", "starlette", "python-multipart"):
+        ok(_dep in _pr, f"probes/requirements.txt names {_dep}")
+    # ⚠ IN THE OTHER DIRECTION TOO: none of it may reach the image.
+    _MAIN_REQ = source(os.path.join(HERE, "requirements.txt"))
+    for _dep in ("httpx", "playwright"):
+        ok(_dep not in _MAIN_REQ,
+           f"requirements.txt does NOT carry {_dep} — that is the probes' stack, "
+           f"and the container does not drive its own pages")
+
 # What starts the container, and it is checked in two files at once because it
 # only works if the two agree. The Dockerfile has a CMD and no ENTRYPOINT; the
 # template's Post Arguments field is EMPTY, because Unraid appends that field
@@ -2211,6 +2276,71 @@ if _MAIN is not None:
 _WF = source(os.path.join(HERE, ".github", "workflows", "build.yml"))
 ok("pip install --no-deps -r requirements.txt" in _WF,
    "build.yml installs the engine for the suites, --no-deps, from the one pin")
+
+# ⚠ AND THE GATE THAT IS NOT ABOUT SOURCE. The probes job is the only thing in
+# this pipeline that renders a page, and a gate can be removed by deleting six
+# lines of YAML — which is a change nothing else here would notice. So the job
+# is pinned, and so is the fact that `image` WAITS for it: a job that runs
+# beside the release instead of before it is a job whose red nobody reads.
+ok(re.search(r"^  probes:\s*$", _WF, re.MULTILINE) is not None,
+   "build.yml has a probes job")
+_NEEDS = re.search(r"^  image:\n(?:\s*#.*\n)*\s*needs:\s*(.+)$", _WF, re.MULTILINE)
+ok(_NEEDS is not None and "probes" in _NEEDS.group(1),
+   "build.yml: the image waits for the probes — the gate BLOCKS the release",
+   _NEEDS.group(1) if _NEEDS else "no needs: on the image job")
+ok(_NEEDS is not None and "test" in _NEEDS.group(1),
+   "build.yml: and it still waits for the suites",
+   _NEEDS.group(1) if _NEEDS else "no needs: on the image job")
+# It must run the runner, not a hand-rolled loop over the probes: the moment CI
+# runs something a person cannot run, the bench stops being evidence.
+ok("python3 probes/run.py" in _WF,
+   "build.yml runs probes/run.py — the same command a person runs")
+ok("pip install -r probes/requirements.txt" in _WF,
+   "build.yml installs the probes' own stack, kept out of the image's")
+# ⚠ And NOT the browser one. shots.py is a look, not a check; pulling a browser
+# into a release gate is minutes of every release spent on nothing.
+#
+# ⚠ COMMENTS STRIPPED FIRST, and this check was written wrong before it was
+# written right: build.yml NAMES requirements-shots.txt in the comment that
+# explains why it is not installed, so a plain substring search failed on a
+# workflow that is correct. The house rule cuts both ways — a search is
+# satisfied by a commented-out line, and refused by a commented-about one.
+_WF_LIVE = "\n".join(l for l in _WF.splitlines()
+                     if not l.lstrip().startswith("#"))
+ok("requirements-shots.txt" not in _WF_LIVE,
+   "build.yml does NOT install the browser stack — shots.py is a look, not a gate",
+   [l for l in _WF_LIVE.splitlines() if "requirements-shots" in l])
+
+print("\n== the probe runner refuses to pass for lack of work ==")
+
+# The runner is the thing standing between a broken page and a published
+# image, so what it REFUSES matters more than what it runs. Three properties,
+# read from its source, each of which has a way of silently disappearing.
+_RUN = os.path.join(PROBE_DIR, "run.py")
+ok(os.path.exists(_RUN), "probes/run.py is in the repository")
+if os.path.exists(_RUN):
+    _RSRC = source(_RUN)
+    _RTREE = ast.parse(_RSRC)
+    # It counts the cases each probe DECLARES and compares. Without this a
+    # probe killed halfway exits 0 having printed a screen of passes — which
+    # is exactly the failure this repository has already paid for twice.
+    ok("ast.parse" in _RSRC and "returncode" in _RSRC,
+       "probes/run.py reads each probe's source AND its exit code")
+    ok(re.search(r"got\s*<\s*want", _RSRC) is not None,
+       "probes/run.py fails a probe that printed fewer cases than its source "
+       "declares — a control that does not count what it watches goes green "
+       "for lack of work")
+    # And a glob that matches nothing must not pass everything.
+    _FLOOR = [n for n in ast.walk(_RTREE) if isinstance(n, ast.Assign)
+              and any(getattr(t, "id", "") == "FLOOR" for t in n.targets)]
+    ok(len(_FLOOR) == 1 and isinstance(_FLOOR[0].value, ast.Constant)
+       and _FLOOR[0].value.value >= 2,
+       "probes/run.py refuses a run that found fewer than two probes",
+       ast.unparse(_FLOOR[0]) if _FLOOR else "no FLOOR")
+    # The floor is a real count, not a wish: there are at least that many.
+    ok(len([p for p in PROBES if p.startswith("probe_")]) >= _FLOOR[0].value.value
+       if _FLOOR else False,
+       "and there really are that many probe_*.py files", PROBES)
 
 print("\n== a malformed call does not print what it carried ==")
 

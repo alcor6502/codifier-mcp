@@ -68,8 +68,40 @@ jobs:
             exit 1
           fi
 
+  probes:
+    # THE PAGES, DRIVEN FOR REAL — and the one gate that is not about source.
+    #
+    # No suite in this repository renders HTML. test_surface reads the AST, so
+    # it can say that a handler calls the engine with a compatible signature
+    # and it cannot say what the handler does with the dictionary that comes
+    # back. Two live defects went out through that gap: a 500 on a write that
+    # had ALREADY succeeded, and a 500 on the rules page for every skill that
+    # survived several releases. Both were found by these probes, by hand,
+    # after the fact. This job is what stops the next one at the tag instead.
+    #
+    # Blocking, and chosen so on purpose: `image` waits for it, so a red probe
+    # is a release that does not happen.
+    #
+    # ⚠ It runs probes/run.py — the SAME command a person runs — and not a
+    # couple of lines of YAML that resemble it. What CI runs and what the bench
+    # runs must be one thing, or the bench is a lie that agrees with you.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: pip install cryptography
+      # The engine from the same pin as everything else, and then the web
+      # stack, which lives in the probes' own file BECAUSE THE IMAGE MUST NOT
+      # CARRY IT. requirements-shots.txt is deliberately not installed: it
+      # pulls a browser for shots.py, which is a look and not a check.
+      - run: pip install --no-deps -r requirements.txt
+      - run: pip install -r probes/requirements.txt
+      - run: python3 probes/run.py
+
   image:
-    needs: test
+    needs: [test, probes]
     runs-on: ubuntu-latest
     permissions:
       contents: read

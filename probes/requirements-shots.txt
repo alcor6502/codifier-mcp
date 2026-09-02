@@ -1,0 +1,6 @@
+# shots.py only, and it is a LOOK rather than a check: it renders the pages in
+# a real browser so a person can judge them. Kept out of requirements.txt so
+# that CI, which installs that one, does not pull a browser stack to run two
+# probes that need no browser at all.
+playwright
+uvicorn

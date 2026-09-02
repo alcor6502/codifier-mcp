@@ -1381,8 +1381,17 @@ yields("and what comes back is enough to render it: the desk, the words, the "
 _other = p.task_add("advisory", "another one entirely", "b", "architect")["id"]
 refused("a ticket does not travel to another entry",
         lambda: p.check_task_link(_other, _tk["token"]), "not valid")
+# ⚠ FLIPPED, not set to a constant. The signature is a hex digest, so
+# `token[:-1] + "0"` IS the token one time in sixteen — a case that goes red
+# once in sixteen runs teaches you to re-run the suite, which is the worst
+# thing a check can teach. It was caught by that very failure, on a green
+# main, and the same defect had already been found and fixed in the live
+# probe of the link.
+_doctored = _tk["token"][:-1] + ("1" if _tk["token"][-1] == "0" else "0")
+yields("and the doctoring really doctors: a forged token is never the good one",
+       lambda: _doctored != _tk["token"], True)
 refused("a doctored signature is refused",
-        lambda: p.check_task_link(_tl, _tk["token"][:-1] + "0"), "not valid")
+        lambda: p.check_task_link(_tl, _doctored), "not valid")
 refused("and so is a token of the wrong shape",
         lambda: p.check_task_link(_tl, "not-a-ticket"), "not valid")
 yields("the refusal for a forgery says NOTHING about what would have worked",

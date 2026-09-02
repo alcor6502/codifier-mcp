@@ -1,0 +1,6 @@
+# What the two probes need, and the image does not. Kept apart from the
+# project's requirements.txt on purpose: none of this ships — the container
+# serves the pages, it does not drive them.
+httpx
+starlette
+python-multipart
