@@ -1950,6 +1950,54 @@ if os.path.exists(_PREQ):
            f"requirements.txt does NOT carry {_dep} — that is the probes' stack, "
            f"and the container does not drive its own pages")
 
+# THE PERMISSIONS PASS, RUN. entrypoint.sh sets root:root, 755 on directories,
+# 644 on files and 600 on the registry — and until 7.1.1 did it in three walks
+# of the volume (a chown -R and two finds), backups included, at every boot.
+# The block is cut out of the script and executed under sh on a tree built
+# here, with `chown` shadowed by a script that records its calls: the modes
+# are read back, and the walks are counted in the source.
+import subprocess                                               # noqa: E402
+import tempfile                                                 # noqa: E402
+
+_ENTRY = source(os.path.join(HERE, "entrypoint.sh"))
+_ENTRY_LIVE = "\n".join(l for l in _ENTRY.splitlines() if not l.lstrip().startswith("#"))
+_PERM = re.search(r'^echo "== permissions.*?\n(.*?)\nexport HOME', _ENTRY, re.S | re.M)
+ok(_PERM is not None, "entrypoint.sh has the permissions block, before HOME is set")
+if _PERM is not None:
+    _pd = tempfile.mkdtemp(prefix="entry-perms-")
+    _vol, _data, _bin = (os.path.join(_pd, d) for d in ("db", "data", "bin"))
+    for d in (_vol, os.path.join(_vol, "One"), os.path.join(_vol, "backup"), _data, _bin):
+        os.makedirs(d, exist_ok=True)
+    for f in ("projects.txt", "One/one.db", "backup/one-20260901T000000Z.db"):
+        with open(os.path.join(_vol, f), "w") as _fh:
+            _fh.write("x")
+        os.chmod(os.path.join(_vol, f), 0o600)
+    os.chmod(os.path.join(_vol, "One"), 0o700)
+    _log = os.path.join(_pd, "chown.log")
+    with open(os.path.join(_bin, "chown"), "w") as _fh:
+        _fh.write(f'#!/bin/sh\necho "$@" >> "{_log}"\n')
+    os.chmod(os.path.join(_bin, "chown"), 0o755)
+    _script = ("set -e\n" + _PERM.group(1).replace(" /data", f' "{_data}"'))
+    _run = subprocess.run(["sh", "-c", _script], capture_output=True, text=True,
+                          env=dict(os.environ, PATH=_bin + os.pathsep + os.environ["PATH"],
+                                   DBDIR=_vol, REGISTRY=os.path.join(_vol, "projects.txt"),
+                                   BACKUP=os.path.join(_vol, "backup")), timeout=60)
+    ok(_run.returncode == 0, "the permissions block runs clean", _run.stderr[:200])
+    _mode = lambda *p: oct(os.stat(os.path.join(_vol, *p)).st_mode & 0o777)
+    ok(_mode("One") == "0o755", "a directory comes out 755", _mode("One"))
+    ok(_mode("One", "one.db") == "0o644", "a database comes out 644", _mode("One", "one.db"))
+    ok(_mode("backup", "one-20260901T000000Z.db") == "0o644",
+       "and so does a backup", _mode("backup", "one-20260901T000000Z.db"))
+    ok(_mode("projects.txt") == "0o600", "while the registry is 600", _mode("projects.txt"))
+    _chowned = open(_log).read() if os.path.exists(_log) else ""
+    ok("one.db" in _chowned and "projects.txt" in _chowned and _data in _chowned,
+       "and every file, and the state directory, was handed to chown",
+       _chowned[:200])
+_WALKS = [l for l in _ENTRY_LIVE.splitlines()
+          if re.match(r"\s*(find|chown -R)\b", l) and "$DBDIR" in l]
+ok(len(_WALKS) == 1, "entrypoint.sh walks the volume ONCE, not once per attribute",
+   _WALKS)
+
 # What starts the container, and it is checked in two files at once because it
 # only works if the two agree. The Dockerfile has a CMD and no ENTRYPOINT; the
 # template's Post Arguments field is EMPTY, because Unraid appends that field

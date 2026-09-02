@@ -26,9 +26,15 @@ echo "== init (root): $DBDIR =="
 mkdir -p "$DBDIR" "$BACKUP" /data
 
 echo "== permissions: root:root, 755 on directories, 644 on files, 600 on the registry =="
-chown -R 0:0 "$DBDIR" /data
-find "$DBDIR" -type d -exec chmod 755 {} +
-find "$DBDIR" -type f ! -path "$REGISTRY" -exec chmod 644 {} +
+# ONE pass over the volume. It was a chown -R and two finds — three walks of
+# every backup ever taken, at every boot — for what one find does in one:
+# the owner and the mode set as each entry is met, the registry skipped by
+# the mode and given its own below. `-exec … +` batches the calls and always
+# succeeds, so the -o chain reads as: a directory gets its two, a file gets
+# its owner and then either IS the registry or gets 644.
+find "$DBDIR" \( -type d -exec chown 0:0 {} + -exec chmod 755 {} + \) \
+    -o \( -type f -exec chown 0:0 {} + \( -path "$REGISTRY" -o -exec chmod 644 {} + \) \)
+chown -R 0:0 /data
 # `if`, and not `[ -f … ] && chmod`: with `set -e` a false test is a failed
 # command and the container would exit 1 on the ONE boot where the registry
 # does not exist yet — the first one.
