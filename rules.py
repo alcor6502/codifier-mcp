@@ -5045,7 +5045,20 @@ class Project:
         except (TypeError, ValueError):
             return 0
 
-    def _task_brief(self, row, now: str) -> dict:
+    # What a brief READS of a row, and therefore all a list needs to SELECT.
+    # The body is not in it: a desk of 217 entries was loading 217 bodies —
+    # 45 MB on a bench of 30 KB bodies — to print ids and titles.
+    TASK_BRIEF_COLS = ("display_id, kind, title, consumer_id, created_by, status, "
+                       "urgent, created_at, closed_at, outcome, reason_dropped")
+
+    def _names(self) -> dict:
+        """consumer_id → name, in ONE query, for the readers that label many
+        rows. Looked up per row it was one query per entry — 217 identical
+        `SELECT name` for a desk of 217, and three per entry on the board."""
+        return {r[0]: r[1] for r in
+                self.cx.execute("SELECT consumer_id, name FROM consumer")}
+
+    def _task_brief(self, row, now: str, names: dict) -> dict:
         """⚠ `kind` is here and NOT in `_desk`, and the difference is what the
         reader DOES with the row. These rows are worked on — filtered, grouped,
         decided about — and a typed field spares every caller a parse of the
@@ -5054,8 +5067,7 @@ class Project:
         by every chat on every open and read by none. The prefix inside the ID
         is already there, and it cannot contradict this."""
         d = {"id": row["display_id"], "kind": row["kind"], "title": row["title"],
-             "owner": self.cx.execute("SELECT name FROM consumer WHERE consumer_id=?",
-                                      (row["consumer_id"],)).fetchone()[0],
+             "owner": names[row["consumer_id"]],
              "created_by": row["created_by"], "status": row["status"],
              "urgent": bool(row["urgent"]), "created_at": row["created_at"]}
         if row["status"] == "pending":
@@ -5081,11 +5093,12 @@ class Project:
         stays green."""
         return (0 if row["urgent"] else 1, row["created_at"])
 
-    def _order_and_cap(self, rows, now: str) -> tuple:
+    def _order_and_cap(self, rows, now: str, names: dict) -> tuple:
         """Urgent first, then the oldest. When the cap cuts, it cuts the FRESH
         work — what has been waiting longest is what a desk needs to see."""
         ordered = sorted(rows, key=self._task_order)
-        return [self._task_brief(r, now) for r in ordered[:TASKS_LIST_CAP]], len(ordered)
+        return ([self._task_brief(r, now, names) for r in ordered[:TASKS_LIST_CAP]],
+                len(ordered))
 
     def task_add(self, consumer: str, title: str, body: str, created_by: str,
                  urgent: bool = False, idem_key: str = "",
@@ -5207,15 +5220,19 @@ class Project:
         a message, and a sender who cannot see it close sends it again."""
         c = self._consumer_row(consumer, live=False)
         now = _now()
+        q = (query or "").strip()
+        # The body comes off disk only when a query has to read it: a list
+        # prints ids and titles, and the bodies stay with `tasks_get`.
+        cols = self.TASK_BRIEF_COLS + (", body" if q else "")
         if authored:
             rows = [r for r in self.cx.execute(
-                "SELECT * FROM v_task WHERE lower(created_by)=? AND consumer_id<>? "
+                f"SELECT {cols} FROM v_task WHERE lower(created_by)=? AND consumer_id<>? "
                 "AND archived_at IS NULL", (_fold(c["name"]), c["consumer_id"]))]
         else:
             rows = [r for r in self.cx.execute(
-                "SELECT * FROM v_task WHERE consumer_id=? AND archived_at IS NULL",
+                f"SELECT {cols} FROM v_task WHERE consumer_id=? AND archived_at IS NULL",
                 (c["consumer_id"],))]
-        q = (query or "").strip()
+        names = self._names()
         if q:
             rows = [r for r in rows
                     if q.lower() in (r["title"] or "").lower()
@@ -5233,8 +5250,8 @@ class Project:
                     or self._age_days(r["closed_at"] or now, now) <= TASKS_RECENT_DAYS]
         pending = [r for r in rows if r["status"] == "pending"]
         closed = [r for r in rows if r["status"] != "pending"]
-        out, total = self._order_and_cap(pending, now)
-        closed_out = sorted((self._task_brief(r, now) for r in closed),
+        out, total = self._order_and_cap(pending, now, names)
+        closed_out = sorted((self._task_brief(r, now, names) for r in closed),
                             key=lambda d: d["closed_at"] or "", reverse=True)
         res = {"project": self.name, "consumer": c["name"],
                "view": "authored" if authored else "desk",
@@ -5279,6 +5296,7 @@ class Project:
                 f"{len(ids)} IDs asked for and the ceiling is {GET_IDS}: REFUSED, not "
                 "trimmed. A silent cut answers a question you did not ask.")
         now, out, missing, size, cut = _now(), [], [], 0, False
+        names = self._names()
         for tid in ids:
             try:
                 row = self._task_row(tid)
@@ -5302,8 +5320,7 @@ class Project:
                 continue
             d = {"id": row["display_id"], "kind": row["kind"], "title": row["title"],
                  "body": self._expand(row["body"]),
-                 "owner": self.cx.execute("SELECT name FROM consumer WHERE consumer_id=?",
-                                          (row["consumer_id"],)).fetchone()[0],
+                 "owner": names[row["consumer_id"]],
                  "created_by": row["created_by"], "urgent": bool(row["urgent"]),
                  "status": row["status"], "outcome": row["outcome"],
                  "reason_dropped": row["reason_dropped"],
@@ -5586,13 +5603,14 @@ class Project:
         moves nothing: no counter, no timestamp."""
         now = _now()
         desks = []
+        names = self._names()
         for c in self.cx.execute("SELECT * FROM consumer ORDER BY name"):
             rows = list(self.cx.execute(
-                "SELECT * FROM v_task WHERE consumer_id=? AND status='pending' "
-                "AND archived_at IS NULL", (c["consumer_id"],)))
+                f"SELECT {self.TASK_BRIEF_COLS} FROM v_task WHERE consumer_id=? "
+                "AND status='pending' AND archived_at IS NULL", (c["consumer_id"],)))
             if not rows and c["retired_at"]:
                 continue
-            out, total = self._order_and_cap(rows, now)
+            out, total = self._order_and_cap(rows, now, names)
             desk = {"consumer": c["name"], "kind": c["kind"],
                     "retired": bool(c["retired_at"]),
                     "open": total,
@@ -5707,8 +5725,7 @@ class Project:
                     if q in (r["title"] or "").lower()
                     or q in (r["body"] or "").lower()
                     or q in (r["display_id"] or "").lower()]
-        names = {c["consumer_id"]: c["name"] for c in
-                 self.cx.execute("SELECT consumer_id, name FROM consumer")}
+        names = self._names()
         groups: dict = {}
         for r in rows:
             head = (names.get(r["consumer_id"], "?") if by == "owner"
@@ -5718,7 +5735,7 @@ class Project:
             # console. Deciding what to do with an entry means reading it, and
             # a page that made you open each one to see the text would be a
             # page you answer by guessing from the title.
-            d = self._task_brief(r, now)
+            d = self._task_brief(r, now, names)
             d["body"] = r["body"]
             groups[_fold(head)]["entries"].append(d)
         out = []

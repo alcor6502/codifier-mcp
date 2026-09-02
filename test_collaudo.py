@@ -1661,6 +1661,57 @@ refused("a rule ID that is a number, retired — refused by name, not crashed",
         lambda: p.retire(123, "why", auth_code=code(p)), "123")
 
 # =====================================================================
+print("\n— A LIST COSTS THE SAME NUMBER OF STATEMENTS WHATEVER ITS LENGTH —")
+# Measured on 7.1.0 with a trace on the connection: tasks_list on a desk of
+# 217 entries was 219 statements, 217 of them the SAME `SELECT name FROM
+# consumer WHERE consumer_id=2`; the board was 1005, the overview 155. A
+# refactor moves such a count without anybody noticing, so the count is
+# pinned here: once for the SHAPE (it does not grow with the rows) and once
+# for the NUMBER.
+
+p = project()
+
+
+def _statements(fn):
+    """How many statements one call sends, and their text."""
+    seen = []
+    p.cx.set_trace_callback(lambda sql: seen.append(sql))
+    try:
+        fn()
+    finally:
+        p.cx.set_trace_callback(None)
+    return seen
+
+
+p.task_add("advisory", "t0", "a body", "architect")
+p.task_add("architect", "t0", "a body", "advisory")
+_one = {"list": _statements(lambda: p.task_list("advisory")),
+        "authored": _statements(lambda: p.task_list("advisory", authored=True)),
+        "overview": _statements(lambda: p.task_overview()),
+        "board": _statements(lambda: p.task_board("owner", "all"))}
+for i in range(40):
+    p.task_add("advisory", f"t{i}", "a body", "architect")
+    p.task_add("architect", f"t{i}", "a body", "advisory")
+_many = {"list": _statements(lambda: p.task_list("advisory")),
+         "authored": _statements(lambda: p.task_list("advisory", authored=True)),
+         "overview": _statements(lambda: p.task_overview()),
+         "board": _statements(lambda: p.task_board("owner", "all"))}
+for _k in ("list", "authored", "overview", "board"):
+    equals(f"{_k}: as many statements for 41 entries as for 1",
+           (len(_one[_k]), len(_many[_k])), (len(_one[_k]), len(_one[_k])))
+equals("and tasks_list is three: the consumer, the list, the names",
+       len(_many["list"]), 3)
+equals("the board is two: the entries, the names", len(_many["board"]), 2)
+# `SELECT *` is refused by name, not only `body`: a star reads the body
+# without ever saying so — measured, the first form of this check let it in.
+equals("and no statement of the plain list reads a body — bodies stay with tasks_get",
+       [s for s in _many["list"] if "v_task" in s
+        and ("body" in s.lower() or "SELECT *" in s)], [])
+equals("while a query reads the body, because it has to",
+       any("body" in s.lower() for s in _statements(lambda: p.task_list("advisory", "t3"))),
+       True)
+
+# =====================================================================
 print("\n— THE MESSAGES —")
 # Three guarantees, and each one was watched failing before it was kept: a
 # check nobody has seen go red is not a check.
