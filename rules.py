@@ -2340,6 +2340,48 @@ class Project:
             "WHERE e.rule_id=? ORDER BY c.name", (rule_id,))]
         return {"groups": groups, "exceptions": exceptions}
 
+    def _audience_map(self) -> dict:
+        """`_audience` for EVERY rule at once, in two statements: rule_id →
+        {groups: [(group_id, name)], exceptions: [(consumer_id, name)]}, each
+        list in name order like the single reading. Session start read the
+        perimeter of every rule in force one rule at a time — 704 statements
+        for 300 rules, measured — and the perimeter tables are one row per
+        pair, so reading them whole costs less than reading them thrice."""
+        out: dict = {}
+        for rid, gid, gname in self.cx.execute(
+                "SELECT a.rule_id, g.group_id, g.name FROM rule_audience_group a "
+                "JOIN consumer_group g ON g.group_id = a.group_id ORDER BY g.name"):
+            out.setdefault(rid, {"groups": [], "exceptions": []})["groups"].append(
+                (gid, gname))
+        for rid, cid, cname in self.cx.execute(
+                "SELECT e.rule_id, c.consumer_id, c.name FROM rule_audience_exception e "
+                "JOIN consumer c ON c.consumer_id = e.consumer_id ORDER BY c.name"):
+            out.setdefault(rid, {"groups": [], "exceptions": []})["exceptions"].append(
+                (cid, cname))
+        return out
+
+    @staticmethod
+    def _names_of(per) -> dict:
+        """One entry of `_audience_map` in the shape `_audience` answers:
+        names only. Missing means a rule with no perimeter rows, which is
+        every universal rule."""
+        per = per or {"groups": [], "exceptions": []}
+        return {"groups": [n for _, n in per["groups"]],
+                "exceptions": [n for _, n in per["exceptions"]]}
+
+    def _membership_map(self) -> dict:
+        """group_id → {consumer_id: is_live}, one statement. The live flag is
+        kept rather than filtered: breadth counts the live members, but the
+        door a caller came through is theirs whether or not they are still
+        live — which is what the single reading did."""
+        out: dict = {}
+        for gid, cid, retired in self.cx.execute(
+                "SELECT m.group_id, m.consumer_id, c.retired_at "
+                "FROM consumer_group_member m "
+                "JOIN consumer c ON c.consumer_id = m.consumer_id"):
+            out.setdefault(gid, {})[cid] = retired is None
+        return out
+
     def _live_consumer_ids(self) -> set:
         return {r[0] for r in self.cx.execute(
             "SELECT consumer_id FROM consumer WHERE retired_at IS NULL")}
@@ -3002,21 +3044,20 @@ class Project:
         work, what was aimed at me by name. Breadth is the count of LIVE
         members, computed now: a group that has emptied out sorts where it
         belongs today, not where it belonged when the rule was written."""
+        # FOUR STATEMENTS whatever the size of the corpus: the rules, the two
+        # perimeter tables, the memberships. It was two to four PER RULE.
         out = {}
+        aud = self._audience_map()
+        members = self._membership_map()
         for row in self.cx.execute("SELECT * FROM v_rule WHERE status='active' "
                                    "ORDER BY domain_id, seq"):
             if row["reach"] == "all":
                 out[row["rule_id"]] = (row, "all", 10 ** 9, ["everyone"])
                 continue
-            direct = self.cx.execute(
-                "SELECT 1 FROM rule_audience_exception WHERE rule_id=? AND consumer_id=?",
-                (row["rule_id"], consumer_id)).fetchone()
-            doors = [r[0] for r in self.cx.execute(
-                "SELECT g.name FROM rule_audience_group a "
-                "JOIN consumer_group g ON g.group_id = a.group_id "
-                "JOIN consumer_group_member m ON m.group_id = g.group_id "
-                "WHERE a.rule_id=? AND m.consumer_id=? ORDER BY g.name",
-                (row["rule_id"], consumer_id))]
+            per = aud.get(row["rule_id"], {"groups": [], "exceptions": []})
+            direct = any(cid == consumer_id for cid, _ in per["exceptions"])
+            doors = [gname for gid, gname in per["groups"]
+                     if consumer_id in members.get(gid, {})]
             if direct:
                 # An exception was declared BY HAND, so it is the door that gets
                 # named even when a group happens to cover the same person: the
@@ -3024,17 +3065,21 @@ class Project:
                 # about the door would be worse than either.
                 out[row["rule_id"]] = (row, "exception", -1, ["by name"])
             elif doors:
-                gids = [r[0] for r in self.cx.execute(
-                    "SELECT a.group_id FROM rule_audience_group a WHERE a.rule_id=?",
-                    (row["rule_id"],))]
-                out[row["rule_id"]] = (row, "group", len(self._members_of(gids)), doors)
+                breadth = len({cid for gid, _ in per["groups"]
+                               for cid, live in members.get(gid, {}).items() if live})
+                out[row["rule_id"]] = (row, "group", breadth, doors)
         return out
 
-    def _brief(self, row, via: str = "", doors=None, fragment: str = "") -> dict:
+    def _brief(self, row, via: str = "", doors=None, fragment: str = "",
+               aud=None) -> dict:
         """A rule in short form: what a list shows. The perimeter is IN it —
         `reach` plus the names — because a line that hides who it binds is a
-        line that gets quoted at the wrong person."""
-        aud = self._audience(row["rule_id"])
+        line that gets quoted at the wrong person. A caller that has already
+        read every perimeter (`_audience_map`) hands this rule's in as `aud`,
+        in the shape `_audience` returns; without it the single reading is
+        made here."""
+        if aud is None:
+            aud = self._audience(row["rule_id"])
         d = {"id": row["display_id"], "type": row["type"], "title": row["title"],
              "reach": row["reach"], "status": row["status"]}
         if row["reach"] == "targeted":
@@ -3181,6 +3226,7 @@ class Project:
         q = (query or "").strip()
         rows = self._reaching(c["consumer_id"])
         ordered = sorted(rows.values(), key=lambda t: (-t[2], t[0]["display_id"]))
+        amap = self._audience_map()
         out, total = [], 0
         for row, via, _breadth, doors in ordered:
             frag = ""
@@ -3190,7 +3236,8 @@ class Project:
                     continue
             total += 1
             if len(out) < RULES_LIST_CAP:
-                out.append(self._brief(row, via, doors, frag))
+                out.append(self._brief(row, via, doors, frag,
+                                       aud=self._names_of(amap.get(row["rule_id"]))))
         head.update({"rules": out, "count": total,
                      "truncated": total > len(out),
                      "desk": self._desk(c["consumer_id"])})
@@ -4931,8 +4978,9 @@ class Project:
             lines += ["## The project", "", prof["brief"], ""]
         if prof["specs"]:
             lines += ["### Specs", "", prof["specs"], ""]
+        amap = self._audience_map()
         for r in rows:
-            aud = self._audience(r["rule_id"])
+            aud = self._names_of(amap.get(r["rule_id"]))
             perimeter = ("everyone" if r["reach"] == "all" else
                          ", ".join(aud["groups"] + [f"{e} (by name)"
                                                     for e in aud["exceptions"]]))

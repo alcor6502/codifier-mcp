@@ -1750,6 +1750,29 @@ yields("while an ID nobody handed out is None, not a crash",
        lambda: (p._rule_row("VA-9999"), p._task_row("TK-9999")), (None, None))
 
 # =====================================================================
+print("\n— SESSION START COSTS THE SAME NUMBER OF STATEMENTS WHATEVER THE CORPUS —")
+# rules_list is the call every chat makes on waking, and on 7.1.0 it was two
+# to four statements PER RULE IN FORCE — 704 for 300 rules, measured — because
+# every perimeter was read one rule at a time, twice. The perimeters are now
+# read whole, in two statements, and the count is pinned the way the lists'
+# count is: the same for one rule and for forty-one.
+
+p = project()
+rule(p, "targeted", groups=["deliberativi"], title="one")
+_one = {"list": _statements(lambda: p.list_rules("advisory")),
+        "export": _statements(lambda: p.export())}
+for i in range(40):
+    rule(p, ("all", "targeted")[i % 2], groups=["automatismi"] if i % 2 else (),
+         exceptions=["architect"] if i % 4 == 1 else (), title=f"rule {i}")
+_many = {"list": _statements(lambda: p.list_rules("advisory")),
+         "export": _statements(lambda: p.export())}
+for _k in ("list", "export"):
+    equals(f"{_k}: as many statements for 41 rules in force as for 1",
+           (len(_one[_k]), len(_many[_k])), (len(_one[_k]), len(_one[_k])))
+equals("and no statement of rules_list reads ONE rule's perimeter (count of those)",
+       len([s for s in _many["list"] if "rule_audience" in s and "WHERE" in s]), 0)
+
+# =====================================================================
 print("\n— THE MESSAGES —")
 # Three guarantees, and each one was watched failing before it was kept: a
 # check nobody has seen go red is not a check.
