@@ -5493,6 +5493,13 @@ class Project:
         new_title = self._task_prose("title", title) if (title or "").strip() \
             else row["title"]
         new_body = self._task_prose("body", body) if (body or "").strip() else row["body"]
+        # THE SAME CEILING AS THE DOOR IT AMENDS. Until 7.1.1 this method had
+        # none, so a body refused at task_add went in at task_amend — 100 KB
+        # stored, measured — and the card's "stops at 64000 bytes" was true
+        # of one of the two doors to the same column.
+        if len(new_body.encode()) > MAX_BODY_BYTES:
+            raise RulesError(f"the body is {len(new_body.encode())} bytes, ceiling "
+                             f"{MAX_BODY_BYTES}.")
         if (new_title == row["title"] and new_body == row["body"]
                 and new_owner["consumer_id"] == owner["consumer_id"]):
             raise RulesError("nothing to amend: only what you pass changes, and nothing "

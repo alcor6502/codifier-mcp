@@ -1574,6 +1574,26 @@ yields("an audience row next to a universal rule is reported before it bites",
 
 
 # =====================================================================
+print("\n— THE SECOND DOOR TO A COLUMN HAS THE SAME CEILING —")
+# task_add refused a body over MAX_BODY_BYTES and task_amend accepted it:
+# 100 KB stored through the door that had no check, while the card said
+# "stops at 64000 bytes". Measured on 7.1.0; the ceiling is read from the
+# constant, so the two doors cannot drift apart again by a number.
+
+p = project()
+tid = p.task_add("advisory", "t", "a body", "architect")["id"]
+_over = "x" * (rules.MAX_BODY_BYTES + 1)
+refused("a body over the ceiling at task_add",
+        lambda: p.task_add("advisory", "t", _over, "architect"), "ceiling")
+refused("and the SAME body over the SAME ceiling at task_amend",
+        lambda: p.task_amend(tid, "advisory", body=_over), "ceiling")
+yields("so the stored body is the one that fit, in bytes",
+       lambda: len(p.cx.execute("SELECT body FROM v_task WHERE display_id=?",
+                                (tid,)).fetchone()[0].encode()), len("a body"))
+allowed("while a body AT the ceiling goes through both doors",
+        lambda: p.task_amend(tid, "advisory", body="y" * rules.MAX_BODY_BYTES))
+
+# =====================================================================
 print("\n— THE MESSAGES —")
 # Three guarantees, and each one was watched failing before it was kept: a
 # check nobody has seen go red is not a check.
