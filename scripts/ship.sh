@@ -92,7 +92,10 @@ lines = open(msg, encoding="utf-8").read().strip().splitlines()
 # release page: strip the trailing block of `Token: value` lines.
 while lines and re.match(r"^[A-Za-z][A-Za-z-]*: ", lines[-1]):
     lines.pop()
-title = f"v{ver} — {lines[0]}"
+# The house writes a version commit as "v7.1.1 — what it carries": the tag
+# is the prefix, so it is not put on twice.
+first = re.sub(rf"^v{re.escape(ver)}\s+[—-]\s+", "", lines[0])
+title = f"v{ver} — {first}"
 body = "\n".join(lines[2:]).strip()
 q = urllib.parse.urlencode({"tag": f"v{ver}", "target": "main", "title": title, "body": body})
 print(f"https://github.com/{repo}/releases/new?{q}")

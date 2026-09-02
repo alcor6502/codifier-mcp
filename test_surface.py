@@ -2463,6 +2463,24 @@ if _SHIP_SH is not None:
        "and never looks for it in server.py, where the twin keeps it")
     ok("releases/new?" in _S,
        "scripts/ship.sh prints the release link when VERSION moved")
+    # The title is built by the Python inside the script; it is RUN here on a
+    # message whose first line already carries the version, the way the house
+    # writes one, because the first release link printed by this script read
+    # "v7.1.1 — v7.1.1 — …". The block is cut out between its heredoc marks.
+    _PY = re.search(r"python3 - .*?<<'PY'\n(.*?)\nPY\n", _SHIP_SH, re.S)
+    ok(_PY is not None, "scripts/ship.sh builds the link in an inline python block")
+    if _PY is not None:
+        import subprocess as _sp, tempfile as _tf
+        _mf = _tf.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8")
+        _mf.write("v9.9.9 — what it carries\n\nthe body\n\nCo-Authored-By: x <x@y.z>\n")
+        _mf.close()
+        _out = _sp.run([sys.executable, "-", _mf.name, "9.9.9", "o/r"], input=_PY.group(1),
+                       capture_output=True, text=True, timeout=30).stdout.strip()
+        ok("title=v9.9.9+%E2%80%94+what+it+carries&" in _out,
+           "and a first line that already starts with the version is not prefixed twice",
+           _out[:160])
+        ok("Co-Authored-By" not in _out and "body=the+body" in _out,
+           "and the trailers stay out of the release body", _out[:160])
 
 print("\n== the probe runner refuses to pass for lack of work ==")
 
