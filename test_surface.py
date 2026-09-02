@@ -4767,6 +4767,27 @@ def _pf_db(root: str) -> str:
     return out.stdout or out.stderr
 
 
+# ONE READING, AS THE DOCSTRING SAYS. Four checks call `_served()`, and until
+# 7.1.1 each call opened every database again — the docstring promised one
+# reading and the code did four. Measured in a process of its own, on the
+# object identity: a cache that was dropped would hand back two lists.
+_1d = tempfile.mkdtemp(prefix="preflight-once-")
+with open(os.path.join(_1d, "projects.txt"), "w", encoding="utf-8") as _fh:
+    _fh.write("Only One | REFCODE12345678 | ADMCODE12345678\n")
+_once = subprocess.run(
+    [sys.executable, "-c",
+     "import preflight; a = preflight._served(); b = preflight._served(); "
+     "print(a is b, len(a[0]))"],
+    capture_output=True, text=True, cwd=HERE, timeout=60,
+    env=dict(os.environ, DB_DIR=_1d))
+ok(_once.stdout.strip() == "True 1",
+   "preflight._served() reads the registry ONCE and hands the same reading to "
+   "every check", (_once.stdout or _once.stderr)[:200])
+_CALLERS = len(re.findall(r"(?<!def )_served\(\)", PREFLIGHT_SRC))
+ok(re.search(r"ONE reading, used by four\s+checks", PREFLIGHT_SRC) is not None
+   and _CALLERS == 4,
+   "and its docstring counts the checks that call it: four, counted", _CALLERS)
+
 # A registry in the v4 SHAPE — a line, a folder, a file — carrying a database
 # from an earlier generation. The layout matters: a check that walked one path
 # would not even find this file.

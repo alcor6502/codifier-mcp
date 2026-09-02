@@ -52,6 +52,7 @@ Selective skip (for local testing only, never in production):
 """
 from __future__ import annotations
 
+import functools
 import os
 import secrets
 import sqlite3
@@ -79,19 +80,27 @@ from rules import DB_ROOT, DEFAULT_AUTH_CODE_MINUTES
 DBDIR = os.environ.get("DB_DIR") or DB_ROOT
 
 
-def _served() -> list[dict]:
-    """Every project the registry serves, opened. ONE reading, used by three
+@functools.lru_cache(maxsize=None)
+def _served() -> tuple:
+    """Every project the registry serves, opened. ONE reading, used by four
     checks, and it is the reading the service itself will do a second later:
     the parse refusal, the generation refusal and the create-if-missing line
     all happen HERE, before anything binds a port.
 
-    The registry is opened and closed around each check rather than held: a
+    ONE reading because of the cache, and the cache is the promise: this
+    docstring said "one reading" while every check that called it opened
+    every database again — the WAL switch, the schema re-applied, the modes
+    fixed, four times over, and the server made it five. Read, not measured
+    to matter on a small volume; it mattered because a docstring that says
+    one and a code that does four is a docstring somebody will trust.
+
+    The registry is opened and closed around the reading rather than held: a
     preflight that kept a connection open would be holding the WAL of a
     database the service is about to open for itself."""
     from rules import Registry            # applies the schema if a file is new
     r = Registry(DBDIR)
     try:
-        return list(r.projects()["projects"]), r.repaired(), r.born_empty(), r.file
+        return tuple(r.projects()["projects"]), r.repaired(), r.born_empty(), r.file
     finally:
         r.close()
 
